@@ -62,15 +62,16 @@ llmscan --base path/to/Qwen3-1.7B --suspect path/to/Qwen3-1.7B-abliterated
 Output goes to `out/<suspect>-vs-<base>/`:
 
 - `pair.txt`: the two models this directory belongs to; a different pair with the same default
-  directory name is refused, pass `--out`;
+  directory name is refused, pass `--out`. llmscan also refuses any non-empty directory without a
+  `pair.txt` (for example a model directory) and never deletes a file;
 - `inventory.csv`, `inventory.txt`: every tensor in either model, marked identical, changed,
   dtype/shape mismatch, or missing from one side;
 - `delta.csv`: for each 2-D tensor, the top-k singular values of ΔW and its effective rank;
 - `spectra.png`, `effective_rank.png`.
 
 Safetensors checkpoints (single file or sharded directory) are memory-mapped and read one tensor at
-a time. The inventory compares tensors in chunks, so it needs no more RAM than a few megabytes
-whatever the model size; the ΔW scan loads the two copies of one 2-D tensor at a time as float32, so
+a time. The inventory compares tensors in chunks, so it needs a few megabytes of RAM
+whatever the model size (4.2 MB of allocations measured on a pair of 160 MB tensors); the ΔW scan loads the two copies of one 2-D tensor at a time as float32, so
 RAM must hold twice the float32 size of the largest 2-D tensor (4 bytes per element each). CPU only; the only
 dependencies are numpy and matplotlib, no torch. GGUF support is next.
 

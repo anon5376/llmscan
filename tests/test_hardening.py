@@ -82,6 +82,20 @@ class TestCrossDtypeComparison(unittest.TestCase):
                 tracemalloc.stop()
         self.assertLess(peak, 4 * n)  # less than ONE float32 copy of the tensor; whole-tensor decoding needs ~9n
 
+    def test_same_dtype_byte_comparison_memory_is_bounded_by_the_chunk_not_the_tensor(self):
+        n = 8_000_000  # 32 MB per side; reading each tensor whole would allocate at least 32 MB
+        a = np.zeros(n, dtype=np.float32)
+        write_safetensors(self.tmp / "a.safetensors", {"x": ("F32", a)})
+        write_safetensors(self.tmp / "b.safetensors", {"x": ("F32", a)})
+        with Checkpoint(self.tmp / "a.safetensors") as ca, Checkpoint(self.tmp / "b.safetensors") as cb:
+            tracemalloc.start()
+            try:
+                self.assertTrue(inventory.bytes_equal(ca, cb, "x"))
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        self.assertLess(peak, 8 << 20)
+
 
 class TestBoundedOpenMaps(unittest.TestCase):
     def test_touching_many_shards_keeps_few_maps_and_file_descriptors(self):
@@ -153,6 +167,12 @@ class TestMalformedHeaders(unittest.TestCase):
         self.assert_rejected(b"\xff\xfe", b"", "invalid safetensors header")
         self.assert_rejected(b"[]", b"", "not a JSON object")
         self.assert_rejected({"x": 5}, b"", "no metadata")
+
+    def test_dtype_and_metadata_of_the_wrong_type(self):
+        for bad in ([], {}, None, 5):
+            self.assert_rejected({"x": {"dtype": bad, "shape": [1], "data_offsets": [0, 4]}}, bytes(4), "unknown dtype")
+        self.assert_rejected({"__metadata__": [], "x": entry("F32", [1], 0, 4)}, bytes(4), "__metadata__ is not a JSON object")
+        self.assert_rejected({"__metadata__": "x", "x": entry("F32", [1], 0, 4)}, bytes(4), "__metadata__ is not a JSON object")
 
     def test_cli_reports_a_malformed_file_as_a_clean_error(self):
         write_raw(self.path, {"x": entry("F32", [1], -4, 0)}, bytes(4))
@@ -226,19 +246,55 @@ class TestCliOutputs(unittest.TestCase):
             (self.tmp / d).mkdir()
             write_safetensors(self.tmp / d / "model.safetensors", {"w": ("F32", np.full((4, 4), 1 if d == "a" else 2, np.float32))})
 
-    def test_stale_spectra_is_not_left_or_reported_when_nothing_changed(self):
+    def test_spectra_is_reported_only_when_written_and_never_deleted(self):
         out = self.tmp / "out"
         base, other = str(self.tmp / "a" / "model.safetensors"), str(self.tmp / "b" / "model.safetensors")
         with mock.patch.object(core, "analyze_delta", fake_analyze):
             fake_analyze.calls = []
             code, stdout, _ = run_cli("--base", base, "--suspect", other, "--out", str(out), "-k", "2")
             self.assertEqual(code, 0)
-            self.assertTrue((out / "spectra.png").exists())
             self.assertIn("spectra.png", stdout)
-            code, stdout, _ = run_cli("--base", base, "--suspect", base, "--out", str(out), "-k", "2")
+            earlier = (out / "spectra.png").read_bytes()
+            code, stdout, err = run_cli("--base", base, "--suspect", base, "--out", str(out), "-k", "2")
         self.assertEqual(code, 0)
-        self.assertFalse((out / "spectra.png").exists())
-        self.assertNotIn("spectra.png", stdout)
+        self.assertNotIn("spectra.png", stdout)  # not written this run
+        self.assertIn("left over", err)
+        self.assertEqual((out / "spectra.png").read_bytes(), earlier)  # and not deleted either
+
+    def test_pair_txt_symlinked_to_a_model_is_not_written_through(self):
+        out = self.tmp / "o"
+        out.mkdir()
+        model = self.tmp / "a" / "model.safetensors"
+        before = model.read_bytes()
+        (out / "pair.txt").symlink_to(model)
+        with self.assertRaises(SystemExit) as cm:
+            run_cli("--base", str(model), "--suspect", str(model), "--out", str(out), "--inventory-only")
+        self.assertIn("symbolic link", str(cm.exception))
+        self.assertEqual(model.read_bytes(), before)
+
+    def test_a_model_directory_is_not_an_output_directory(self):
+        model = self.tmp / "a" / "model.safetensors"
+        other = self.tmp / "b" / "model.safetensors"
+        (self.tmp / "a" / "spectra.png").write_bytes(b"someone else's figure")
+        (self.tmp / "a" / "child").mkdir()
+        (self.tmp / "link").symlink_to(self.tmp / "a", target_is_directory=True)
+        for out in (self.tmp / "a", self.tmp / "a" / "child" / "..", self.tmp / "link"):
+            with self.subTest(out=str(out)), self.assertRaises(SystemExit) as cm:
+                run_cli("--base", str(model), "--suspect", str(other), "--out", str(out))
+            self.assertIn("no pair.txt", str(cm.exception))
+        self.assertEqual((self.tmp / "a" / "spectra.png").read_bytes(), b"someone else's figure")
+        self.assertFalse((self.tmp / "a" / "pair.txt").exists())
+        self.assertFalse((self.tmp / "a" / "inventory.csv").exists())
+
+    def test_default_directory_from_before_the_pair_marker_is_not_overwritten(self):
+        a, b = str(self.tmp / "a" / "model.safetensors"), str(self.tmp / "b" / "model.safetensors")
+        old = self.tmp / "out" / "model.safetensors-vs-model.safetensors"
+        old.mkdir(parents=True)
+        (old / "inventory.csv").write_text("old report\n")
+        with self.assertRaises(SystemExit) as cm:
+            run_cli("--base", a, "--suspect", b, "--inventory-only")
+        self.assertIn("no pair.txt", str(cm.exception))
+        self.assertEqual((old / "inventory.csv").read_text(), "old report\n")
 
     def test_unrelated_runs_on_same_named_files_do_not_share_the_default_directory(self):
         a, b = str(self.tmp / "a" / "model.safetensors"), str(self.tmp / "b" / "model.safetensors")

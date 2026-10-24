@@ -101,11 +101,13 @@ def read_header(file: Path) -> dict[str, TensorInfo]:
     out = {}
     for name, meta in header.items():
         if name == "__metadata__":
+            if not isinstance(meta, dict):
+                raise CheckpointError(f"{file}: __metadata__ is not a JSON object")
             continue
         if not isinstance(meta, dict):
             raise CheckpointError(f"{file}: tensor {name} has no metadata object")
         dtype, shape, offsets = meta.get("dtype"), meta.get("shape"), meta.get("data_offsets")
-        if dtype not in DTYPE_BYTES:
+        if not isinstance(dtype, str) or dtype not in DTYPE_BYTES:
             raise CheckpointError(f"{file}: tensor {name} has unknown dtype {dtype!r}")
         if not isinstance(shape, list) or not all(_whole_number(d) for d in shape):
             raise CheckpointError(f"{file}: tensor {name} has an invalid shape {shape!r}")
@@ -170,7 +172,7 @@ class Checkpoint:
             self._maps[file] = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
         return self._maps[file]
 
-    def iter_bytes(self, name: str, chunk: int = 64 << 20) -> Iterator[bytes]:
+    def iter_bytes(self, name: str, chunk: int = 1 << 20) -> Iterator[bytes]:
         """The tensor's raw bytes, in chunks, without holding the whole tensor in memory."""
         t = self.tensors[name]
         for pos in range(t.start, t.end, chunk):

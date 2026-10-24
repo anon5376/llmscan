@@ -28,6 +28,9 @@ def resolve_model(spec: str) -> Path:
     raise SystemExit(f"llmscan: {spec}: no such file or directory")
 
 
+OUTPUTS = ("pair.txt", "inventory.csv", "inventory.txt", "delta.csv", "spectra.png", "effective_rank.png")
+
+
 def _slug(spec: str) -> str:
     return spec.rstrip("/\\").replace("\\", "/").split("/")[-1]
 
@@ -51,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     base_path, suspect_path = resolve_model(args.base), resolve_model(args.suspect)
     pair = f"base: {base_path.resolve()}\nsuspect: {suspect_path.resolve()}\n"
     marker = out / "pair.txt"
+    if any((out / name).is_symlink() for name in OUTPUTS):
+        raise SystemExit(f"llmscan: {out} holds a symbolic link where llmscan writes; pass --out to choose another directory")
+    if out.is_dir() and not marker.is_file() and any(out.iterdir()):
+        raise SystemExit(f"llmscan: {out} is not empty and has no pair.txt from an earlier llmscan run; "
+                         "pass --out to choose a new or empty directory")
     if args.out is None and marker.is_file() and marker.read_text(encoding="utf-8") != pair:
         raise SystemExit(f"llmscan: {out} holds a different comparison; pass --out to choose another directory\n"
                          + marker.read_text(encoding="utf-8").rstrip())
@@ -78,7 +86,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.inventory_only:
             print(f"wrote {out / 'inventory.csv'}")
             return 0
-        (out / "spectra.png").unlink(missing_ok=True)  # plot_spectra writes nothing without changed tensors
         try:
             delta.scan(base, suspect, rows, out / "delta.csv", k=args.k)
         except NotImplementedError as e:
@@ -90,11 +97,13 @@ def main(argv: list[str] | None = None) -> int:
 
     drows = plots.read_rows(out / "delta.csv")
     pair = f"{_slug(args.suspect)}  vs  base {_slug(args.base)}"
-    plots.plot_spectra(drows, out / "spectra.png", f"Singular values of ΔW = W_suspect − W_base\n{pair}")
+    wrote_spectra = plots.plot_spectra(drows, out / "spectra.png", f"Singular values of ΔW = W_suspect − W_base\n{pair}")
     plots.plot_effective_rank(drows, out / "effective_rank.png", f"Effective rank of ΔW by layer\n{pair}")
     for name in ("inventory.csv", "delta.csv", "spectra.png", "effective_rank.png"):
-        if (out / name).exists():
+        if name != "spectra.png" or wrote_spectra:
             print(f"wrote {out / name}")
+    if not wrote_spectra and (out / "spectra.png").exists():
+        print(f"llmscan: no tensor changed; {out / 'spectra.png'} is left over from an earlier run", file=sys.stderr)
     return 0
 
 
