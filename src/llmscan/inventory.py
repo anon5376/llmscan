@@ -93,7 +93,7 @@ def compare(base: Checkpoint, suspect: Checkpoint) -> list[InventoryRow]:
 
 
 def write_csv(rows: list[InventoryRow], path: Path) -> None:
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(InventoryRow.__dataclass_fields__))
         w.writeheader()
         for r in rows:

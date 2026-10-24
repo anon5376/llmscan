@@ -58,7 +58,7 @@ def shard_files(path: Path) -> list[Path]:
         return [path / "model.safetensors"]
     indexes = sorted(path.glob("*.safetensors.index.json"))
     if indexes:
-        weight_map = json.loads(indexes[0].read_text())["weight_map"]
+        weight_map = json.loads(indexes[0].read_text(encoding="utf-8"))["weight_map"]
         return [path / f for f in sorted(set(weight_map.values()))]
     files = sorted(path.glob("*.safetensors"))
     if not files:
@@ -96,7 +96,7 @@ def tied_embeddings(path: Path) -> bool:
     """True only if the config.json beside the weights explicitly sets tie_word_embeddings."""
     config = (path if path.is_dir() else path.parent) / "config.json"
     try:
-        c = json.loads(config.read_text())
+        c = json.loads(config.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
     return bool(c.get("tie_word_embeddings", (c.get("text_config") or {}).get("tie_word_embeddings", False)))
