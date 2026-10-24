@@ -94,6 +94,33 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
 
 `scripts/fetch_hf.sh <org/name> <revision> <dir>` downloads a model's safetensors at a pinned revision.
 
+## How suspects are ranked
+
+`ranking.csv` orders every non-identical tensor, most suspicious first, with a plain-language
+`reason` per row. A float re-save with identical values counts as identical and is not ranked.
+
+1. **T1, structure:** present in only one model, shape mismatch, or a non-float dtype mismatch.
+2. **T2, unexpected location:** changed, but not an `o_proj`, `down_proj` or `embed_tokens` (GGUF:
+   `attn_output`, `ffn_down`, `token_embd`; MoE expert down projections count as `down_proj`). Change the
+   set with `--expected-kinds`.
+3. **T3, outlier among the expected kinds:** needs `delta.csv`. Effective rank more than 3x the median of
+   the changed tensors of the same kind in the same model (`--outlier-factor`). The yardstick is the model's
+   own median, not rank 1, because Heretic-style rank-3 edits and norm-preserving variants are honest.
+   Assumes fewer than half of a kind's changed tensors are tampered with.
+   A changed tensor of an expected kind whose `delta.csv` stats are unusable is also T3, ordered after the
+   genuine outliers (reason: `stats unusable: <why>`): no row in `delta.csv` (including a tensor the 2-D float
+   scanner skips, such as a 3-D MoE tensor or a quantized GGUF one: `not scanned (<why>)`), both cells blank, or an
+   effective rank or top singular value that is NaN, infinite, zero or negative. Unusable stats are never read
+   as consistent, and an unusable row stays out of every median as a whole. This holds whenever the scan ran, even
+   if `delta.csv` came out empty; only `--inventory-only` or a stopped scan leaves T4 `(no ΔW stats)`.
+4. **T4, consistent with abliteration:** every other changed tensor.
+
+Inside a tier, higher effective rank first, then larger top singular value, then name (unusable stats sort as missing), so the order never depends on the hash seed. With
+`--inventory-only` only T1, T2 and T4 exist. `scripts/score_blind.py --ranking ranking.csv --key key.txt`
+scores a ranking against an answer key of planted tensor names; it rejects a ranking that lists a tensor twice.
+`--outlier-factor` must be a finite number above 0. `ranking.csv` is written only into an `--out` that is new, empty
+or already marked for the same pair by `pair.txt`; llmscan never deletes or overwrites a `ranking.csv` it did not write.
+
 ## Safety
 
 Backdoors planted for this research only ever target localhost sinks. Their weights stay local or
