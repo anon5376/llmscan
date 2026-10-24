@@ -18,6 +18,7 @@ from helpers import tiny_llama, write_safetensors
 from llmscan import cli, core, inventory, rank
 from llmscan.inventory import CHANGED, DTYPE_MISMATCH, IDENTICAL, ONLY_BASE, ONLY_SUSPECT, SHAPE_MISMATCH, InventoryRow
 from llmscan.names import kind_of, layer_of
+from test_hardening import link_or_skip
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "score_blind.py"
@@ -322,6 +323,30 @@ class TestCli(unittest.TestCase):
         with self.assertRaises(SystemExit):
             run_cli(*self.args, "--inventory-only")
         self.assertEqual(target.read_text(encoding="utf-8"), "keep\n")
+
+    def test_a_link_planted_at_ranking_csv_after_the_checks_is_replaced_not_followed(self):
+        out, victim = self.tmp / "out", self.tmp / "victim.csv"
+        victim.write_bytes(b"a checkpoint")
+
+        def plant():
+            (out / "ranking.csv").unlink(missing_ok=True)  # the intruder takes the name over
+            link_or_skip((out / "ranking.csv").symlink_to, victim)
+
+        real_mkdir = Path.mkdir
+        def mkdir_then_plant(self_, *a, **kw):  # after the guards, before the ranking after the inventory
+            real_mkdir(self_, *a, **kw)
+            if self_ == out:
+                plant()
+        def analyze_then_plant(w_base, w_suspect, k):  # before the ranking after the scan
+            plant()
+            return core.DeltaStats(np.array([2.0, 1.0]), 1.0)
+
+        with mock.patch.object(Path, "mkdir", mkdir_then_plant), mock.patch.object(core, "analyze_delta", analyze_then_plant):
+            code, out_text, _ = run_cli(*self.args, "-k", "2")
+        self.assertEqual(code, 0, out_text)
+        self.assertEqual(victim.read_bytes(), b"a checkpoint")
+        self.assertFalse((out / "ranking.csv").is_symlink())
+        self.assertEqual(len(read_ranking(out / "ranking.csv")), len(self.changed))
 
     def test_ranking_order_does_not_depend_on_the_hash_seed(self):
         base = {"model.embed_tokens.weight": ("F32", np.zeros((4, 4), np.float32))}
