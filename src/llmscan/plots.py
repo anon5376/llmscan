@@ -77,15 +77,16 @@ def _unchanged_kinds(rows: list[dict]) -> list[str]:
     return sorted({r["kind"] for r in rows} - changed)
 
 
-def plot_spectra(rows: list[dict], path: Path, title: str) -> None:
-    """One panel per changed matrix kind; one line per layer, light (early) to dark (late)."""
+def plot_spectra(rows: list[dict], path: Path, title: str) -> bool:
+    """One panel per changed matrix kind; one line per layer, light (early) to dark (late).
+    Returns whether a figure was written: nothing is, and nothing is touched, without changed tensors."""
     changed = _changed(rows)
     by_kind = defaultdict(list)
     for r in changed:
         by_kind[r["kind"]].append(r)
     kinds = sorted(by_kind, key=lambda k: (KIND_ORDER.index(k) if k in KIND_ORDER else 99, k))
     if not kinds:
-        return
+        return False
     layers = [int(r["layer"]) for r in changed if r["layer"] not in (None, "")]
     lo, hi = (min(layers), max(layers)) if layers else (0, 1)
 
@@ -117,6 +118,7 @@ def plot_spectra(rows: list[dict], path: Path, title: str) -> None:
         sm.outline.set_edgecolor(AXIS)
     fig.suptitle(title, color=INK, fontsize=11, x=0.01, ha="left")
     fig.savefig(path, dpi=150, facecolor=SURFACE)
+    return True
 
 
 def plot_effective_rank(rows: list[dict], path: Path, title: str) -> None:

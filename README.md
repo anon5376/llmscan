@@ -61,14 +61,36 @@ llmscan --base path/to/Qwen3-1.7B --suspect path/to/Qwen3-1.7B-abliterated
 
 Output goes to `out/<suspect>-vs-<base>/`:
 
+- `pair.txt`: the two models this directory belongs to; a different pair with the same default
+  directory name is refused, pass `--out`. llmscan also refuses any non-empty directory without a
+  `pair.txt` (for example a model directory) and never deletes a file. This holds for `--out` too:
+  a directory marked for another pair is refused, and so is a `pair.txt` with other hard links.
+  A directory carrying this pair's `pair.txt` is llmscan's output directory, and files in it with
+  llmscan's output names (below) are replaced on a rerun, even ones you added later. Every output
+  is written to a temporary file in a private `.llmscan-*` directory (mode 0700 on POSIX) inside
+  `--out`, then renamed onto its name, so a symlink or hard link already on that name is replaced,
+  never written through, and other users cannot redirect a write even in a shared directory such as
+  `/tmp`. On POSIX llmscan refuses, before creating anything, an `--out` that group or others can
+  write to without the sticky bit (or with it, if another ordinary user owns it), and the same
+  for any existing ancestor directory: such a directory can be renamed by another user, who could
+  then plant a symlink where llmscan writes (`/tmp`, which has the sticky bit and is owned by
+  root, and a normal home directory pass). It checks the fully resolved path and writes only
+  through it, and creates missing directories mode 0700. The check reads mode bits only; it does
+  not evaluate ACLs, so an ACL that grants other users write access to a directory is not
+  detected. On Windows, use an output directory that other users cannot write to. llmscan
+  protects your files against mistakes and pre-existing filesystem state (a wrong `--out`, stale
+  outputs, links already in the output directory). Other processes running as you can already
+  change your files directly, so racing them is out of scope;
 - `inventory.csv`, `inventory.txt`: every tensor in either model, marked identical, changed,
   dtype/shape mismatch, or missing from one side;
 - `delta.csv`: for each 2-D tensor, the top-k singular values of ΔW and its effective rank;
 - `spectra.png`, `effective_rank.png`.
 
 Safetensors checkpoints (single file or sharded directory) are memory-mapped and read one tensor at
-a time, so model size is bounded by disk, not RAM. CPU only; the only dependencies are numpy and
-matplotlib, no torch. GGUF support is next.
+a time. The inventory compares tensors in chunks, so it needs a few megabytes of RAM
+whatever the model size (4.2 MB of allocations measured on a pair of 160 MB tensors); the ΔW scan loads the two copies of one 2-D tensor at a time as float32, so
+RAM must hold twice the float32 size of the largest 2-D tensor (4 bytes per element each). CPU only; the only
+dependencies are numpy and matplotlib, no torch. GGUF support is next.
 
 `scripts/fetch_hf.sh <org/name> <revision> <dir>` downloads a model's safetensors at a pinned revision.
 

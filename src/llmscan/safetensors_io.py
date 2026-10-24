@@ -21,9 +21,10 @@ DTYPE_BYTES = {
     "F64": 8, "F32": 4, "F16": 2, "BF16": 2,
     "I64": 8, "I32": 4, "I16": 2, "I8": 1,
     "U64": 8, "U32": 4, "U16": 2, "U8": 1,
-    "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1,
+    "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
 }
 FLOAT_DTYPES = {"F64": "<f8", "F32": "<f4", "F16": "<f2", "BF16": None}  # BF16 decoded by hand
+MAX_OPEN_MAPS = 4  # per checkpoint; each mmap holds a file descriptor, and sharded models have hundreds of files
 
 
 class CheckpointError(ValueError):
@@ -66,7 +67,22 @@ def shard_files(path: Path) -> list[Path]:
     return files
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key {key!r}")
+        out[key] = value
+    return out
+
+
+def _whole_number(v: object) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
 def read_header(file: Path) -> dict[str, TensorInfo]:
+    """Parse and validate one file's header: the tensors must tile the payload exactly,
+    in order, with sizes that match their dtype and shape (the rules of the reference reader)."""
     size = file.stat().st_size
     with open(file, "rb") as f:
         raw_len = f.read(8)
@@ -75,20 +91,43 @@ def read_header(file: Path) -> dict[str, TensorInfo]:
         (header_len,) = struct.unpack("<Q", raw_len)
         if header_len > size - 8:
             raise CheckpointError(f"{file}: header length {header_len} exceeds file size")
-        header = json.loads(f.read(header_len))
+        try:
+            header = json.loads(f.read(header_len), object_pairs_hook=_no_duplicate_keys)
+        except ValueError as e:  # includes bad UTF-8, bad JSON and duplicate tensor names
+            raise CheckpointError(f"{file}: invalid safetensors header: {e}") from None
+    if not isinstance(header, dict):
+        raise CheckpointError(f"{file}: safetensors header is not a JSON object")
     data_start = 8 + header_len
     out = {}
     for name, meta in header.items():
         if name == "__metadata__":
+            if not isinstance(meta, dict):
+                raise CheckpointError(f"{file}: __metadata__ is not a JSON object")
             continue
-        begin, end = meta["data_offsets"]
-        t = TensorInfo(name, meta["dtype"], tuple(meta["shape"]), file, data_start + begin, data_start + end)
+        if not isinstance(meta, dict):
+            raise CheckpointError(f"{file}: tensor {name} has no metadata object")
+        dtype, shape, offsets = meta.get("dtype"), meta.get("shape"), meta.get("data_offsets")
+        if not isinstance(dtype, str) or dtype not in DTYPE_BYTES:
+            raise CheckpointError(f"{file}: tensor {name} has unknown dtype {dtype!r}")
+        if not isinstance(shape, list) or not all(_whole_number(d) for d in shape):
+            raise CheckpointError(f"{file}: tensor {name} has an invalid shape {shape!r}")
+        if not (isinstance(offsets, list) and len(offsets) == 2 and all(_whole_number(o) for o in offsets)):
+            raise CheckpointError(f"{file}: tensor {name} has invalid data_offsets {offsets!r}")
+        begin, end = offsets
+        t = TensorInfo(name, dtype, tuple(shape), file, data_start + begin, data_start + end)
         if t.end > size or t.start > t.end:
             raise CheckpointError(f"{file}: tensor {name} lies outside the file")
-        width = DTYPE_BYTES.get(t.dtype)
-        if width is not None and t.nbytes != t.numel * width:
-            raise CheckpointError(f"{file}: tensor {name} has {t.nbytes} bytes, expected {t.numel * width}")
+        if t.nbytes != t.numel * DTYPE_BYTES[dtype]:
+            raise CheckpointError(f"{file}: tensor {name} has {t.nbytes} bytes, expected {t.numel * DTYPE_BYTES[dtype]}")
         out[name] = t
+    expected = data_start
+    for t in sorted(out.values(), key=lambda t: (t.start, t.end)):
+        if t.start != expected:
+            problem = "overlaps the previous tensor" if t.start < expected else "leaves a gap before it"
+            raise CheckpointError(f"{file}: tensor {t.name} {problem}")
+        expected = t.end
+    if expected != size:
+        raise CheckpointError(f"{file}: {size - expected} bytes after the last tensor are not described by the header")
     return out
 
 
@@ -123,17 +162,39 @@ class Checkpoint:
         self._maps: dict[Path, mmap.mmap] = {}
 
     def _map(self, file: Path) -> mmap.mmap:
-        if file not in self._maps:
-            with open(file, "rb") as f:
-                self._maps[file] = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        """The mapping of `file`, opened on demand. Only the most recently used MAX_OPEN_MAPS stay open."""
+        if file in self._maps:
+            self._maps[file] = self._maps.pop(file)  # mark as most recently used
+            return self._maps[file]
+        while len(self._maps) >= MAX_OPEN_MAPS:
+            self._maps.pop(next(iter(self._maps))).close()
+        with open(file, "rb") as f:
+            self._maps[file] = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
         return self._maps[file]
 
-    def iter_bytes(self, name: str, chunk: int = 64 << 20) -> Iterator[bytes]:
+    def iter_bytes(self, name: str, chunk: int = 1 << 20) -> Iterator[bytes]:
         """The tensor's raw bytes, in chunks, without holding the whole tensor in memory."""
         t = self.tensors[name]
-        mm = self._map(t.file)
         for pos in range(t.start, t.end, chunk):
-            yield mm[pos:min(pos + chunk, t.end)]
+            yield self._map(t.file)[pos:min(pos + chunk, t.end)]
+
+    def iter_values(self, name: str, chunk: int = 1 << 16) -> Iterator[np.ndarray]:
+        """The tensor's values as flat float64 chunks of at most `chunk` elements. Every supported
+        float dtype converts to float64 without loss, and memory stays bounded by the chunk."""
+        t = self.tensors[name]
+        if t.dtype not in FLOAT_DTYPES:
+            raise CheckpointError(f"{name}: dtype {t.dtype} is not a supported float type")
+        width = DTYPE_BYTES[t.dtype]
+        for i in range(0, t.numel, chunk):
+            lo, hi = t.start + i * width, t.start + min(i + chunk, t.numel) * width
+            with memoryview(self._map(t.file)) as whole, whole[lo:hi] as buf:
+                if t.dtype == "BF16":
+                    bits = np.frombuffer(buf, dtype="<u2").astype(np.uint32)
+                    bits <<= 16
+                    out = bits.view(np.float32).astype(np.float64)
+                else:
+                    out = np.frombuffer(buf, dtype=FLOAT_DTYPES[t.dtype]).astype(np.float64)
+            yield out
 
     def to_float32(self, name: str) -> np.ndarray:
         """A fresh, writable float32 copy of one tensor, in its stored shape."""
