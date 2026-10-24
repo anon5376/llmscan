@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 
 from llmscan import delta, inventory
-from llmscan.safetensors_io import Checkpoint, CheckpointError
+from llmscan.checkpoint import open_checkpoint
+from llmscan.safetensors_io import CheckpointError
 
 
 def resolve_model(spec: str) -> Path:
@@ -36,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="llmscan",
         description="Diff a suspect model against the base it claims to come from, one tensor at a time.",
     )
-    ap.add_argument("--base", required=True, help="base model: local directory or .safetensors file, or a cached HF id")
+    ap.add_argument("--base", required=True, help="base model: local directory, .safetensors or .gguf file, or a cached HF id")
     ap.add_argument("--suspect", required=True, help="suspect model, same forms as --base")
     ap.add_argument("--out", type=Path, help="output directory (default: out/<suspect>-vs-<base>)")
     ap.add_argument("-k", type=int, default=32, help="leading singular values kept per tensor (default: 32)")
@@ -46,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out or Path("out") / f"{_slug(args.suspect)}-vs-{_slug(args.base)}"
     out.mkdir(parents=True, exist_ok=True)
     try:
-        base_ckpt, suspect_ckpt = Checkpoint(resolve_model(args.base)), Checkpoint(resolve_model(args.suspect))
+        base_ckpt, suspect_ckpt = open_checkpoint(resolve_model(args.base)), open_checkpoint(resolve_model(args.suspect))
     except CheckpointError as e:
         raise SystemExit(f"llmscan: {e}")
 
