@@ -83,6 +83,25 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
 
 `scripts/fetch_hf.sh <org/name> <revision> <dir>` downloads a model's safetensors at a pinned revision.
 
+## How suspects are ranked
+
+`ranking.csv` orders every non-identical tensor, most suspicious first, with a plain-language
+`reason` per row. A float re-save with identical values counts as identical and is not ranked.
+
+1. **T1, structure:** present in only one model, shape mismatch, or a non-float dtype mismatch.
+2. **T2, unexpected location:** changed, but not an `o_proj`, `down_proj` or `embed_tokens` (GGUF:
+   `attn_output`, `ffn_down`, `token_embd`; MoE expert down projections count as `down_proj`). Change the
+   set with `--expected-kinds`.
+3. **T3, outlier among the expected kinds:** needs `delta.csv`. Effective rank more than 3x the median of
+   the changed tensors of the same kind in the same model (`--outlier-factor`). The yardstick is the model's
+   own median, not rank 1, because Heretic-style rank-3 edits and norm-preserving variants are honest.
+   Assumes fewer than half of a kind's changed tensors are tampered with.
+4. **T4, consistent with abliteration:** every other changed tensor.
+
+Inside a tier, higher effective rank first, then larger top singular value, then name. With
+`--inventory-only` only T1, T2 and T4 exist. `scripts/score_blind.py --ranking ranking.csv --key key.txt`
+scores a ranking against an answer key of planted tensor names.
+
 ## Safety
 
 Backdoors planted for this research only ever target localhost sinks. Their weights stay local or

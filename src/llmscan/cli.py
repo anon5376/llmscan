@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from llmscan import atomic, delta, inventory
+from llmscan import atomic, delta, inventory, rank
 from llmscan.checkpoint import open_checkpoint
 from llmscan.safetensors_io import CheckpointError
 
@@ -36,6 +36,14 @@ def _slug(spec: str) -> str:
     return spec.rstrip("/\\").replace("\\", "/").split("/")[-1]
 
 
+def _rank(args, rows, out: Path, delta_csv: Path | None = None) -> str:
+    """Write ranking.csv (with ΔW stats when delta_csv is given); return the top-N text."""
+    ranked = rank.rank_tensors(rows, rank.read_delta_csv(delta_csv) if delta_csv else None,
+                               args.expected_kinds, args.outlier_factor)
+    atomic.write(out / "ranking.csv", lambda tmp: rank.write_csv(ranked, tmp))
+    return rank.summarize(ranked, args.top)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="llmscan",
@@ -46,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=Path, help="output directory (default: out/<suspect>-vs-<base>)")
     ap.add_argument("-k", type=int, default=32, help="leading singular values kept per tensor (default: 32)")
     ap.add_argument("--inventory-only", action="store_true", help="stop after the tensor inventory")
+    ap.add_argument("--top", type=int, default=10, help="suspects to print from the ranking (default: 10)")
+    ap.add_argument("--expected-kinds", type=rank.parse_kinds, default=rank.DEFAULT_EXPECTED_KINDS, metavar="KINDS",
+                    help="comma-separated matrix kinds an abliteration may change (default: "
+                         + ",".join(sorted(rank.DEFAULT_EXPECTED_KINDS)) + ")")
+    ap.add_argument("--outlier-factor", type=float, default=rank.DEFAULT_OUTLIER_FACTOR, metavar="X",
+                    help="effective rank above X times the median of its kind is an outlier (default: 3)")
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # a redirected Windows console may not encode every path
         if hasattr(stream, "reconfigure"):
@@ -86,16 +100,20 @@ def main(argv: list[str] | None = None) -> int:
         if not rows:
             print("llmscan: neither checkpoint contains any tensors", file=sys.stderr)
             return 1
+        top = _rank(args, rows, out)  # written now, so a failed ΔW scan still leaves a ranking
         if args.inventory_only:
-            print(f"wrote {out / 'inventory.csv'}")
+            print(top + "\n")
+            print(f"wrote {out / 'inventory.csv'}\nwrote {out / 'ranking.csv'}")
             return 0
         try:
             atomic.write(out / "delta.csv", lambda tmp: delta.scan(base, suspect, rows, tmp, k=args.k), keep_partial=True)
         except NotImplementedError as e:
             print(f"ΔW scan stopped: {e}", file=sys.stderr)
-            print(f"wrote {out / 'inventory.csv'}")
+            print(top + "\n")
+            print(f"wrote {out / 'inventory.csv'}\nwrote {out / 'ranking.csv'}")
             return 2
 
+    print(_rank(args, rows, out, out / "delta.csv") + "\n")
     from llmscan import plots  # matplotlib import is slow; only needed from here on
 
     drows = plots.read_rows(out / "delta.csv")
@@ -104,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         drows, tmp, f"Singular values of ΔW = W_suspect − W_base\n{pair}"))
     atomic.write(out / "effective_rank.png", lambda tmp: plots.plot_effective_rank(
         drows, tmp, f"Effective rank of ΔW by layer\n{pair}"))
-    for name in ("inventory.csv", "delta.csv", "spectra.png", "effective_rank.png"):
+    for name in ("inventory.csv", "delta.csv", "ranking.csv", "spectra.png", "effective_rank.png"):
         if name != "spectra.png" or wrote_spectra:
             print(f"wrote {out / name}")
     if not wrote_spectra and (out / "spectra.png").exists():
