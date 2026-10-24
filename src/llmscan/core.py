@@ -1,6 +1,6 @@
 """The ΔW core: weight delta, singular values, effective rank.
 
-MAKSIM WRITES THIS FILE BY HAND.
+THE FOUNDER WRITES THIS FILE BY HAND.
 Agents: do not implement, sketch, or hint at the body of `analyze_delta` (handoff §8).
 
 Everything around it (loading tensors, looping over the checkpoint, CSV, plots) is done.
