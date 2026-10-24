@@ -214,6 +214,43 @@ class TestTiers(unittest.TestCase):
         self.assertEqual(ranked[0].tier, "T4")
         self.assertIn("no ΔW stats", ranked[0].reason)
 
+    def test_a_scan_that_ran_but_wrote_no_rows_is_not_inventory_only(self):
+        rows = [row(layer_name(i)) for i in range(3)]
+        for delta in ({}, {"unrelated.weight": (1.0, 1.0)}):
+            with self.subTest(delta=delta):
+                ranked = rank.rank_tensors(rows, delta)
+                self.assertEqual([r.tier for r in ranked], ["T3"] * 3)
+                self.assertTrue(all(r.reason.startswith("stats unusable: ") for r in ranked), ranked[0].reason)
+        self.assertEqual([r.tier for r in rank.rank_tensors(rows, None)], ["T4"] * 3)
+
+    def test_changed_tensors_the_scanner_skips_are_t3_not_scanned_after_the_outliers(self):
+        def skipped(name, base_dtype="F32", suspect_dtype=None, shape="2x2x2"):
+            return InventoryRow(name, layer_of(name), kind_of(name), CHANGED, base_dtype, suspect_dtype or base_dtype,
+                                shape, shape, 8)
+
+        peers = {layer_name(i): (1.0, 1.0) for i in range(3)} | {layer_name(3): (9.0, 1.0)}
+        rows = [row(layer_name(i)) for i in range(4)] + [
+            skipped("model.layers.0.mlp.experts.down_proj"),
+            skipped("model.layers.1.mlp.experts.down_proj", shape="8"),
+            skipped("model.layers.2.mlp.experts.down_proj", shape=""),
+            skipped("blk.0.ffn_down.weight", "Q4_0", shape="32x2"),
+            skipped("blk.1.ffn_down.weight", "F16", "Q8_0", shape="32x2"),
+            skipped("model.layers.0.self_attn.q_proj.weight", shape="2x2x2"),
+        ]
+        ranked = rank.rank_tensors(rows, peers)
+        tiers = {r.name: r for r in ranked}
+        self.assertEqual([r.tier for r in ranked], ["T2", "T3"] + ["T3"] * 5 + ["T4"] * 3)
+        self.assertEqual(ranked[1].name, layer_name(3))  # the genuine outlier leads the unusable rows
+        for name, why in [("model.layers.0.mlp.experts.down_proj", "shape 2x2x2 is not 2-D"),
+                          ("model.layers.1.mlp.experts.down_proj", "shape 8 is not 2-D"),
+                          ("model.layers.2.mlp.experts.down_proj", "shape scalar is not 2-D"),
+                          ("blk.0.ffn_down.weight", "dtype Q4_0 is not float"),
+                          ("blk.1.ffn_down.weight", "dtype Q8_0 is not float")]:
+            self.assertEqual(tiers[name].tier, "T3", name)
+            self.assertTrue(tiers[name].reason.startswith(f"stats unusable: not scanned ({why})"), tiers[name].reason)
+        self.assertEqual(tiers["model.layers.0.self_attn.q_proj.weight"].tier, "T2")  # unexpected kind stays T2
+        self.assertEqual([r.tier for r in rank.rank_tensors(rows, None)].count("T3"), 0)
+
     def test_names_with_equal_natural_keys_have_one_order(self):
         names = ["added.1.weight", "added.01.weight", "added.001.weight"]
         rows = [row(n, ONLY_SUSPECT) for n in names]
@@ -270,6 +307,23 @@ class TestCli(unittest.TestCase):
         self.assertIn("analyze_delta is not written yet", err)
         self.assertEqual(len(read_ranking(self.tmp / "out" / "ranking.csv")), len(self.changed))
         self.assertIn("ranking: T1=0  T2=1  T3=0  T4=8", out)
+
+    def test_a_changed_tensor_the_scanner_skips_is_never_t4_after_a_full_scan(self):
+        name = "model.layers.0.mlp.experts.down_proj"
+        base = {name: ("F32", np.zeros((2, 2, 2)))}
+        write_safetensors(self.tmp / "b3.safetensors", base)
+        write_safetensors(self.tmp / "s3.safetensors", {name: ("F32", np.ones((2, 2, 2)))})
+        args = ["--base", str(self.tmp / "b3.safetensors"), "--suspect", str(self.tmp / "s3.safetensors")]
+        code, out, _ = run_cli(*args, "--out", str(self.tmp / "full"))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(read_ranking(self.tmp / "full" / "delta.csv"), [])  # the scan ran and wrote no rows
+        (row_,) = read_ranking(self.tmp / "full" / "ranking.csv")
+        self.assertEqual(row_["tier"], "T3")
+        self.assertIn("stats unusable: not scanned (shape 2x2x2 is not 2-D)", row_["reason"])
+        code, out, _ = run_cli(*args, "--out", str(self.tmp / "inv"), "--inventory-only")
+        self.assertEqual(code, 0, out)
+        (row_,) = read_ranking(self.tmp / "inv" / "ranking.csv")
+        self.assertEqual((row_["tier"], "(no ΔW stats)" in row_["reason"]), ("T4", True))
 
     def test_delta_stats_re_rank_after_a_successful_scan(self):
         ranks = iter(sorted(self.changed, key=inventory.natural_key))

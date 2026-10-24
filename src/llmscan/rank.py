@@ -18,8 +18,10 @@ in the inventory. Every ranked tensor lands in one tier and carries a human-read
                      fewer than half of a kind's changed tensors are tampered with.
     T4 consistent    every other changed tensor.
 
-When delta.csv is supplied, a changed expected-kind tensor whose stats are unusable is T3 with reason
-"stats unusable: <why>", never T4: no delta row, both cells blank, or any given effective_rank / sv_001
+`delta` is None when no ΔW scan ran (--inventory-only, stub core): every other changed tensor is T4
+"(no ΔW stats)". Any mapping, even an empty one, means the scan ran. Then a changed expected-kind tensor
+whose stats are unusable is T3 with reason "stats unusable: <why>", never T4: no delta row (a tensor the
+2-D float scanner skips says "not scanned (<why>)"), both cells blank, or any given effective_rank / sv_001
 that is NaN, infinite, zero or negative. An unusable row is excluded as a whole from every median.
 
 Inside a tier: effective_rank, then sv_001, both descending; tensors without usable stats follow in
@@ -38,6 +40,7 @@ from pathlib import Path
 
 from llmscan.delta import sv_field
 from llmscan.inventory import CHANGED, IDENTICAL, ONLY_BASE, ONLY_SUSPECT, SHAPE_MISMATCH, InventoryRow, natural_key
+from llmscan.safetensors_io import FLOAT_DTYPES
 
 T1, T2, T3, T4 = "T1", "T2", "T3", "T4"
 TIERS = (T1, T2, T3, T4)
@@ -116,6 +119,16 @@ def _unusable(stats: tuple[float | None, float | None]) -> str | None:
     return None
 
 
+def _not_scanned(r: InventoryRow) -> str:
+    """Why a changed tensor has no delta.csv row; mirrors what delta.scan visits (2-D, float on both sides)."""
+    if r.base_shape.count("x") != 1:
+        return f"not scanned (shape {r.base_shape or 'scalar'} is not 2-D)"
+    for dtype in (r.base_dtype, r.suspect_dtype):
+        if dtype not in FLOAT_DTYPES:
+            return f"not scanned (dtype {dtype} is not float)"
+    return "no ΔW stats for this tensor"
+
+
 def rank_tensors(
     rows: list[InventoryRow],
     delta: dict[str, tuple[float | None, float | None]] | None = None,
@@ -123,10 +136,11 @@ def rank_tensors(
     factor: float = DEFAULT_OUTLIER_FACTOR,
 ) -> list[RankedRow]:
     check_factor(factor)
+    scanned = delta is not None  # an empty mapping is a scan that produced no rows, not "no scan"
     delta = delta or {}
     expected = frozenset(canonical_kind(k) for k in expected)
     stats = {r.name: delta.get(r.name, (None, None)) for r in rows}
-    bad = {r.name: _unusable(stats[r.name]) if delta else None for r in rows}
+    bad = {r.name: None if not scanned else _unusable(stats[r.name]) if r.name in delta else _not_scanned(r) for r in rows}
 
     # medians per kind over changed, expected-kind tensors; effective_rank and sv_001 kept apart
     groups: dict[tuple[str, int], list[float]] = defaultdict(list)
@@ -164,7 +178,7 @@ def rank_tensors(
                 ranked.append((T3, r, f"{label} {value:.4g} is {value / median:.1f}x the median {median:.4g} of changed {kind}"
                                       f" tensors (threshold {factor:g}x)"))
             else:
-                note = "" if delta else " (no ΔW stats)"
+                note = "" if scanned else " (no ΔW stats)"
                 ranked.append((T4, r, f"changed {r.kind}, consistent with abliteration{note}"))
 
     def key(item):

@@ -97,9 +97,11 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
    own median, not rank 1, because Heretic-style rank-3 edits and norm-preserving variants are honest.
    Assumes fewer than half of a kind's changed tensors are tampered with.
    A changed tensor of an expected kind whose `delta.csv` stats are unusable is also T3, ordered after the
-   genuine outliers (reason: `stats unusable: <why>`): no row in `delta.csv`, both cells blank, or an
+   genuine outliers (reason: `stats unusable: <why>`): no row in `delta.csv` (including a tensor the 2-D float
+   scanner skips, such as a 3-D MoE tensor or a quantized GGUF one: `not scanned (<why>)`), both cells blank, or an
    effective rank or top singular value that is NaN, infinite, zero or negative. Unusable stats are never read
-   as consistent, and an unusable row stays out of every median as a whole.
+   as consistent, and an unusable row stays out of every median as a whole. This holds whenever the scan ran, even
+   if `delta.csv` came out empty; only `--inventory-only` or a stopped scan leaves T4 `(no ΔW stats)`.
 4. **T4, consistent with abliteration:** every other changed tensor.
 
 Inside a tier, higher effective rank first, then larger top singular value, then name (unusable stats sort as missing), so the order never depends on the hash seed. With
