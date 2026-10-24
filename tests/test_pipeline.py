@@ -167,9 +167,10 @@ class TestInventoryAndCli(unittest.TestCase):
         self.assertEqual(rows["model.embed_tokens.weight"], inventory.IDENTICAL)
         self.assertEqual(rows["model.layers.0.self_attn.q_proj.weight"], inventory.IDENTICAL)
 
-    def test_cli_stops_cleanly_while_core_is_a_stub(self):
-        code, out, err = run_cli("--base", str(self.tmp / "base.safetensors"), "--suspect", str(self.tmp / "suspect"),
-                                 "--out", str(self.tmp / "out"))
+    def test_cli_stops_cleanly_when_the_core_is_not_implemented(self):
+        with mock.patch.object(core, "analyze_delta", side_effect=NotImplementedError("analyze_delta is not written yet")):
+            code, out, err = run_cli("--base", str(self.tmp / "base.safetensors"), "--suspect", str(self.tmp / "suspect"),
+                                     "--out", str(self.tmp / "out"))
         self.assertEqual(code, 2)
         self.assertIn("analyze_delta is not written yet", err)
         self.assertTrue((self.tmp / "out" / "inventory.csv").exists())

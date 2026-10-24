@@ -301,8 +301,9 @@ class TestCli(unittest.TestCase):
         shown = [line for line in out.splitlines() if line.strip().startswith(("1 ", "2 ", "3 ", "4 "))]
         self.assertEqual(len(shown), 3)
 
-    def test_ranking_is_written_when_the_core_is_a_stub(self):
-        code, out, err = run_cli(*self.args)
+    def test_ranking_is_written_when_the_core_is_not_implemented(self):
+        with mock.patch.object(core, "analyze_delta", side_effect=NotImplementedError("analyze_delta is not written yet")):
+            code, out, err = run_cli(*self.args)
         self.assertEqual(code, 2)
         self.assertIn("analyze_delta is not written yet", err)
         self.assertEqual(len(read_ranking(self.tmp / "out" / "ranking.csv")), len(self.changed))
