@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llmscan"
+version = "0.0.1"
+description = "Diff an open-weight LLM against its base model, one tensor at a time, and rank backdoor suspicion."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+]
+
+[project.scripts]
+llmscan = "llmscan.cli:main"
