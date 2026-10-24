@@ -33,25 +33,50 @@ OUTPUTS = ("pair.txt", "inventory.csv", "inventory.txt", "delta.csv", "spectra.p
            "ranking.csv")  # every file llmscan writes; none is ever written through a link
 
 
-def _refuse_shared_location(out: Path) -> None:
-    """On POSIX, refuse an --out whose directory, or any existing ancestor, other users could rename.
+def _refuse_shared_location(out: Path) -> Path:
+    """Return `out` fully resolved, or refuse it on POSIX if other users could rename its chain.
 
-    Write permission for group or others without the sticky bit is enough to rename a directory
-    (including llmscan's private .llmscan-* one) and plant a symlink at its name. Runs before
-    anything is created. Windows has no such mode bits, so it is skipped there.
+    Every later operation must use the returned path, so the chain checked here is the chain
+    written. A directory is unsafe when group or others can write to it and either it has no
+    sticky bit or the sticky bit is set but another ordinary user owns it (a sticky directory's
+    owner can still rename any entry). Write permission is enough to rename a directory
+    (including llmscan's private .llmscan-* one) and plant a symlink at its name. Windows has no
+    such mode bits, so the check is skipped there.
     """
-    if os.name == "nt":
-        return
     resolved = out.resolve()
+    if os.name == "nt":
+        return resolved
     for d in (resolved, *resolved.parents):
         try:
-            mode = d.stat().st_mode
+            st = d.stat()
         except OSError:  # does not exist yet (or is not a directory): llmscan will create it
             continue
-        if stat.S_ISDIR(mode) and mode & (stat.S_IWGRP | stat.S_IWOTH) and not mode & stat.S_ISVTX:
-            raise SystemExit(f"llmscan: {d} is writable by other users without the sticky bit, so they could "
-                             f"replace llmscan's output; choose a directory only you can write to (pass --out)"
-                             + (f"\n(unsafe directory is an ancestor of {resolved})" if d != resolved else ""))
+        if not (stat.S_ISDIR(st.st_mode) and st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            continue
+        if not st.st_mode & stat.S_ISVTX:
+            why = "writable by other users without the sticky bit"
+        elif st.st_uid not in (0, os.geteuid()):
+            why = "sticky but owned by another user, who can still rename its entries"
+        else:
+            continue
+        raise SystemExit(f"llmscan: {d} is {why}, so they could replace llmscan's output; "
+                         f"choose a directory only you can write to (pass --out)"
+                         + (f"\n(unsafe directory is an ancestor of {resolved})" if d != resolved else ""))
+    return resolved
+
+
+def _create_private_dirs(out: Path) -> None:
+    """Create each missing component of `out` mode 0700 (a umask only removes bits), then re-check the chain."""
+    for d in reversed((out, *out.parents)):
+        if not d.is_dir():
+            try:
+                os.mkdir(d, 0o700)
+            except FileExistsError:
+                pass  # a file, or a directory that appeared meanwhile: the check below decides
+            except OSError as e:
+                raise SystemExit(f"llmscan: cannot create {d}: {e.strerror}")
+    if _refuse_shared_location(out) != out or not out.is_dir():
+        raise SystemExit(f"llmscan: {out} changed while llmscan was creating it; pass --out to choose another directory")
 
 
 def _slug(spec: str) -> str:
@@ -74,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(errors="replace")
 
     out = args.out or Path("out") / f"{_slug(args.suspect)}-vs-{_slug(args.base)}"
-    _refuse_shared_location(out)
+    out = _refuse_shared_location(out)
     base_path, suspect_path = resolve_model(args.base), resolve_model(args.suspect)
     pair = f"base: {base_path.resolve()}\nsuspect: {suspect_path.resolve()}\n"
     marker = out / "pair.txt"
@@ -88,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     if marker.is_file() and (held := marker.read_text(encoding="utf-8", errors="replace")) != pair:
         raise SystemExit(f"llmscan: {out} holds a different comparison; pass --out to choose another directory\n"
                          + held.rstrip())
-    out.mkdir(parents=True, exist_ok=True)
+    _create_private_dirs(out)
     atomic.write_text(marker, pair)
     try:
         base_ckpt, suspect_ckpt = open_checkpoint(base_path), open_checkpoint(suspect_path)

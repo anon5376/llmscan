@@ -449,6 +449,62 @@ class TestSharedOutputLocation(unittest.TestCase):
         self.assertEqual(run_cli(*self.args, "--out", str(shared / "new" / "deeper"))[0], 0)
         self.assertTrue((shared / "new" / "deeper" / "inventory.csv").is_file())
 
+    def test_writes_go_through_the_checked_path_not_a_swappable_alias(self):
+        shared = self.dir_with_mode("shared", 0o777)
+        safe, victim = self.dir_with_mode("safe", 0o700), self.dir_with_mode("victim", 0o700)
+        alias = shared / "alias"
+        link_or_skip(alias.symlink_to, safe, target_is_directory=True)
+        real_open = cli.open_checkpoint
+
+        def swap_then_open(path):  # another user renames the alias after the guard passed
+            alias.unlink()
+            alias.symlink_to(victim, target_is_directory=True)
+            return real_open(path)
+
+        with mock.patch.object(cli, "open_checkpoint", swap_then_open):
+            self.assertEqual(run_cli(*self.args, "--out", str(alias))[0], 0)
+        self.assertEqual(os.listdir(victim), [])
+        self.assertTrue((safe / "inventory.csv").is_file())
+
+    def test_new_output_directories_are_private_under_a_permissive_umask(self):
+        out = self.tmp / "new" / "deeper"
+        old = os.umask(0)
+        try:
+            self.assertEqual(run_cli(*self.args, "--out", str(out))[0], 0)
+        finally:
+            os.umask(old)
+        for d in (out, out.parent):
+            self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700)
+
+    def test_refused_when_a_directory_it_created_is_not_safe(self):
+        real_mkdir = os.mkdir
+
+        def mkdir_then_open_up(path, mode=0o777):  # as if an inherited ACL or default widened it
+            real_mkdir(path, mode)
+            os.chmod(path, 0o777)
+
+        with mock.patch.object(cli.os, "mkdir", mkdir_then_open_up), self.assertRaises(SystemExit) as cm:
+            run_cli(*self.args, "--out", str(self.tmp / "new"))
+        self.assertIn("sticky bit", str(cm.exception))
+        self.assertEqual(os.listdir(self.tmp / "new"), [])
+
+    def test_sticky_directory_owned_by_another_user_is_refused(self):
+        out = self.dir_with_mode("stolen", 0o1777)
+        with mock.patch.object(cli.os, "geteuid", return_value=os.geteuid() + 1):
+            with self.assertRaises(SystemExit) as cm:
+                run_cli(*self.args, "--out", str(out))
+            self.assertIn("owned by another user", str(cm.exception))
+            self.assertEqual(os.listdir(out), [])
+            plain = self.dir_with_mode("plain", 0o755)  # not writable by others: owner does not matter
+            self.assertEqual(run_cli(*self.args, "--out", str(plain))[0], 0)
+
+    @unittest.skipUnless(os.path.isdir("/tmp") and os.stat("/tmp").st_uid == 0 and os.stat("/tmp").st_mode & stat.S_ISVTX,
+                         "needs a root-owned sticky /tmp")
+    def test_root_owned_sticky_directory_is_accepted(self):
+        out = Path(tempfile.mkdtemp(dir="/tmp")) / "o"
+        self.addCleanup(shutil.rmtree, out.parent, True)
+        self.assertEqual(run_cli(*self.args, "--out", str(out))[0], 0)
+
 
 class TestAtomicWrite(unittest.TestCase):
     def setUp(self):
