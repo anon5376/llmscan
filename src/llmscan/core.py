@@ -30,8 +30,9 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
     """Spectrum of the change from `w_base` to `w_suspect` for one weight matrix.
 
     Inputs
-        w_base, w_suspect: 2-D float32 arrays of identical shape (out_features, in_features),
-            as stored in the checkpoint. Both are fresh copies; modifying them is fine.
+        w_base, w_suspect: 2-D arrays of identical shape (out_features, in_features) and one
+            dtype, as stored in the checkpoint: float32, or float64 when either side is F64.
+            Both are fresh copies; modifying them is fine.
         k: how many leading singular values to return, k >= 1.
 
     Returns DeltaStats

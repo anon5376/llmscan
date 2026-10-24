@@ -1,9 +1,14 @@
+import csv
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import numpy as np
 
-from llmscan import core
+from helpers import write_safetensors
+from llmscan import core, delta, inventory
+from llmscan.safetensors_io import Checkpoint
 
 
 def orthonormal(rng, n, r):
@@ -93,6 +98,25 @@ class TestAnalyzeDelta(unittest.TestCase):
             core.analyze_delta(np.zeros(4, np.float32), np.zeros(4, np.float32), k=1)
         with self.assertRaises(ValueError):
             core.analyze_delta(np.zeros((2, 2), np.float32), np.ones((2, 2), np.float32), k=0)
+
+
+class TestScanPrecision(unittest.TestCase):
+    def test_f64_change_below_float32_resolution_keeps_its_rank(self):
+        base = np.ones((16, 16))
+        suspect = base + np.eye(16) * 5e-8  # a full-rank change that float32 would round to zero
+        suspect[0, 0] = 1 + 1e-7
+        energy = np.linalg.svd(suspect - base, compute_uv=False) ** 2
+        expected = energy.sum() ** 2 / np.sum(energy ** 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            name = "model.layers.0.self_attn.o_proj.weight"
+            write_safetensors(tmp / "a.safetensors", {name: ("F64", base)})
+            write_safetensors(tmp / "b.safetensors", {name: ("F64", suspect)})
+            with Checkpoint(tmp / "a.safetensors") as a, Checkpoint(tmp / "b.safetensors") as b:
+                delta.scan(a, b, inventory.compare(a, b), tmp / "delta.csv", k=4, log=lambda _: None)
+            (row,) = csv.DictReader(open(tmp / "delta.csv", encoding="utf-8"))
+        self.assertGreater(expected, 10)
+        self.assertAlmostEqual(float(row["effective_rank"]), expected, places=3)
 
 
 if __name__ == "__main__":
