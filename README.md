@@ -1,5 +1,7 @@
 # llmscan
 
+[![CI](https://github.com/anon5376/llmscan/actions/workflows/ci.yml/badge.svg)](https://github.com/anon5376/llmscan/actions/workflows/ci.yml)
+
 Check whether the abliterated or uncensored model you downloaded is only what it claims to be.
 llmscan diffs the suspect's weights against the base model it says it came from, one tensor at a
 time, and reports where and how they differ.

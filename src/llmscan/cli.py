@@ -42,6 +42,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-k", type=int, default=32, help="leading singular values kept per tensor (default: 32)")
     ap.add_argument("--inventory-only", action="store_true", help="stop after the tensor inventory")
     args = ap.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):  # a redirected Windows console may not encode every path
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
 
     out = args.out or Path("out") / f"{_slug(args.suspect)}-vs-{_slug(args.base)}"
     out.mkdir(parents=True, exist_ok=True)
@@ -59,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         summary = inventory.summarize(rows)
         for label, ck in (("base", base), ("suspect", suspect)):
             summary += "".join(f"\n{label}: ignored {n} ({why})" for n, why in ck.ignored.items())
-        (out / "inventory.txt").write_text(summary + "\n")
+        (out / "inventory.txt").write_text(summary + "\n", encoding="utf-8")
         print(summary + "\n")
         if args.inventory_only:
             print(f"wrote {out / 'inventory.csv'}")

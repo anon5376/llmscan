@@ -40,7 +40,7 @@ def scan(
     ]
     n_core = sum(r.status != IDENTICAL for r in todo)
     done = 0
-    with open(out_csv, "w", newline="") as f:
+    with open(out_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS + [sv_field(i + 1) for i in range(k)])
         w.writeheader()
         for r in todo:

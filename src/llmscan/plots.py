@@ -33,7 +33,7 @@ LAYER_CMAP = LinearSegmentedColormap.from_list(
 
 
 def read_rows(path: Path) -> list[dict]:
-    with open(path, newline="") as f:
+    with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 

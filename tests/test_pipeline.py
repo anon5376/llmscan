@@ -1,6 +1,9 @@
 import contextlib
 import csv
 import io
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -89,6 +92,32 @@ class TestCheckpointLayout(unittest.TestCase):
         (self.tmp / "config.json").write_text('{"tie_word_embeddings": false}')
         with Checkpoint(self.tmp) as c:
             self.assertIn("lm_head.weight", c.tensors)
+
+
+class TestPortability(unittest.TestCase):
+    """Windows defaults: JSON read in the locale encoding, stdout that cannot encode a path."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_json_beside_weights_is_read_as_utf8(self):
+        t = {"model.embed_tokens.weight": ("F32", np.ones((4, 2), np.float32)), "lm_head.weight": ("F32", np.ones((4, 2), np.float32))}
+        write_safetensors(self.tmp / "model.safetensors", t)
+        (self.tmp / "config.json").write_text('{"architectures": ["Qwén"], "tie_word_embeddings": true}', encoding="utf-8")
+        code = (f"from llmscan.safetensors_io import Checkpoint\n"
+                f"c = Checkpoint({str(self.tmp)!r})\n"
+                f"raise SystemExit('lm_head.weight' in c.tensors)")
+        env = {**os.environ, "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0", "LC_ALL": "C"}  # legacy default encoding
+        done = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_cli_survives_stdout_that_cannot_encode_the_path(self):
+        write_safetensors(self.tmp / "Δ-modèle.safetensors", {"x": ("F32", np.ones((2, 2), np.float32))})
+        stdout = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+        with contextlib.redirect_stdout(stdout):
+            code = cli.main(["--base", str(self.tmp / "Δ-modèle.safetensors"), "--suspect", str(self.tmp / "Δ-modèle.safetensors"),
+                             "--out", str(self.tmp / "out"), "--inventory-only"])
+        self.assertEqual(code, 0)
 
 
 class TestNames(unittest.TestCase):
