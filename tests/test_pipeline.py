@@ -67,6 +67,30 @@ class TestReader(unittest.TestCase):
         self.assertEqual(b"".join(chunks), a.tobytes())
 
 
+class TestCheckpointLayout(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_prefers_model_safetensors_over_index_like_transformers(self):
+        one = {"x": ("F32", np.ones((2, 2), np.float32))}
+        write_sharded(self.tmp, [{"x": ("F32", np.zeros((2, 2), np.float32))}])
+        write_safetensors(self.tmp / "model.safetensors", one)
+        with Checkpoint(self.tmp) as c:
+            self.assertEqual([f.name for f in c.files], ["model.safetensors"])
+            np.testing.assert_array_equal(c.to_float32("x"), 1)
+
+    def test_tied_lm_head_is_set_aside(self):
+        t = {"model.embed_tokens.weight": ("F32", np.ones((4, 2), np.float32)), "lm_head.weight": ("F32", np.ones((4, 2), np.float32))}
+        write_safetensors(self.tmp / "model.safetensors", t)
+        (self.tmp / "config.json").write_text('{"tie_word_embeddings": true}')
+        with Checkpoint(self.tmp) as c:
+            self.assertNotIn("lm_head.weight", c.tensors)
+            self.assertIn("lm_head.weight", c.ignored)
+        (self.tmp / "config.json").write_text('{"tie_word_embeddings": false}')
+        with Checkpoint(self.tmp) as c:
+            self.assertIn("lm_head.weight", c.tensors)
+
+
 class TestNames(unittest.TestCase):
     def test_layer_and_kind(self):
         self.assertEqual(layer_of("model.layers.12.mlp.down_proj.weight"), 12)
@@ -90,6 +114,8 @@ class TestInventoryAndCli(unittest.TestCase):
             suspect[name] = (dt, w + np.outer(np.ones(w.shape[0]), np.ones(w.shape[1])) / 16)
         suspect["model.norm.weight"] = ("BF16", base["model.norm.weight"][1] + 0.5)
         suspect["model.layers.1.self_attn.q_proj.weight"] = ("F16", base["model.layers.1.self_attn.q_proj.weight"][1])
+        suspect["model.layers.1.self_attn.k_proj.weight"] = ("F32", base["model.layers.1.self_attn.k_proj.weight"][1] + 1 / 16)
+        suspect["model.layers.0.self_attn.v_proj.weight"] = ("I64", base["model.layers.0.self_attn.v_proj.weight"][1])
         suspect["model.layers.0.mlp.up_proj.weight"] = ("BF16", np.zeros((17, 8), np.float32))
         del suspect["lm_head.weight"]
         suspect["model.layers.0.self_attn.trigger.weight"] = ("BF16", np.ones((2, 8), np.float32))
@@ -103,7 +129,9 @@ class TestInventoryAndCli(unittest.TestCase):
         self.assertEqual(rows["model.layers.0.self_attn.o_proj.weight"], inventory.CHANGED)
         self.assertEqual(rows["model.layers.1.mlp.down_proj.weight"], inventory.CHANGED)
         self.assertEqual(rows["model.norm.weight"], inventory.CHANGED)
-        self.assertEqual(rows["model.layers.1.self_attn.q_proj.weight"], inventory.DTYPE_MISMATCH)
+        self.assertEqual(rows["model.layers.1.self_attn.q_proj.weight"], inventory.IDENTICAL)  # bf16 -> f16, same values
+        self.assertEqual(rows["model.layers.1.self_attn.k_proj.weight"], inventory.CHANGED)  # bf16 -> f32, new values
+        self.assertEqual(rows["model.layers.0.self_attn.v_proj.weight"], inventory.DTYPE_MISMATCH)  # not a float
         self.assertEqual(rows["model.layers.0.mlp.up_proj.weight"], inventory.SHAPE_MISMATCH)
         self.assertEqual(rows["lm_head.weight"], inventory.ONLY_BASE)
         self.assertEqual(rows["model.layers.0.self_attn.trigger.weight"], inventory.ONLY_SUSPECT)
@@ -123,8 +151,8 @@ class TestInventoryAndCli(unittest.TestCase):
             code, out, _ = run_cli("--base", str(self.tmp / "base.safetensors"), "--suspect", str(self.tmp / "suspect"),
                                    "--out", str(self.tmp / "out"), "-k", "4")
         self.assertEqual(code, 0, out)
-        # core runs on changed 2-D tensors and on the same-shape dtype mismatch, never on identical ones
-        self.assertEqual(sorted(fake_analyze.calls), sorted([((8, 8), (8, 8), 4), ((8, 16), (8, 16), 4), ((8, 8), (8, 8), 4)]))
+        # core runs on changed 2-D float tensors, including the recast k_proj, never on identical ones
+        self.assertEqual(sorted(fake_analyze.calls), sorted([((8, 8), (8, 8), 4), ((8, 16), (8, 16), 4), ((4, 8), (4, 8), 4)]))
         with open(self.tmp / "out" / "delta.csv") as f:
             rows = {r["name"]: r for r in csv.DictReader(f)}
         self.assertEqual(rows["model.layers.1.mlp.down_proj.weight"]["sv_004"], "0.1")

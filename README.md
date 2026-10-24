@@ -4,9 +4,9 @@ Check whether the abliterated or uncensored model you downloaded is only what it
 llmscan diffs the suspect's weights against the base model it says it came from, one tensor at a
 time, and reports where and how they differ.
 
-> **Status: day zero.** The loader, tensor inventory and plots work. The ΔW spectral core is being
-> written, and nothing has been validated on real models yet. llmscan ranks suspicion; it never
-> certifies a model clean.
+> **Status: early.** The loader, tensor inventory and plots work, and the inventory has run on six
+> real abliterated models (below). The ΔW spectral core is being written, so the rank half of the
+> hypothesis is still untested. llmscan ranks suspicion; it never certifies a model clean.
 
 ## Hypothesis
 
@@ -27,8 +27,26 @@ abliteration never touches. Anything outside the abliteration signature is a fin
 add a "healing" fine-tune after the projection, which legitimately raises the rank, so the
 comparison is against a distribution of honest abliterations, not a single threshold.
 
-First test: `meta-llama/Llama-3.1-8B-Instruct` against `mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated`,
-then a backdoor we plant ourselves. The figure goes here once it exists.
+## First result: where six public abliterations changed the weights
+
+Base models `Qwen/Qwen3-1.7B` and `Qwen/Qwen3-0.6B` (28 layers each), each compared with three
+popular abliterated derivatives from four different toolchains. Each cell counts how many of the
+28 per-layer matrices of that type differ from base. Every other tensor is identical to base in all
+six models, including the embeddings, all norms, `q/k/v_proj` and `gate/up_proj`.
+
+| Suspect | `o_proj` changed | `down_proj` changed |
+|---|---|---|
+| `huihui-ai/Huihui-Qwen3-1.7B-abliterated-v2` | 28 / 28 | 28 / 28 |
+| `mlabonne/Qwen3-1.7B-abliterated` | 28 / 28 | 28 / 28 |
+| `Goekdeniz-Guelmez/Josiefied-Qwen3-1.7B-abliterated-v1` | 27 / 28 (layer 0 untouched) | 27 / 28 (layer 0 untouched) |
+| `DavidAU/Qwen3-0.6B-heretic-abliterated-uncensored` ([Heretic](https://github.com/p-e-w/heretic)) | 26 / 28 (layers 2–27) | 9 / 28 (layers 19–27) |
+| `huihui-ai/Huihui-Qwen3-0.6B-abliterated-v2` | 28 / 28 | 28 / 28 |
+| `mlabonne/Qwen3-0.6B-abliterated` (re-saved as fp32; compared by value) | 28 / 28 | 28 / 28 |
+
+The "confined to residual-writing matrices" part holds for all six, and none of these toolchains
+touches the embedding. Josiefied's model card describes a fine-tune, yet only `o_proj` and
+`down_proj` changed, so the rank of those deltas is the next thing to measure. Next: singular-value
+spectra of each ΔW, then a backdoor we plant in Qwen3-1.7B ourselves.
 
 ## Use
 
@@ -36,7 +54,7 @@ From a clone of this repo:
 
 ```sh
 pipx install .            # or: uv tool install .
-llmscan --base path/to/Llama-3.1-8B-Instruct --suspect path/to/abliterated-model
+llmscan --base path/to/Qwen3-1.7B --suspect path/to/Qwen3-1.7B-abliterated
 ```
 
 Output goes to `out/<suspect>-vs-<base>/`:

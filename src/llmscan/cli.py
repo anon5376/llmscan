@@ -51,11 +51,14 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"llmscan: {e}")
 
     with base_ckpt as base, suspect_ckpt as suspect:
-        print(f"base:    {base.path}  ({len(base.tensors)} tensors)")
-        print(f"suspect: {suspect.path}  ({len(suspect.tensors)} tensors)\n")
+        for label, ck in (("base:   ", base), ("suspect:", suspect)):
+            print(f"{label} {ck.path}  ({len(ck.tensors)} tensors in {', '.join(f.name for f in ck.files)})")
+        print()
         rows = inventory.compare(base, suspect)
         inventory.write_csv(rows, out / "inventory.csv")
         summary = inventory.summarize(rows)
+        for label, ck in (("base", base), ("suspect", suspect)):
+            summary += "".join(f"\n{label}: ignored {n} ({why})" for n, why in ck.ignored.items())
         (out / "inventory.txt").write_text(summary + "\n")
         print(summary + "\n")
         if args.inventory_only:

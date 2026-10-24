@@ -54,6 +54,8 @@ def shard_files(path: Path) -> list[Path]:
         return [path]
     if not path.is_dir():
         raise CheckpointError(f"{path}: no such file or directory")
+    if (path / "model.safetensors").is_file():  # transformers loads this before any index
+        return [path / "model.safetensors"]
     indexes = sorted(path.glob("*.safetensors.index.json"))
     if indexes:
         weight_map = json.loads(indexes[0].read_text())["weight_map"]
@@ -90,17 +92,34 @@ def read_header(file: Path) -> dict[str, TensorInfo]:
     return out
 
 
+def tied_embeddings(path: Path) -> bool:
+    """True only if the config.json beside the weights explicitly sets tie_word_embeddings."""
+    config = (path if path.is_dir() else path.parent) / "config.json"
+    try:
+        c = json.loads(config.read_text())
+    except (OSError, ValueError):
+        return False
+    return bool(c.get("tie_word_embeddings", (c.get("text_config") or {}).get("tie_word_embeddings", False)))
+
+
 class Checkpoint:
     """All tensors of one checkpoint. Nothing is read until a tensor is requested."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
+        self.files = shard_files(self.path)
         self.tensors: dict[str, TensorInfo] = {}
-        for file in shard_files(self.path):
+        for file in self.files:
             for name, info in read_header(file).items():
                 if name in self.tensors:
                     raise CheckpointError(f"tensor {name} appears in more than one shard")
                 self.tensors[name] = info
+        # With tied embeddings, loaders use the embedding as the output head and never read a
+        # stored lm_head, so it is set aside rather than compared.
+        self.ignored: dict[str, str] = {}
+        if tied_embeddings(self.path) and "lm_head.weight" in self.tensors:
+            del self.tensors["lm_head.weight"]
+            self.ignored["lm_head.weight"] = "tie_word_embeddings=true in config.json"
         self._maps: dict[Path, mmap.mmap] = {}
 
     def _map(self, file: Path) -> mmap.mmap:

@@ -9,8 +9,10 @@ from dataclasses import asdict, dataclass
 from itertools import zip_longest
 from pathlib import Path
 
+import numpy as np
+
 from llmscan.names import kind_of, layer_of
-from llmscan.safetensors_io import Checkpoint
+from llmscan.safetensors_io import FLOAT_DTYPES, Checkpoint
 
 # status values, in the order they are reported
 IDENTICAL = "identical"
@@ -47,12 +49,18 @@ def bytes_equal(base: Checkpoint, suspect: Checkpoint, name: str) -> bool:
     return True
 
 
+def values_equal(base: Checkpoint, suspect: Checkpoint, name: str) -> bool:
+    """Exact float32 comparison; every supported float dtype converts to float32 without loss
+    except F64, where float32 rounding can hide a difference."""
+    return bool(np.array_equal(base.to_float32(name), suspect.to_float32(name)))
+
+
 def compare(base: Checkpoint, suspect: Checkpoint) -> list[InventoryRow]:
     """One row per tensor name found in either checkpoint, in natural name order.
 
-    Same name, dtype and shape -> byte comparison decides identical vs changed. A dtype
-    mismatch (e.g. a bf16 base re-saved as fp16) makes byte comparison meaningless, so it
-    is reported as its own status.
+    Same name, dtype and shape -> byte comparison decides identical vs changed. Different
+    float dtypes (e.g. a bf16 base re-saved as fp32) -> exact value comparison instead. Only
+    non-float dtype mismatches get their own status.
     """
     rows = []
     for name in sorted(base.tensors.keys() | suspect.tensors.keys(), key=natural_key):
@@ -64,7 +72,10 @@ def compare(base: Checkpoint, suspect: Checkpoint) -> list[InventoryRow]:
         elif b.shape != s.shape:
             status = SHAPE_MISMATCH
         elif b.dtype != s.dtype:
-            status = DTYPE_MISMATCH
+            if b.dtype in FLOAT_DTYPES and s.dtype in FLOAT_DTYPES:
+                status = IDENTICAL if values_equal(base, suspect, name) else CHANGED
+            else:
+                status = DTYPE_MISMATCH
         else:
             status = IDENTICAL if bytes_equal(base, suspect, name) else CHANGED
         rows.append(InventoryRow(
@@ -100,11 +111,15 @@ def summarize(rows: list[InventoryRow]) -> str:
         total_params += r.numel
         identical_params += r.numel if r.status == IDENTICAL else 0
 
+    recast = [r for r in rows if r.status in (IDENTICAL, CHANGED) and r.base_dtype != r.suspect_dtype]
     lines = [
         f"tensors: {len(rows)}  " + "  ".join(f"{s}={n}" for s, n in counts.items() if n),
-        f"parameters bit-identical to base: {identical_params / max(total_params, 1):.2%}",
-        "",
+        f"parameters identical to base: {identical_params / max(total_params, 1):.2%}",
     ]
+    if recast:
+        pairs = sorted({f"{r.base_dtype}->{r.suspect_dtype}" for r in recast})
+        lines.append(f"dtype differs ({', '.join(pairs)}) in {len(recast)} tensors: compared by value, not bytes")
+    lines.append("")
     shown = [s for s in STATUSES if counts[s]]
     width = max(len("kind"), *(len(k) for k in by_kind))
     lines.append(f"{'kind':<{width}}  " + "  ".join(f"{s:>{max(len(s), 5)}}" for s in shown))

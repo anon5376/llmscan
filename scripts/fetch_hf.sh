@@ -3,15 +3,16 @@
 # Usage: scripts/fetch_hf.sh <org/name> <revision> <dest-dir>
 # Gated repos: accept the licence on huggingface.co, then export HF_TOKEN or run `hf auth login`.
 # Resumable: re-run the same command after an interruption; complete files are skipped.
+# FETCH_INCLUDE: regex of files to fetch (default: all .safetensors and .json files).
 set -euo pipefail
 repo="$1"; rev="$2"; dest="$3"
 token="${HF_TOKEN:-$(cat "${HF_HOME:-$HOME/.cache/huggingface}/token" 2>/dev/null || true)}"
 auth=(); [ -n "$token" ] && auth=(-H "Authorization: Bearer $token")
 mkdir -p "$dest"
 curl -fsSL ${auth[@]+"${auth[@]}"} "https://huggingface.co/api/models/$repo/revision/$rev?blobs=true" \
-  | python3 -I -c 'import json,sys
+  | INCLUDE="${FETCH_INCLUDE:-\.(safetensors|json)\$}" python3 -I -c 'import json, os, re, sys
 for s in json.load(sys.stdin)["siblings"]:
-    if s["rfilename"].endswith((".safetensors", ".json")):
+    if re.search(os.environ["INCLUDE"], s["rfilename"]):
         print(s.get("size", -1), s["rfilename"])' \
   | while read -r size f; do
       have=$( [ -f "$dest/$f" ] && wc -c < "$dest/$f" | tr -d ' ' || echo 0 )
