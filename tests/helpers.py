@@ -56,3 +56,65 @@ def tiny_llama(rng: np.random.Generator, layers: int = 2, d: int = 8, ff: int = 
             p + "mlp.down_proj.weight": w(d, ff),
         })
     return t
+
+
+# GGUF writer, independent of the reader: ggml type name -> (type id, elements per block, bytes per block)
+GGML = {
+    "F32": (0, 1, 4), "F16": (1, 1, 2), "BF16": (30, 1, 2),
+    "Q4_0": (2, 32, 18), "Q4_1": (3, 32, 20), "Q5_0": (6, 32, 22), "Q5_1": (7, 32, 24),
+    "Q8_0": (8, 32, 34), "Q8_1": (9, 32, 36),
+    "Q2_K": (10, 256, 84), "Q3_K": (11, 256, 110), "Q4_K": (12, 256, 144),
+    "Q5_K": (13, 256, 176), "Q6_K": (14, 256, 210), "Q8_K": (15, 256, 292),
+}
+GGUF_SCALAR = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
+
+
+def gguf_string(s: str) -> bytes:
+    b = s.encode()
+    return struct.pack("<Q", len(b)) + b
+
+
+def gguf_value(vtype: int, v) -> bytes:
+    if vtype == 8:
+        return gguf_string(v)
+    if vtype == 9:  # v = (element type, [elements])
+        etype, items = v
+        return struct.pack("<IQ", etype, len(items)) + b"".join(gguf_value(etype, x) for x in items)
+    return struct.pack(GGUF_SCALAR[vtype], v)
+
+
+def gguf_float(dtype: str, arr: np.ndarray) -> tuple[str, tuple[int, ...], bytes]:
+    return dtype, arr.shape, encode(arr, dtype)
+
+
+def nbytes_gguf(dtype: str, shape: tuple[int, ...]) -> int:
+    _, block, block_bytes = GGML[dtype]
+    return int(np.prod(shape)) // block * block_bytes
+
+
+def write_gguf(
+    path: Path,
+    tensors: dict[str, tuple],
+    metadata: list[tuple[str, int, object]] = (),
+    alignment: int | None = None,
+    version: int = 3,
+    offsets: dict[str, int] | None = None,
+) -> None:
+    """tensors: name -> (ggml type name or raw type id, row-major shape, raw bytes);
+    metadata: (key, value type id, value) triples. Dims are written fastest-varying first.
+    offsets overrides the data offset recorded for a tensor (the bytes still go where they would have)."""
+    kv = list(metadata) + ([] if alignment is None else [("general.alignment", 4, alignment)])
+    align = alignment or 32
+    head = b"GGUF" + struct.pack("<IQQ", version, len(tensors), len(kv))
+    for key, vtype, v in kv:
+        head += gguf_string(key) + struct.pack("<I", vtype) + gguf_value(vtype, v)
+    infos, data, offset = b"", b"", 0
+    for name, (dtype, shape, raw) in tensors.items():
+        type_id = GGML[dtype][0] if isinstance(dtype, str) else dtype
+        infos += gguf_string(name) + struct.pack("<I", len(shape)) + b"".join(struct.pack("<Q", d) for d in reversed(shape))
+        infos += struct.pack("<IQ", type_id, (offsets or {}).get(name, offset))
+        pad = -len(raw) % align
+        data += raw + b"\0" * pad
+        offset += len(raw) + pad
+    head += infos
+    path.write_bytes(head + b"\0" * (-len(head) % align) + data)
