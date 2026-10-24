@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -32,6 +33,27 @@ OUTPUTS = ("pair.txt", "inventory.csv", "inventory.txt", "delta.csv", "spectra.p
            "ranking.csv")  # every file llmscan writes; none is ever written through a link
 
 
+def _refuse_shared_location(out: Path) -> None:
+    """On POSIX, refuse an --out whose directory, or any existing ancestor, other users could rename.
+
+    Write permission for group or others without the sticky bit is enough to rename a directory
+    (including llmscan's private .llmscan-* one) and plant a symlink at its name. Runs before
+    anything is created. Windows has no such mode bits, so it is skipped there.
+    """
+    if os.name == "nt":
+        return
+    resolved = out.resolve()
+    for d in (resolved, *resolved.parents):
+        try:
+            mode = d.stat().st_mode
+        except OSError:  # does not exist yet (or is not a directory): llmscan will create it
+            continue
+        if stat.S_ISDIR(mode) and mode & (stat.S_IWGRP | stat.S_IWOTH) and not mode & stat.S_ISVTX:
+            raise SystemExit(f"llmscan: {d} is writable by other users without the sticky bit, so they could "
+                             f"replace llmscan's output; choose a directory only you can write to (pass --out)"
+                             + (f"\n(unsafe directory is an ancestor of {resolved})" if d != resolved else ""))
+
+
 def _slug(spec: str) -> str:
     return spec.rstrip("/\\").replace("\\", "/").split("/")[-1]
 
@@ -52,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(errors="replace")
 
     out = args.out or Path("out") / f"{_slug(args.suspect)}-vs-{_slug(args.base)}"
+    _refuse_shared_location(out)
     base_path, suspect_path = resolve_model(args.base), resolve_model(args.suspect)
     pair = f"base: {base_path.resolve()}\nsuspect: {suspect_path.resolve()}\n"
     marker = out / "pair.txt"

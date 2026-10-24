@@ -393,6 +393,63 @@ class TestCliOutputs(unittest.TestCase):
         self.assertIn("different comparison", str(cm.exception))
 
 
+@unittest.skipIf(os.name == "nt", "POSIX mode bits")
+class TestSharedOutputLocation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        for d in ("a", "b"):
+            (self.tmp / d).mkdir()
+            write_safetensors(self.tmp / d / "model.safetensors", {"w": ("F32", np.full((4, 4), 1 if d == "a" else 2, np.float32))})
+        self.args = ("--base", str(self.tmp / "a"), "--suspect", str(self.tmp / "b"), "--inventory-only")
+
+    def dir_with_mode(self, name: str, mode: int) -> Path:
+        d = self.tmp / name
+        d.mkdir()
+        d.chmod(mode)  # mkdir's mode is masked by the umask
+        return d
+
+    def test_refused_when_out_is_writable_by_others_without_sticky_bit(self):
+        for mode in (0o777, 0o775, 0o757):
+            out = self.dir_with_mode(f"o{mode:o}", mode)
+            with self.subTest(mode=oct(mode)), self.assertRaises(SystemExit) as cm:
+                run_cli(*self.args, "--out", str(out))
+            self.assertIn(str(out.resolve()), str(cm.exception))
+            self.assertIn("sticky bit", str(cm.exception))
+            self.assertEqual(os.listdir(out), [])  # nothing created, not even a .llmscan-* directory
+
+    def test_refused_for_an_unsafe_ancestor_even_if_out_does_not_exist_yet(self):
+        shared = self.dir_with_mode("shared", 0o777)
+        for out in (shared / "new", shared / "new" / "deeper"):
+            with self.subTest(out=str(out.relative_to(self.tmp))), self.assertRaises(SystemExit) as cm:
+                run_cli(*self.args, "--out", str(out))
+            self.assertIn(str(shared.resolve()), str(cm.exception))
+            self.assertEqual(os.listdir(shared), [])
+        (shared / "existing").mkdir(mode=0o700)  # a private directory inside a shared one is still reachable by rename
+        with self.assertRaises(SystemExit):
+            run_cli(*self.args, "--out", str(shared / "existing"))
+        self.assertEqual(os.listdir(shared / "existing"), [])
+
+    def test_refused_through_a_symlink_to_an_unsafe_directory(self):
+        shared = self.dir_with_mode("shared", 0o777)
+        link_or_skip((self.tmp / "link").symlink_to, shared, target_is_directory=True)
+        with self.assertRaises(SystemExit) as cm:
+            run_cli(*self.args, "--out", str(self.tmp / "link" / "o"))
+        self.assertIn(str(shared.resolve()), str(cm.exception))
+        self.assertEqual(os.listdir(shared), [])
+
+    def test_accepted_when_sticky_or_only_the_owner_can_write(self):
+        for name, mode in (("sticky", 0o1777), ("sticky_group", 0o1775), ("normal", 0o755), ("private", 0o700)):
+            out = self.dir_with_mode(name, mode)
+            with self.subTest(mode=oct(mode)):
+                self.assertEqual(run_cli(*self.args, "--out", str(out))[0], 0)
+                self.assertTrue((out / "inventory.csv").is_file())
+
+    def test_accepted_below_a_sticky_world_writable_directory(self):
+        shared = self.dir_with_mode("tmpish", 0o1777)
+        self.assertEqual(run_cli(*self.args, "--out", str(shared / "new" / "deeper"))[0], 0)
+        self.assertTrue((shared / "new" / "deeper" / "inventory.csv").is_file())
+
+
 class TestAtomicWrite(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

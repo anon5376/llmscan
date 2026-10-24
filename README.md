@@ -70,9 +70,14 @@ Output goes to `out/<suspect>-vs-<base>/`:
   is written to a temporary file in a private `.llmscan-*` directory (mode 0700 on POSIX) inside
   `--out`, then renamed onto its name, so a symlink or hard link already on that name is replaced,
   never written through, and other users cannot redirect a write even in a shared directory such as
-  `/tmp`. llmscan protects your files against mistakes and pre-existing filesystem state (a wrong
-  `--out`, stale outputs, links already in the output directory). Other processes running as you can
-  already change your files directly, so racing them is out of scope;
+  `/tmp`. On POSIX llmscan refuses, before creating anything, an `--out` that group or others can
+  write to without the sticky bit, and the same for any existing ancestor directory: such a
+  directory can be renamed by another user, who could then plant a symlink where llmscan writes
+  (`/tmp`, which has the sticky bit, and a normal home directory pass). On Windows, use an output
+  directory that other users cannot write to. llmscan protects your files against mistakes and
+  pre-existing filesystem state (a wrong `--out`, stale outputs, links already in the output
+  directory). Other processes running as you can already change your files directly, so racing
+  them is out of scope;
 - `inventory.csv`, `inventory.txt`: every tensor in either model, marked identical, changed,
   dtype/shape mismatch, or missing from one side;
 - `delta.csv`: for each 2-D tensor, the top-k singular values of ΔW and its effective rank;
