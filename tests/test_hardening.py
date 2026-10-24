@@ -451,6 +451,36 @@ class TestAtomicWrite(unittest.TestCase):
         atomic.write(self.tmp / "x.png", lambda tmp: seen.append(tmp.suffix))
         self.assertEqual(seen, [".png"])
 
+    def test_temporary_file_lives_in_a_private_directory_that_is_gone_afterwards(self):
+        seen = []
+
+        def writer(tmp):
+            seen.append((tmp, stat.S_IMODE(tmp.parent.stat().st_mode)))
+            tmp.write_text("x")
+        atomic.write(self.tmp / "x.csv", writer)
+        tmp, mode = seen[0]
+        self.assertEqual(tmp.parent.parent, self.tmp)
+        self.assertNotEqual(tmp.parent, self.tmp)
+        if os.name == "posix":
+            self.assertEqual(mode, 0o700)
+        self.assertFalse(tmp.parent.exists())
+        self.assertEqual(os.listdir(self.tmp), ["x.csv"])
+
+    def test_private_directory_is_removed_after_every_outcome(self):
+        def boom(tmp):
+            raise RuntimeError("boom")
+        with self.assertRaises(RuntimeError):
+            atomic.write(self.tmp / "a.csv", boom)
+        with self.assertRaises(RuntimeError):
+            atomic.write(self.tmp / "b.csv", boom, keep_partial=True)
+        atomic.write(self.tmp / "c.csv", lambda tmp: False)
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["b.csv"])
+
+    def test_only_the_directory_it_made_is_removed(self):
+        (self.tmp / ".llmscan-foreign").mkdir()
+        atomic.write_text(self.tmp / "x.csv", "ours")
+        self.assertEqual(sorted(os.listdir(self.tmp)), [".llmscan-foreign", "x.csv"])
+
     def test_outputs_cover_every_file_the_cli_writes(self):
         self.assertIn("ranking.csv", cli.OUTPUTS)
 

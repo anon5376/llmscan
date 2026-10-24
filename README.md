@@ -65,11 +65,14 @@ Output goes to `out/<suspect>-vs-<base>/`:
   directory name is refused, pass `--out`. llmscan also refuses any non-empty directory without a
   `pair.txt` (for example a model directory) and never deletes a file. This holds for `--out` too:
   a directory marked for another pair is refused, and so is a `pair.txt` with other hard links.
-  Every output is written to a new temporary file and renamed onto its name, so a symlink or hard
-  link already sitting on that name is replaced, never written through. llmscan protects your files
-  against mistakes and pre-existing filesystem state (a wrong `--out`, stale outputs, links already
-  in the output directory); it does not defend against another process racing the filesystem
-  during a run, which needs OS-level isolation;
+  A directory carrying this pair's `pair.txt` is llmscan's output directory, and files in it with
+  llmscan's output names (below) are replaced on a rerun, even ones you added later. Every output
+  is written to a temporary file in a private `.llmscan-*` directory (mode 0700 on POSIX) inside
+  `--out`, then renamed onto its name, so a symlink or hard link already on that name is replaced,
+  never written through, and other users cannot redirect a write even in a shared directory such as
+  `/tmp`. llmscan protects your files against mistakes and pre-existing filesystem state (a wrong
+  `--out`, stale outputs, links already in the output directory). Other processes running as you can
+  already change your files directly, so racing them is out of scope;
 - `inventory.csv`, `inventory.txt`: every tensor in either model, marked identical, changed,
   dtype/shape mismatch, or missing from one side;
 - `delta.csv`: for each 2-D tensor, the top-k singular values of ΔW and its effective rank;
