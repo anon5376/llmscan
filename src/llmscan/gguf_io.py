@@ -24,6 +24,7 @@ MAGIC = b"GGUF"
 VERSIONS = (2, 3)
 DEFAULT_ALIGNMENT = 32
 MAX_ARRAY_DEPTH = 32
+MAX_DIMS = 4  # GGML_MAX_DIMS
 
 # ggml type id -> (name, elements per block, bytes per block)
 GGML_TYPES = {
@@ -78,6 +79,8 @@ class _Reader:
         if depth >= MAX_ARRAY_DEPTH:
             raise CheckpointError(f"{self.path}: metadata arrays nested deeper than {MAX_ARRAY_DEPTH}")
         elem, count = self.take("<I"), self.take("<Q")
+        if elem not in SCALARS and elem not in (STRING, ARRAY):
+            raise CheckpointError(f"{self.path}: unknown metadata array element type {elem}")
         if elem in SCALARS:
             fmt = f"<{count}{SCALARS[elem]}"  # count is checked against the file before it is used
             self.need(count * struct.calcsize("<" + SCALARS[elem]))
@@ -122,6 +125,8 @@ def read_gguf(mm: mmap.mmap, path: Path) -> tuple[dict, dict[str, TensorInfo]]:
     for _ in range(tensor_count):
         name = r.string()
         n_dims = r.take("<I")
+        if n_dims > MAX_DIMS:
+            raise CheckpointError(f"{path}: tensor {name} has {n_dims} dims; GGML supports at most {MAX_DIMS}")
         r.need(n_dims * 8)
         dims = [r.take("<Q") for _ in range(n_dims)]
         ggml_type, offset = r.take("<I"), r.take("<Q")
@@ -134,9 +139,13 @@ def read_gguf(mm: mmap.mmap, path: Path) -> tuple[dict, dict[str, TensorInfo]]:
         if ggml_type not in GGML_TYPES:
             raise CheckpointError(f"{path}: tensor {name} has unsupported ggml type id {ggml_type}")
         dtype, block, block_bytes = GGML_TYPES[ggml_type]
+        if 0 in dims:
+            raise CheckpointError(f"{path}: tensor {name} has a zero-width dimension {dims}")
+        if dims and dims[0] % block:
+            raise CheckpointError(f"{path}: tensor {name} has row width {dims[0]}, not a multiple of the {dtype} block size {block}")
+        if offset % alignment:
+            raise CheckpointError(f"{path}: tensor {name} offset {offset} is not a multiple of the alignment {alignment}")
         numel = math.prod(dims)
-        if numel % block:
-            raise CheckpointError(f"{path}: tensor {name} has {numel} elements, not a multiple of the {dtype} block size {block}")
         start = data_start + offset
         end = start + numel // block * block_bytes
         if end > size:
@@ -144,6 +153,10 @@ def read_gguf(mm: mmap.mmap, path: Path) -> tuple[dict, dict[str, TensorInfo]]:
         if name in tensors:
             raise CheckpointError(f"{path}: tensor {name} appears twice")
         tensors[name] = TensorInfo(name, dtype, tuple(reversed(dims)), path, start, end)
+    ordered = sorted(tensors.values(), key=lambda t: t.start)
+    for a, b in zip(ordered, ordered[1:]):
+        if b.start < a.end:
+            raise CheckpointError(f"{path}: tensors {a.name} and {b.name} overlap")
     return metadata, tensors
 
 

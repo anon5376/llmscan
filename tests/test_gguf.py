@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from helpers import GGML, encode, gguf_float, nbytes_gguf, write_gguf
+from helpers import GGML, encode, gguf_float, nbytes_gguf, write_gguf, write_safetensors
 from llmscan import cli, inventory
 from llmscan.checkpoint import open_checkpoint
 from llmscan.gguf_io import GGUFCheckpoint
@@ -111,6 +111,49 @@ class TestGGUFReader(unittest.TestCase):
         with self.assertRaisesRegex(CheckpointError, "block size"):
             GGUFCheckpoint(self.path)
 
+    def test_rejects_row_width_not_a_whole_number_of_blocks(self):
+        # Q8_0 dims [16, 2] hold 32 elements, one block in total, but each row is only half a block
+        write_gguf(self.path, {"x": ("Q8_0", (2, 16), bytes(34))})
+        with self.assertRaisesRegex(CheckpointError, "row width 16"):
+            GGUFCheckpoint(self.path)
+
+    def test_rejects_shapes_ggml_cannot_represent(self):
+        f = np.ones(4, np.float32).tobytes()
+        for label, shape in {"5 dims": (1, 1, 1, 1, 4), "zero width": (0, 4)}.items():
+            with self.subTest(label):
+                write_gguf(self.path, {"x": ("F32", shape, f)})
+                with self.assertRaisesRegex(CheckpointError, "dims|zero-width"):
+                    GGUFCheckpoint(self.path)
+        write_gguf(self.path, {"x": ("F32", (1, 1, 1, 4), f)})  # 4 dims is the limit
+        with GGUFCheckpoint(self.path) as c:
+            self.assertEqual(c.tensors["x"].shape, (1, 1, 1, 4))
+
+    def test_rejects_overlapping_tensors(self):
+        a = gguf_float("F32", np.arange(4, dtype=np.float32))
+        write_gguf(self.path, {"a": a, "b": a}, offsets={"b": 0})
+        with self.assertRaisesRegex(CheckpointError, "overlap"):
+            GGUFCheckpoint(self.path)
+        write_gguf(self.path, {"a": a, "b": a}, alignment=8, offsets={"b": 8})  # partial overlap
+        with self.assertRaisesRegex(CheckpointError, "overlap"):
+            GGUFCheckpoint(self.path)
+        write_gguf(self.path, {"a": a, "b": a}, alignment=16, offsets={"b": 16})  # adjacent is fine
+        with GGUFCheckpoint(self.path) as c:
+            self.assertEqual(sorted(c.tensors), ["a", "b"])
+
+    def test_rejects_offsets_off_the_alignment(self):
+        a = gguf_float("F32", np.arange(4, dtype=np.float32))
+        write_gguf(self.path, {"a": a}, offsets={"a": 1})  # default alignment 32
+        with self.assertRaisesRegex(CheckpointError, "alignment 32"):
+            GGUFCheckpoint(self.path)
+        write_gguf(self.path, {"a": a}, alignment=64, offsets={"a": 32})
+        with self.assertRaisesRegex(CheckpointError, "alignment 64"):
+            GGUFCheckpoint(self.path)
+
+    def test_rejects_unknown_array_element_type_even_when_empty(self):
+        write_gguf(self.path, {}, [("t.arr", 9, (99, []))])
+        with self.assertRaisesRegex(CheckpointError, "element type 99"):
+            GGUFCheckpoint(self.path)
+
     def test_rejects_bad_magic_version_and_endianness(self):
         write_gguf(self.path, {"x": gguf_float("F32", np.ones(2, np.float32))})
         good = self.path.read_bytes()
@@ -177,6 +220,17 @@ class TestGGUFReader(unittest.TestCase):
         write_gguf(self.path, {"x": gguf_float("F32", np.ones(2, np.float32))})
         with open_checkpoint(self.path) as c:
             self.assertIsInstance(c, GGUFCheckpoint)
+
+
+    def test_directory_named_like_a_gguf_goes_to_the_safetensors_reader(self):
+        d = self.tmp / "model.gguf"
+        d.mkdir()
+        write_safetensors(d / "model.safetensors", {"x": ("F32", np.ones(2, np.float32))})
+        with open_checkpoint(d) as c:
+            self.assertNotIsInstance(c, GGUFCheckpoint)
+            self.assertEqual(list(c.tensors), ["x"])
+        with self.assertRaisesRegex(CheckpointError, "no such file"):
+            open_checkpoint(self.tmp / "absent.gguf")
 
 
 class TestGGUFInventoryAndCli(unittest.TestCase):

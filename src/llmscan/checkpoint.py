@@ -1,4 +1,4 @@
-"""Open a model path as a checkpoint: a `.gguf` file is read as GGUF, anything else as safetensors."""
+"""Open a model path as a checkpoint: a `.gguf` file is read as GGUF, anything else (including a directory) as safetensors."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from llmscan.safetensors_io import Checkpoint
 
 
 def open_checkpoint(path: str | Path) -> Checkpoint:
-    if Path(path).suffix.lower() == ".gguf":
+    p = Path(path)
+    if p.suffix.lower() == ".gguf" and not p.is_dir():
         return GGUFCheckpoint(path)
     return Checkpoint(path)

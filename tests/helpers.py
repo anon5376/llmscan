@@ -98,9 +98,11 @@ def write_gguf(
     metadata: list[tuple[str, int, object]] = (),
     alignment: int | None = None,
     version: int = 3,
+    offsets: dict[str, int] | None = None,
 ) -> None:
     """tensors: name -> (ggml type name or raw type id, row-major shape, raw bytes);
-    metadata: (key, value type id, value) triples. Dims are written fastest-varying first."""
+    metadata: (key, value type id, value) triples. Dims are written fastest-varying first.
+    offsets overrides the data offset recorded for a tensor (the bytes still go where they would have)."""
     kv = list(metadata) + ([] if alignment is None else [("general.alignment", 4, alignment)])
     align = alignment or 32
     head = b"GGUF" + struct.pack("<IQQ", version, len(tensors), len(kv))
@@ -110,7 +112,7 @@ def write_gguf(
     for name, (dtype, shape, raw) in tensors.items():
         type_id = GGML[dtype][0] if isinstance(dtype, str) else dtype
         infos += gguf_string(name) + struct.pack("<I", len(shape)) + b"".join(struct.pack("<Q", d) for d in reversed(shape))
-        infos += struct.pack("<IQ", type_id, offset)
+        infos += struct.pack("<IQ", type_id, (offsets or {}).get(name, offset))
         pad = -len(raw) % align
         data += raw + b"\0" * pad
         offset += len(raw) + pad
