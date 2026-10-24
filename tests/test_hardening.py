@@ -1,0 +1,267 @@
+import json
+import os
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import tracemalloc
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+
+from helpers import write_safetensors, write_sharded
+from llmscan import cli, core, inventory
+from llmscan.safetensors_io import MAX_OPEN_MAPS, Checkpoint, CheckpointError
+from test_pipeline import fake_analyze, run_cli
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def write_raw(path: Path, header: dict | bytes, payload: bytes) -> None:
+    """A safetensors file with exactly the header and payload given, valid or not."""
+    h = header if isinstance(header, bytes) else json.dumps(header).encode()
+    path.write_bytes(struct.pack("<Q", len(h)) + h + payload)
+
+
+def entry(dtype: str, shape: list, begin: int, end: int) -> dict:
+    return {"dtype": dtype, "shape": shape, "data_offsets": [begin, end]}
+
+
+def compare_one(tmp: Path, base: tuple[str, np.ndarray], suspect: tuple[str, np.ndarray]) -> str:
+    write_safetensors(tmp / "a.safetensors", {"x": base})
+    write_safetensors(tmp / "b.safetensors", {"x": suspect})
+    with Checkpoint(tmp / "a.safetensors") as a, Checkpoint(tmp / "b.safetensors") as b:
+        return inventory.compare(a, b)[0].status
+
+
+class TestCrossDtypeComparison(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_f64_difference_below_float32_resolution_is_changed(self):
+        status = compare_one(self.tmp, ("F64", np.array([1 + 2.0**-30])), ("F32", np.array([1.0])))
+        self.assertEqual(status, inventory.CHANGED)
+
+    def test_f64_value_that_overflows_float32_is_changed(self):
+        status = compare_one(self.tmp, ("F64", np.array([1e300])), ("F32", np.array([np.inf])))
+        self.assertEqual(status, inventory.CHANGED)
+
+    def test_recast_with_equal_values_stays_identical(self):
+        a = np.array([0.5, -1.25, 3.0, 2.0**-20], dtype=np.float32)
+        for dtype in ("F64", "F32", "F16", "BF16"):
+            with self.subTest(dtype=dtype):
+                self.assertEqual(compare_one(self.tmp, ("BF16", a), (dtype, a)), inventory.IDENTICAL)
+                self.assertEqual(compare_one(self.tmp, (dtype, a), ("F64", a)), inventory.IDENTICAL)
+
+    def test_difference_in_a_late_chunk_is_found(self):
+        a = np.zeros(5000, dtype=np.float32)
+        b = a.copy()
+        b[-1] = 1
+        write_safetensors(self.tmp / "a.safetensors", {"x": ("BF16", a)})
+        write_safetensors(self.tmp / "b.safetensors", {"x": ("F32", b)})
+        with Checkpoint(self.tmp / "a.safetensors") as ca, Checkpoint(self.tmp / "b.safetensors") as cb:
+            self.assertFalse(inventory.values_equal(ca, cb, "x"))
+            self.assertEqual([len(c) for c in ca.iter_values("x", chunk=2048)], [2048, 2048, 904])
+            self.assertEqual(sum(c.sum() for c in cb.iter_values("x", chunk=2048)), 1)
+
+    def test_value_comparison_memory_is_bounded_by_the_chunk_not_the_tensor(self):
+        n = 2_000_000  # whole-tensor float32 decoding of both sides would allocate ~9 bytes per element
+        a = np.zeros(n, dtype=np.float32)
+        write_safetensors(self.tmp / "a.safetensors", {"x": ("BF16", a)})
+        write_safetensors(self.tmp / "b.safetensors", {"x": ("F32", a)})
+        with Checkpoint(self.tmp / "a.safetensors") as ca, Checkpoint(self.tmp / "b.safetensors") as cb:
+            tracemalloc.start()
+            try:
+                self.assertTrue(inventory.values_equal(ca, cb, "x"))
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        self.assertLess(peak, 4 * n)  # less than ONE float32 copy of the tensor; whole-tensor decoding needs ~9n
+
+
+class TestBoundedOpenMaps(unittest.TestCase):
+    def test_touching_many_shards_keeps_few_maps_and_file_descriptors(self):
+        tmp = Path(tempfile.mkdtemp())
+        shards = [{f"t{i}": ("F32", np.full((2, 2), i, np.float32))} for i in range(40)]
+        write_sharded(tmp / "a", shards)
+        write_sharded(tmp / "b", shards)
+        fds = Path("/dev/fd")
+        before = len(os.listdir(fds)) if fds.is_dir() else None
+        with Checkpoint(tmp / "a") as a, Checkpoint(tmp / "b") as b:
+            rows = inventory.compare(a, b)
+            self.assertEqual({r.status for r in rows}, {inventory.IDENTICAL})
+            self.assertLessEqual(len(a._maps), MAX_OPEN_MAPS)
+            np.testing.assert_array_equal(a.to_float32("t3"), 3)  # a shard evicted earlier maps again
+            if before is not None:
+                self.assertLessEqual(len(os.listdir(fds)) - before, 2 * MAX_OPEN_MAPS)
+        self.assertEqual(len(a._maps), 0)
+
+
+class TestMalformedHeaders(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.path = self.tmp / "m.safetensors"
+        self.f4 = np.ones(2, np.float32).tobytes()  # two float32 values: 8 bytes
+
+    def assert_rejected(self, header, payload, pattern):
+        write_raw(self.path, header, payload)
+        with self.assertRaisesRegex(CheckpointError, pattern):
+            Checkpoint(self.path)
+
+    def test_valid_layout_is_accepted(self):
+        write_raw(self.path, {"__metadata__": {"format": "pt"}, "a": entry("F32", [2], 0, 8), "b": entry("F32", [], 8, 12),
+                              "e": entry("F32", [0], 12, 12)}, self.f4 + bytes(4))
+        with Checkpoint(self.path) as c:
+            self.assertEqual(sorted(c.tensors), ["a", "b", "e"])
+
+    def test_negative_offsets(self):
+        self.assert_rejected({"x": entry("F32", [1], -4, 0)}, bytes(4), "data_offsets")
+        self.assert_rejected({"x": entry("F32", [1], 0, -4)}, bytes(4), "data_offsets")
+
+    def test_overlapping_tensors(self):
+        self.assert_rejected({"a": entry("F32", [2], 0, 8), "b": entry("F32", [2], 0, 8)}, self.f4, "overlaps")
+        self.assert_rejected({"a": entry("F32", [2], 0, 8), "b": entry("F32", [2], 4, 12)}, self.f4 + bytes(4), "overlaps")
+
+    def test_gap_between_tensors(self):
+        self.assert_rejected({"a": entry("F32", [1], 0, 4), "b": entry("F32", [1], 8, 12)}, bytes(12), "gap")
+
+    def test_negative_and_non_integer_dims(self):
+        self.assert_rejected({"x": entry("F32", [-1, -1], 0, 4)}, bytes(4), "shape")
+        self.assert_rejected({"x": entry("F32", [1.5], 0, 4)}, bytes(4), "shape")
+        self.assert_rejected({"x": entry("F32", "2", 0, 8)}, self.f4, "shape")
+
+    def test_duplicate_tensor_names_in_the_json(self):
+        raw = b'{"x": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}, "x": {"dtype": "F32", "shape": [1], "data_offsets": [4, 8]}}'
+        self.assert_rejected(raw, self.f4, "duplicate")
+
+    def test_unknown_dtype(self):
+        self.assert_rejected({"x": entry("F7", [1], 0, 3)}, bytes(3), "unknown dtype")
+        self.assert_rejected({"x": {"shape": [1], "data_offsets": [0, 4]}}, bytes(4), "unknown dtype")
+
+    def test_byte_size_must_match_dtype_and_shape(self):
+        self.assert_rejected({"x": entry("F32", [3], 0, 8)}, self.f4, "expected 12")
+
+    def test_trailing_payload_the_header_does_not_describe(self):
+        self.assert_rejected({"x": entry("F32", [1], 0, 4)}, self.f4, "not described")
+
+    def test_header_that_is_not_json_or_not_an_object(self):
+        self.assert_rejected(b"{not json", b"", "invalid safetensors header")
+        self.assert_rejected(b"\xff\xfe", b"", "invalid safetensors header")
+        self.assert_rejected(b"[]", b"", "not a JSON object")
+        self.assert_rejected({"x": 5}, b"", "no metadata")
+
+    def test_cli_reports_a_malformed_file_as_a_clean_error(self):
+        write_raw(self.path, {"x": entry("F32", [1], -4, 0)}, bytes(4))
+        with self.assertRaises(SystemExit) as cm:
+            run_cli("--base", str(self.path), "--suspect", str(self.path), "--out", str(self.tmp / "out"))
+        self.assertIn("data_offsets", str(cm.exception))
+
+
+@unittest.skipUnless(shutil.which("bash") and sys.platform != "win32", "needs bash and POSIX file modes")
+class TestFetchScript(unittest.TestCase):
+    """scripts/fetch_hf.sh against a stand-in `curl`; no network."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.dest = self.tmp / "model"
+        (self.tmp / "bin").mkdir()
+        (self.tmp / "curl.py").write_text(
+            "import json, sys\nfrom pathlib import Path\n"
+            "a = sys.argv[1:]\n"
+            "if any('/api/models/' in x for x in a):\n"
+            "    print(json.dumps({'siblings': [{'size': 4, 'rfilename': 'model.safetensors'}]}))\n"
+            "else:\n"
+            "    Path(a[a.index('-o') + 1]).write_bytes(b'BBBB')\n")
+        fake = self.tmp / "bin" / "curl"
+        fake.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{self.tmp / "curl.py"}" "$@"\n')
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+
+    def fetch(self, rev: str):
+        env = {**os.environ, "PATH": f"{self.tmp / 'bin'}{os.pathsep}{os.environ['PATH']}", "HF_HOME": str(self.tmp / "hf"), "HF_TOKEN": ""}
+        return subprocess.run(["bash", str(ROOT / "scripts" / "fetch_hf.sh"), "org/model", rev, str(self.dest)],
+                              env=env, capture_output=True, text=True)
+
+    def test_same_size_file_from_another_revision_is_not_relabelled(self):
+        self.dest.mkdir()
+        (self.dest / "model.safetensors").write_bytes(b"AAAA")
+        (self.dest / ".source").write_text("org/model@old-revision\n")
+        done = self.fetch("new-revision")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("old-revision", done.stderr)
+        self.assertEqual((self.dest / "model.safetensors").read_bytes(), b"AAAA")
+        self.assertEqual((self.dest / ".source").read_text().strip(), "org/model@old-revision")
+
+    def test_interrupted_fetch_of_another_revision_is_not_mixed_in(self):
+        self.dest.mkdir()
+        (self.dest / ".source.partial").write_text("org/model@old-revision\n")
+        self.assertNotEqual(self.fetch("new-revision").returncode, 0)
+
+    def test_unlabelled_non_empty_directory_is_refused(self):
+        self.dest.mkdir()
+        (self.dest / "model.safetensors").write_bytes(b"AAAA")
+        done = self.fetch("rev1")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual((self.dest / "model.safetensors").read_bytes(), b"AAAA")
+
+    def test_fresh_and_repeated_fetches_of_the_same_revision_work(self):
+        self.assertEqual(self.fetch("rev1").returncode, 0)
+        self.assertEqual((self.dest / ".source").read_text().strip(), "org/model@rev1")
+        self.assertFalse((self.dest / ".source.partial").exists())
+        again = self.fetch("rev1")
+        self.assertEqual(again.returncode, 0)
+        self.assertIn("(complete)", again.stdout)
+
+
+class TestCliOutputs(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cwd = os.getcwd()
+        os.chdir(self.tmp)  # default output goes to ./out
+        self.addCleanup(os.chdir, self.cwd)
+        for d in ("a", "b"):
+            (self.tmp / d).mkdir()
+            write_safetensors(self.tmp / d / "model.safetensors", {"w": ("F32", np.full((4, 4), 1 if d == "a" else 2, np.float32))})
+
+    def test_stale_spectra_is_not_left_or_reported_when_nothing_changed(self):
+        out = self.tmp / "out"
+        base, other = str(self.tmp / "a" / "model.safetensors"), str(self.tmp / "b" / "model.safetensors")
+        with mock.patch.object(core, "analyze_delta", fake_analyze):
+            fake_analyze.calls = []
+            code, stdout, _ = run_cli("--base", base, "--suspect", other, "--out", str(out), "-k", "2")
+            self.assertEqual(code, 0)
+            self.assertTrue((out / "spectra.png").exists())
+            self.assertIn("spectra.png", stdout)
+            code, stdout, _ = run_cli("--base", base, "--suspect", base, "--out", str(out), "-k", "2")
+        self.assertEqual(code, 0)
+        self.assertFalse((out / "spectra.png").exists())
+        self.assertNotIn("spectra.png", stdout)
+
+    def test_unrelated_runs_on_same_named_files_do_not_share_the_default_directory(self):
+        a, b = str(self.tmp / "a" / "model.safetensors"), str(self.tmp / "b" / "model.safetensors")
+        self.assertEqual(run_cli("--base", a, "--suspect", a, "--inventory-only")[0], 0)
+        first = (self.tmp / "out" / "model.safetensors-vs-model.safetensors" / "inventory.csv").read_text()
+        with self.assertRaises(SystemExit) as cm:
+            run_cli("--base", b, "--suspect", b, "--inventory-only")
+        self.assertIn("different comparison", str(cm.exception))
+        self.assertEqual((self.tmp / "out" / "model.safetensors-vs-model.safetensors" / "inventory.csv").read_text(), first)
+        self.assertEqual(run_cli("--base", a, "--suspect", a, "--inventory-only")[0], 0)  # rerun of the same pair
+        self.assertEqual(run_cli("--base", b, "--suspect", b, "--inventory-only", "--out", "elsewhere")[0], 0)
+
+
+class TestEmptyCheckpoints(unittest.TestCase):
+    def test_two_empty_checkpoints_give_a_clear_message(self):
+        tmp = Path(tempfile.mkdtemp())
+        write_raw(tmp / "e.safetensors", {}, b"")
+        with Checkpoint(tmp / "e.safetensors") as a, Checkpoint(tmp / "e.safetensors") as b:
+            self.assertIn("neither checkpoint contains any tensors", inventory.summarize(inventory.compare(a, b)))
+        code, _, err = run_cli("--base", str(tmp / "e.safetensors"), "--suspect", str(tmp / "e.safetensors"), "--out", str(tmp / "out"))
+        self.assertEqual(code, 1)
+        self.assertIn("neither checkpoint contains any tensors", err)
+
+
+if __name__ == "__main__":
+    unittest.main()

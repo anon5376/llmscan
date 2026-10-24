@@ -48,9 +48,16 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(errors="replace")
 
     out = args.out or Path("out") / f"{_slug(args.suspect)}-vs-{_slug(args.base)}"
+    base_path, suspect_path = resolve_model(args.base), resolve_model(args.suspect)
+    pair = f"base: {base_path.resolve()}\nsuspect: {suspect_path.resolve()}\n"
+    marker = out / "pair.txt"
+    if args.out is None and marker.is_file() and marker.read_text(encoding="utf-8") != pair:
+        raise SystemExit(f"llmscan: {out} holds a different comparison; pass --out to choose another directory\n"
+                         + marker.read_text(encoding="utf-8").rstrip())
     out.mkdir(parents=True, exist_ok=True)
+    marker.write_text(pair, encoding="utf-8")
     try:
-        base_ckpt, suspect_ckpt = open_checkpoint(resolve_model(args.base)), open_checkpoint(resolve_model(args.suspect))
+        base_ckpt, suspect_ckpt = open_checkpoint(base_path), open_checkpoint(suspect_path)
     except CheckpointError as e:
         raise SystemExit(f"llmscan: {e}")
 
@@ -65,9 +72,13 @@ def main(argv: list[str] | None = None) -> int:
             summary += "".join(f"\n{label}: ignored {n} ({why})" for n, why in ck.ignored.items())
         (out / "inventory.txt").write_text(summary + "\n", encoding="utf-8")
         print(summary + "\n")
+        if not rows:
+            print("llmscan: neither checkpoint contains any tensors", file=sys.stderr)
+            return 1
         if args.inventory_only:
             print(f"wrote {out / 'inventory.csv'}")
             return 0
+        (out / "spectra.png").unlink(missing_ok=True)  # plot_spectra writes nothing without changed tensors
         try:
             delta.scan(base, suspect, rows, out / "delta.csv", k=args.k)
         except NotImplementedError as e:

@@ -50,9 +50,12 @@ def bytes_equal(base: Checkpoint, suspect: Checkpoint, name: str) -> bool:
 
 
 def values_equal(base: Checkpoint, suspect: Checkpoint, name: str) -> bool:
-    """Exact float32 comparison; every supported float dtype converts to float32 without loss
-    except F64, where float32 rounding can hide a difference."""
-    return bool(np.array_equal(base.to_float32(name), suspect.to_float32(name)))
+    """Exact value comparison across float dtypes, chunk by chunk. Chunks are float64, which holds
+    every supported float dtype exactly, so rounding can neither hide a difference nor invent one."""
+    for a, b in zip(base.iter_values(name), suspect.iter_values(name)):
+        if not np.array_equal(a, b):
+            return False
+    return True
 
 
 def compare(base: Checkpoint, suspect: Checkpoint) -> list[InventoryRow]:
@@ -102,6 +105,8 @@ def write_csv(rows: list[InventoryRow], path: Path) -> None:
 
 def summarize(rows: list[InventoryRow]) -> str:
     """Plain-text summary: totals, a per-kind status table, then every structural mismatch."""
+    if not rows:
+        return "tensors: 0  (neither checkpoint contains any tensors)"
     counts = {s: 0 for s in STATUSES}
     by_kind: dict[str, dict[str, int]] = defaultdict(lambda: {s: 0 for s in STATUSES})
     identical_params = total_params = 0
