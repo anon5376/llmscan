@@ -58,13 +58,15 @@ $r$ equal directions score $r$.
 | Suspect | effective rank, median (max) | $\sigma_1/\sigma_2$, median |
 |---|---|---|
 | `huihui-ai/Huihui-Qwen3-1.7B-abliterated-v2` | 1.010 (1.011) | 111 |
-| `mlabonne/Qwen3-1.7B-abliterated` | 1.007 (1.008) | 138–159 |
-| `Goekdeniz-Guelmez/Josiefied-Qwen3-1.7B-abliterated-v1` | 1.010 (1.011) | 114–119 |
-| `DavidAU/Qwen3-0.6B-heretic-abliterated-uncensored` | 1.006–1.014 (1.036) | 82–146 |
-| `huihui-ai/Huihui-Qwen3-0.6B-abliterated-v2` | 1.005 (1.007) | 164–170 |
-| `mlabonne/Qwen3-0.6B-abliterated` | 1.020 (1.483, layer 0) | 62 |
+| `mlabonne/Qwen3-1.7B-abliterated` | 1.007 (1.008) | 142 |
+| `Goekdeniz-Guelmez/Josiefied-Qwen3-1.7B-abliterated-v1` | 1.010 (1.011) | 117 |
+| `DavidAU/Qwen3-0.6B-heretic-abliterated-uncensored` | 1.006 (1.036) | 143 |
+| `huihui-ai/Huihui-Qwen3-0.6B-abliterated-v2` | 1.005 (1.007) | 167 |
+| `mlabonne/Qwen3-0.6B-abliterated` | 1.021 (1.483, layer 0) | 63 |
 
-Each ΔW is one spike followed by a noise floor about 100× lower:
+Medians and maxima pool the `o_proj` and `down_proj` deltas of each model. In five of the six, every
+ΔW is one spike followed by a noise floor roughly 100× lower. `mlabonne/Qwen3-0.6B-abliterated`
+carries a weaker second direction in its first and last layers (layer 0: $\sigma_1/\sigma_2 \approx 9$).
 
 ![Singular values of ΔW for huihui-ai/Huihui-Qwen3-1.7B-abliterated-v2](docs/spectra-huihui-qwen3-1.7b.png)
 

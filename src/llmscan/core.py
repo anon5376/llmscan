@@ -6,6 +6,7 @@ writes what it returns to `delta.csv`.
 The spectrum comes from the Gram matrix of ΔW on its smaller side: its eigenvalues are the
 squared singular values. That is one matrix product plus a small symmetric eigensolve, in
 float64, accumulated in row blocks so a 151936 x 1024 embedding never needs a float64 copy.
+ΔW is divided by its largest entry first, so neither tiny nor huge F64 deltas under- or overflow.
 
 Effective rank is the participation ratio of the energy spectrum, (Σσ²)² / Σσ⁴. It is 1 for a
 rank-1 edit and r for r equal directions. Rounding noise from a bf16 re-save is spread thinly
@@ -52,12 +53,15 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
     if not np.isfinite(dw).all():
         return DeltaStats(np.full(min(k, dw.shape[1]), np.nan), float("nan"))
 
+    scale = max(float(dw.max()), -float(dw.min()))  # largest |ΔW| entry, without an abs() copy
+    if scale == 0.0:
+        return DeltaStats(np.zeros(min(k, dw.shape[1])), 0.0)
+
     gram = np.zeros((dw.shape[1], dw.shape[1]))
     for start in range(0, dw.shape[0], _ROWS_PER_BLOCK):
-        block = dw[start:start + _ROWS_PER_BLOCK].astype(np.float64)
+        block = dw[start:start + _ROWS_PER_BLOCK].astype(np.float64) / scale  # entries in [-1, 1]
         gram += block.T @ block
-    energy = np.clip(np.linalg.eigvalsh(gram)[::-1], 0.0, None)  # σ², largest first
+    energy = np.clip(np.linalg.eigvalsh(gram)[::-1], 0.0, None)  # (σ/scale)², largest first
 
-    total = float(energy.sum())
-    effective_rank = total * total / float(np.square(energy).sum()) if total > 0 else 0.0
-    return DeltaStats(np.sqrt(energy[:k]), effective_rank)
+    effective_rank = float(energy.sum()) ** 2 / float(np.square(energy).sum())
+    return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank)

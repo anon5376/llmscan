@@ -83,6 +83,12 @@ class TestAnalyzeDelta(unittest.TestCase):
         self.assertEqual(stats.effective_rank, 0.0)
         np.testing.assert_array_equal(stats.singular_values, [0.0, 0.0])
 
+    def test_extreme_f64_scales_keep_rank_and_spectrum(self):
+        for scale in (1e-150, 1e-100, 1e80, 1e150):
+            stats = core.analyze_delta(np.zeros((16, 16)), np.eye(16) * scale, k=3)
+            self.assertAlmostEqual(stats.effective_rank, 16.0, places=9, msg=f"scale {scale}")
+            np.testing.assert_allclose(stats.singular_values, [scale] * 3, rtol=1e-12)
+
     def test_non_finite_change_is_reported_as_nan(self):
         base = np.zeros((4, 4), dtype=np.float32)
         suspect = base.copy()
@@ -117,6 +123,18 @@ class TestScanPrecision(unittest.TestCase):
             (row,) = csv.DictReader(open(tmp / "delta.csv", encoding="utf-8"))
         self.assertGreater(expected, 10)
         self.assertAlmostEqual(float(row["effective_rank"]), expected, places=3)
+
+    def test_tiny_f64_change_through_the_scan_does_not_crash(self):
+        name = "model.layers.0.self_attn.o_proj.weight"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            write_safetensors(tmp / "a.safetensors", {name: ("F64", np.zeros((16, 16)))})
+            write_safetensors(tmp / "b.safetensors", {name: ("F64", np.eye(16) * 1e-100)})
+            with Checkpoint(tmp / "a.safetensors") as a, Checkpoint(tmp / "b.safetensors") as b:
+                delta.scan(a, b, inventory.compare(a, b), tmp / "delta.csv", k=4, log=lambda _: None)
+            (row,) = csv.DictReader(open(tmp / "delta.csv", encoding="utf-8"))
+        self.assertAlmostEqual(float(row["effective_rank"]), 16.0, places=4)
+        self.assertEqual(row["sv_001"], "1e-100")
 
 
 if __name__ == "__main__":
