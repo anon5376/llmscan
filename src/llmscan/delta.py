@@ -47,7 +47,8 @@ def scan(
             row = {"name": r.name, "layer": r.layer, "kind": r.kind, "status": r.status, "shape": r.base_shape}
             if r.status != IDENTICAL:
                 t0 = time.perf_counter()
-                stats = core.analyze_delta(base.to_float32(r.name), suspect.to_float32(r.name), k)
+                load = "to_float64" if "F64" in (r.base_dtype, r.suspect_dtype) else "to_float32"
+                stats = core.analyze_delta(getattr(base, load)(r.name), getattr(suspect, load)(r.name), k)
                 row["seconds"] = f"{time.perf_counter() - t0:.2f}"
                 row["effective_rank"] = f"{float(stats.effective_rank):.6g}"
                 for i, s in enumerate(stats.singular_values[:k]):

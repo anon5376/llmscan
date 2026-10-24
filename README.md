@@ -6,9 +6,9 @@ Check whether the abliterated or uncensored model you downloaded is only what it
 llmscan diffs the suspect's weights against the base model it says it came from, one tensor at a
 time, and reports where and how they differ.
 
-> **Status: early.** The loader, tensor inventory and plots work, and the inventory has run on six
-> real abliterated models (below). The ΔW spectral core is being written, so the rank half of the
-> hypothesis is still untested. llmscan ranks suspicion; it never certifies a model clean.
+> **Status: early.** The full pipeline works: loader, tensor inventory, ΔW spectra, suspicion ranking
+> and plots. On six real abliterated models, both halves of the hypothesis hold (below). llmscan
+> ranks suspicion; it never certifies a model clean.
 
 ## Hypothesis
 
@@ -47,8 +47,32 @@ six models, including the embeddings, all norms, `q/k/v_proj` and `gate/up_proj`
 
 The "confined to residual-writing matrices" part holds for all six, and none of these toolchains
 touches the embedding. Josiefied's model card describes a fine-tune, yet only `o_proj` and
-`down_proj` changed, so the rank of those deltas is the next thing to measure. Next: singular-value
-spectra of each ΔW, then a backdoor we plant in Qwen3-1.7B ourselves.
+`down_proj` changed.
+
+## Second result: every honest ΔW is rank 1
+
+For every changed matrix, llmscan computes the singular values of ΔW and its effective rank, the
+participation ratio $(\sum_i \sigma_i^2)^2 / \sum_i \sigma_i^4$. A rank-1 edit scores 1, and
+$r$ equal directions score $r$.
+
+| Suspect | effective rank, median (max) | $\sigma_1/\sigma_2$, median |
+|---|---|---|
+| `huihui-ai/Huihui-Qwen3-1.7B-abliterated-v2` | 1.010 (1.011) | 111 |
+| `mlabonne/Qwen3-1.7B-abliterated` | 1.007 (1.008) | 142 |
+| `Goekdeniz-Guelmez/Josiefied-Qwen3-1.7B-abliterated-v1` | 1.010 (1.011) | 117 |
+| `DavidAU/Qwen3-0.6B-heretic-abliterated-uncensored` | 1.006 (1.036) | 143 |
+| `huihui-ai/Huihui-Qwen3-0.6B-abliterated-v2` | 1.005 (1.007) | 167 |
+| `mlabonne/Qwen3-0.6B-abliterated` | 1.021 (1.483, layer 0) | 63 |
+
+Medians and maxima pool the `o_proj` and `down_proj` deltas of each model. In five of the six, every
+ΔW is one spike followed by a noise floor roughly 100× lower. `mlabonne/Qwen3-0.6B-abliterated`
+carries a weaker second direction in its first and last layers (layer 0: $\sigma_1/\sigma_2 \approx 9$).
+
+![Singular values of ΔW for huihui-ai/Huihui-Qwen3-1.7B-abliterated-v2](docs/spectra-huihui-qwen3-1.7b.png)
+
+With these stats, llmscan's ranking puts every changed tensor of all six models in T4, "consistent
+with abliteration": no false positives. Next: a modified model whose changes llmscan has to find
+blind.
 
 ## Use
 

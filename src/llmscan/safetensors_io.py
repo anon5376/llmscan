@@ -210,6 +210,15 @@ class Checkpoint:
                 out = np.frombuffer(buf, dtype=FLOAT_DTYPES[t.dtype]).astype(np.float32)
         return out.reshape(t.shape)
 
+    def to_float64(self, name: str) -> np.ndarray:
+        """Like `to_float32`, but exact for F64 tensors, whose differences float32 would round away."""
+        t = self.tensors[name]
+        if t.dtype != "F64":
+            return self.to_float32(name).astype(np.float64)
+        with memoryview(self._map(t.file)) as whole, whole[t.start:t.end] as buf:
+            out = np.frombuffer(buf, dtype="<f8").copy()
+        return out.reshape(t.shape)
+
     def close(self) -> None:
         for mm in self._maps.values():
             mm.close()
