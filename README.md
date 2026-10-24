@@ -96,15 +96,17 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
    the changed tensors of the same kind in the same model (`--outlier-factor`). The yardstick is the model's
    own median, not rank 1, because Heretic-style rank-3 edits and norm-preserving variants are honest.
    Assumes fewer than half of a kind's changed tensors are tampered with.
-   A changed tensor of an expected kind whose `delta.csv` stats are NaN or infinite is also T3 (reason: stats
-   not finite): unusable stats are never read as consistent, and they stay out of the medians.
+   A changed tensor of an expected kind whose `delta.csv` stats are unusable is also T3, ordered after the
+   genuine outliers (reason: `stats unusable: <why>`): no row in `delta.csv`, both cells blank, or an
+   effective rank or top singular value that is NaN, infinite, zero or negative. Unusable stats are never read
+   as consistent, and an unusable row stays out of every median as a whole.
 4. **T4, consistent with abliteration:** every other changed tensor.
 
-Inside a tier, higher effective rank first, then larger top singular value, then name (non-finite stats sort as missing). With
+Inside a tier, higher effective rank first, then larger top singular value, then name (unusable stats sort as missing), so the order never depends on the hash seed. With
 `--inventory-only` only T1, T2 and T4 exist. `scripts/score_blind.py --ranking ranking.csv --key key.txt`
 scores a ranking against an answer key of planted tensor names; it rejects a ranking that lists a tensor twice.
-`--outlier-factor` must be a finite number above 0. A run that fails before the inventory is written removes any
-`ranking.csv` left in `--out` by an earlier run.
+`--outlier-factor` must be a finite number above 0. `ranking.csv` is written only into an `--out` that is new, empty
+or already marked for the same pair by `pair.txt`; llmscan never deletes or overwrites a `ranking.csv` it did not write.
 
 ## Safety
 

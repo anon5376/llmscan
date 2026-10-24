@@ -4,6 +4,9 @@ import importlib.util
 import io
 import itertools
 import math
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +19,7 @@ from llmscan import cli, core, inventory, rank
 from llmscan.inventory import CHANGED, DTYPE_MISMATCH, IDENTICAL, ONLY_BASE, ONLY_SUSPECT, SHAPE_MISMATCH, InventoryRow
 from llmscan.names import kind_of, layer_of
 
+SRC = Path(__file__).resolve().parents[1] / "src"
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "score_blind.py"
 
 
@@ -156,6 +160,7 @@ class TestTiers(unittest.TestCase):
         self.assertEqual(orders, {(layer_name(1), layer_name(2), layer_name(3), layer_name(0))})
         ranked = rank.rank_tensors(rows, stats)
         self.assertEqual([r.tier for r in ranked], ["T3", "T4", "T4", "T4"])
+        self.assertIn("stats unusable", ranked[0].reason)
         self.assertIn("not finite", ranked[0].reason)
 
     def test_infinity_does_not_contaminate_the_median(self):
@@ -167,6 +172,52 @@ class TestTiers(unittest.TestCase):
         self.assertEqual(ranked[layer_name(3)].tier, "T3")
         self.assertIn("not finite", ranked[layer_name(3)].reason)
         self.assertEqual({ranked[layer_name(0)].tier, ranked[layer_name(1)].tier}, {"T4"})
+
+    def test_row_with_any_non_finite_stat_is_out_of_every_median(self):
+        rows = [row(layer_name(i)) for i in range(4)]
+        stats = dict(zip((layer_name(i) for i in range(4)), [(1.0, 1.0), (1.0, 1.0), (9.0, 1.0), (100.0, math.inf)]))
+        ranked = {r.name: r for r in rank.rank_tensors(rows, stats)}
+        self.assertEqual(ranked[layer_name(2)].tier, "T3")  # 9 vs the median 1 of the three usable rows
+        self.assertIn("9.0x", ranked[layer_name(2)].reason)
+        self.assertEqual(ranked[layer_name(3)].tier, "T3")
+        self.assertIn("stats unusable", ranked[layer_name(3)].reason)
+
+    def test_missing_or_invalid_stats_are_t3_after_the_genuine_outliers(self):
+        rows = [row(layer_name(i)) for i in range(6)]
+        peers = {layer_name(0): (1.0, 1.0), layer_name(1): (1.0, 1.0), layer_name(2): (1.0, 1.0), layer_name(3): (9.0, 1.0)}
+        cases = {
+            "negative effective_rank": (-1.0, 100.0),
+            "zero effective_rank": (0.0, 100.0),
+            "negative sv": (1.0, -1.0),
+            "zero sv": (1.0, 0.0),
+            "blank": (None, None),
+        }
+        for label, bad in cases.items():
+            with self.subTest(label):
+                ranked = rank.rank_tensors(rows[:5], {**peers, layer_name(4): bad})
+                self.assertEqual([r.tier for r in ranked], ["T3", "T3", "T4", "T4", "T4"])
+                self.assertEqual([r.name for r in ranked[:2]], [layer_name(3), layer_name(4)])
+                self.assertTrue(ranked[1].reason.startswith("stats unusable: "), ranked[1].reason)
+        with self.subTest("missing delta row"):
+            ranked = rank.rank_tensors(rows[:5], peers)  # no row for layer 4
+            self.assertEqual([(r.name, r.tier) for r in ranked[:2]], [(layer_name(3), "T3"), (layer_name(4), "T3")])
+            self.assertIn("no ΔW stats", ranked[1].reason)
+
+    def test_blank_effective_rank_with_a_usable_sv_is_still_judged(self):
+        rows = [row(layer_name(i)) for i in range(4)]
+        stats = {layer_name(i): (None, v) for i, v in enumerate([1.0, 1.0, 1.0, 9.0])}
+        self.assertEqual([r.tier for r in rank.rank_tensors(rows, stats)], ["T3", "T4", "T4", "T4"])
+
+    def test_inventory_only_t4_is_not_an_unusable_stats_case(self):
+        ranked = rank.rank_tensors([row(layer_name(0))])
+        self.assertEqual(ranked[0].tier, "T4")
+        self.assertIn("no ΔW stats", ranked[0].reason)
+
+    def test_names_with_equal_natural_keys_have_one_order(self):
+        names = ["added.1.weight", "added.01.weight", "added.001.weight"]
+        rows = [row(n, ONLY_SUSPECT) for n in names]
+        orders = {tuple(r.name for r in rank.rank_tensors(list(p))) for p in itertools.permutations(rows)}
+        self.assertEqual(len(orders), 1)
 
     def test_outlier_factor_must_be_finite_and_positive(self):
         for bad in (math.nan, math.inf, 0.0, -1.0):
@@ -245,15 +296,49 @@ class TestCli(unittest.TestCase):
             self.assertEqual(cm.exception.code, 2, bad)
         self.assertFalse((self.tmp / "out").exists())
 
-    def test_failed_run_does_not_leave_a_previous_ranking(self):
-        self.assertEqual(run_cli(*self.args, "--inventory-only")[0], 0)
-        ranking = self.tmp / "out" / "ranking.csv"
-        self.assertTrue(ranking.is_file())
-        with self.assertRaises(SystemExit) as cm:
-            run_cli("--base", str(self.tmp / "nope.safetensors"), "--suspect", str(self.tmp / "suspect.safetensors"),
-                    "--out", str(self.tmp / "out"), "--inventory-only")
-        self.assertNotEqual(cm.exception.code, 0)
-        self.assertFalse(ranking.exists())
+    def test_failed_run_never_touches_a_users_ranking_csv(self):
+        bad = ["--base", str(self.tmp / "nope.safetensors"), "--suspect", str(self.tmp / "suspect.safetensors"), "--inventory-only"]
+        mine = self.tmp / "mine"
+        mine.mkdir()
+        (mine / "ranking.csv").write_text("my own notes\n", encoding="utf-8")
+        link = self.tmp / "link"
+        link.symlink_to(mine, target_is_directory=True)
+        for out in (mine, link):
+            with self.subTest(out=out.name):
+                with self.assertRaises(SystemExit) as cm:
+                    run_cli(*bad, "--out", str(out))
+                self.assertNotEqual(cm.exception.code, 0)
+                self.assertEqual((mine / "ranking.csv").read_text(encoding="utf-8"), "my own notes\n")
+                with self.assertRaises(SystemExit):  # valid inputs are refused as well: the directory is not llmscan's
+                    run_cli(*self.args[:4], "--out", str(out), "--inventory-only")
+                self.assertEqual((mine / "ranking.csv").read_text(encoding="utf-8"), "my own notes\n")
+
+    def test_ranking_csv_symlink_is_refused_and_its_target_untouched(self):
+        out = self.tmp / "out"
+        out.mkdir()
+        target = self.tmp / "precious.txt"
+        target.write_text("keep\n", encoding="utf-8")
+        (out / "ranking.csv").symlink_to(target)
+        with self.assertRaises(SystemExit):
+            run_cli(*self.args, "--inventory-only")
+        self.assertEqual(target.read_text(encoding="utf-8"), "keep\n")
+
+    def test_ranking_order_does_not_depend_on_the_hash_seed(self):
+        base = {"model.embed_tokens.weight": ("F32", np.zeros((4, 4), np.float32))}
+        suspect = dict(base)
+        for n in ("added.1.weight", "added.01.weight", "added.001.weight", "added.2.weight", "added.10.weight"):
+            suspect[n] = ("F32", np.zeros((2, 2), np.float32))
+        write_safetensors(self.tmp / "b.safetensors", base)
+        write_safetensors(self.tmp / "s.safetensors", suspect)
+        outputs = set()
+        for seed in ("1", "2", "3", "4", "5"):
+            out = self.tmp / f"seed{seed}"
+            env = {**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(SRC)}
+            subprocess.run([sys.executable, "-m", "llmscan", "--base", str(self.tmp / "b.safetensors"),
+                            "--suspect", str(self.tmp / "s.safetensors"), "--out", str(out), "--inventory-only"],
+                           env=env, check=True, capture_output=True)
+            outputs.add((out / "ranking.csv").read_bytes())
+        self.assertEqual(len(outputs), 1)
 
 
 def load_scorer():

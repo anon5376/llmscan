@@ -18,11 +18,12 @@ in the inventory. Every ranked tensor lands in one tier and carries a human-read
                      fewer than half of a kind's changed tensors are tampered with.
     T4 consistent    every other changed tensor.
 
-A changed expected-kind tensor whose delta.csv effective_rank or sv_001 is NaN or infinite has
-unusable stats: it is T3 with a reason saying so, never T4, and it stays out of the medians.
+When delta.csv is supplied, a changed expected-kind tensor whose stats are unusable is T3 with reason
+"stats unusable: <why>", never T4: no delta row, both cells blank, or any given effective_rank / sv_001
+that is NaN, infinite, zero or negative. An unusable row is excluded as a whole from every median.
 
-Inside a tier: effective_rank, then sv_001, both descending; tensors without usable (finite) stats
-follow in natural name order.
+Inside a tier: effective_rank, then sv_001, both descending; tensors without usable stats follow in
+natural name order, then raw name. Unusable-stats T3 rows come after the genuine outliers.
 """
 
 from __future__ import annotations
@@ -102,6 +103,19 @@ def _structure_reason(r: InventoryRow) -> str:
     return f"dtype differs and is not a float re-save: base {r.base_dtype} vs suspect {r.suspect_dtype}"
 
 
+def _unusable(stats: tuple[float | None, float | None]) -> str | None:
+    """Why a delta.csv row cannot be judged, or None. Blank cells are fine as long as one stat is given."""
+    er, sv = stats
+    if er is None and sv is None:
+        return "no ΔW stats for this tensor"
+    for label, v in (("effective_rank", er), (SV1, sv)):
+        if v is not None and not math.isfinite(v):
+            return f"{label} {v} is not finite"
+        if v is not None and v <= 0:
+            return f"{label} {v:g} is not positive"
+    return None
+
+
 def rank_tensors(
     rows: list[InventoryRow],
     delta: dict[str, tuple[float | None, float | None]] | None = None,
@@ -112,19 +126,23 @@ def rank_tensors(
     delta = delta or {}
     expected = frozenset(canonical_kind(k) for k in expected)
     stats = {r.name: delta.get(r.name, (None, None)) for r in rows}
+    bad = {r.name: _unusable(stats[r.name]) if delta else None for r in rows}
 
     # medians per kind over changed, expected-kind tensors; effective_rank and sv_001 kept apart
     groups: dict[tuple[str, int], list[float]] = defaultdict(list)
     for r in rows:
         if r.status == CHANGED and canonical_kind(r.kind) in expected:
             er, sv = stats[r.name]
-            if er is not None and math.isfinite(er) and er > 0:
+            if bad[r.name]:
+                continue
+            if er is not None:
                 groups[canonical_kind(r.kind), 0].append(er)
-            elif er is None and sv is not None and math.isfinite(sv) and sv > 0:
+            elif sv is not None:
                 groups[canonical_kind(r.kind), 1].append(sv)
     medians = {g: statistics.median(v) for g, v in groups.items() if len(v) >= MIN_GROUP}
 
     ranked: list[tuple[str, InventoryRow, str]] = []
+    unusable: set[str] = set()
     for r in rows:
         if r.status == IDENTICAL:
             continue
@@ -135,9 +153,9 @@ def rank_tensors(
             ranked.append((T2, r, f"changed {r.kind}: outside expected kinds ({', '.join(sorted(expected))})"))
         else:
             er, sv = stats[r.name]
-            if not all(v is None or math.isfinite(v) for v in (er, sv)):
-                ranked.append((T3, r, f"ΔW stats are not finite (effective_rank {er}, {SV1} {sv}): "
-                                      "cannot be judged consistent with abliteration"))
+            if bad[r.name]:
+                ranked.append((T3, r, f"stats unusable: {bad[r.name]}; cannot be judged consistent with abliteration"))
+                unusable.add(r.name)
                 continue
             which, value = (0, er) if er is not None else (1, sv)
             median = medians.get((kind, which))
@@ -151,8 +169,8 @@ def rank_tensors(
 
     def key(item):
         tier, r, _ = item
-        er, sv = (v if v is not None and math.isfinite(v) else None for v in stats[r.name])
-        return (tier, er is None, -(er or 0.0), sv is None, -(sv or 0.0), natural_key(r.name))
+        er, sv = (v if v is not None and math.isfinite(v) and r.name not in unusable else None for v in stats[r.name])
+        return (tier, r.name in unusable, er is None, -(er or 0.0), sv is None, -(sv or 0.0), natural_key(r.name), r.name)
 
     ranked.sort(key=key)
     return [
