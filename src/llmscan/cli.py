@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--expected-kinds", type=rank.parse_kinds, default=rank.DEFAULT_EXPECTED_KINDS, metavar="KINDS",
                     help="comma-separated matrix kinds an abliteration may change (default: "
                          + ",".join(sorted(rank.DEFAULT_EXPECTED_KINDS)) + ")")
-    ap.add_argument("--outlier-factor", type=float, default=rank.DEFAULT_OUTLIER_FACTOR, metavar="X",
+    ap.add_argument("--outlier-factor", type=rank.parse_factor, default=rank.DEFAULT_OUTLIER_FACTOR, metavar="X",
                     help="effective rank above X times the median of its kind is an outlier (default: 3)")
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # a redirected Windows console may not encode every path

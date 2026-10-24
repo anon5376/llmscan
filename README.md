@@ -96,11 +96,15 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
    the changed tensors of the same kind in the same model (`--outlier-factor`). The yardstick is the model's
    own median, not rank 1, because Heretic-style rank-3 edits and norm-preserving variants are honest.
    Assumes fewer than half of a kind's changed tensors are tampered with.
+   A changed tensor of an expected kind whose `delta.csv` stats are NaN or infinite is also T3 (reason: stats
+   not finite): unusable stats are never read as consistent, and they stay out of the medians.
 4. **T4, consistent with abliteration:** every other changed tensor.
 
-Inside a tier, higher effective rank first, then larger top singular value, then name. With
+Inside a tier, higher effective rank first, then larger top singular value, then name (non-finite stats sort as missing). With
 `--inventory-only` only T1, T2 and T4 exist. `scripts/score_blind.py --ranking ranking.csv --key key.txt`
-scores a ranking against an answer key of planted tensor names.
+scores a ranking against an answer key of planted tensor names; it rejects a ranking that lists a tensor twice.
+`--outlier-factor` must be a finite number above 0. A run that fails before the inventory is written removes any
+`ranking.csv` left in `--out` by an earlier run.
 
 ## Safety
 

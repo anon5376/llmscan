@@ -2,6 +2,8 @@ import contextlib
 import csv
 import importlib.util
 import io
+import itertools
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -144,6 +146,37 @@ class TestTiers(unittest.TestCase):
         with self.assertRaises(ValueError):
             rank.parse_kinds(" , ")
 
+    def test_non_finite_stats_are_never_consistent_and_order_is_deterministic(self):
+        rows = [row(layer_name(i)) for i in range(4)]
+        stats = {layer_name(0): (1.0, 1.0), layer_name(1): (math.nan, 9.0), layer_name(2): (1.0, 4.0), layer_name(3): (1.0, 3.0)}
+        orders = set()
+        for perm in itertools.permutations(rows):
+            ranked = rank.rank_tensors(list(perm), stats)
+            orders.add(tuple(r.name for r in ranked))
+        self.assertEqual(orders, {(layer_name(1), layer_name(2), layer_name(3), layer_name(0))})
+        ranked = rank.rank_tensors(rows, stats)
+        self.assertEqual([r.tier for r in ranked], ["T3", "T4", "T4", "T4"])
+        self.assertIn("not finite", ranked[0].reason)
+
+    def test_infinity_does_not_contaminate_the_median(self):
+        rows = [row(layer_name(i)) for i in range(4)]
+        stats = {layer_name(i): (v, 1.0) for i, v in enumerate([1.0, 1.0, 9.0, math.inf])}
+        ranked = {r.name: r for r in rank.rank_tensors(rows, stats)}
+        self.assertEqual(ranked[layer_name(2)].tier, "T3")  # 9 vs the finite median 1
+        self.assertIn("9.0x", ranked[layer_name(2)].reason)
+        self.assertEqual(ranked[layer_name(3)].tier, "T3")
+        self.assertIn("not finite", ranked[layer_name(3)].reason)
+        self.assertEqual({ranked[layer_name(0)].tier, ranked[layer_name(1)].tier}, {"T4"})
+
+    def test_outlier_factor_must_be_finite_and_positive(self):
+        for bad in (math.nan, math.inf, 0.0, -1.0):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                rank.rank_tensors([row(layer_name(0))], factor=bad)
+        for bad in ("nan", "inf", "0", "-2", "x"):
+            with self.assertRaises(ValueError, msg=bad):
+                rank.parse_factor(bad)
+        self.assertEqual(rank.parse_factor("2.5"), 2.5)
+
 
 class TestCli(unittest.TestCase):
     """Real (tiny) checkpoints through the CLI; the core is a stub or a stand-in returning canned stats."""
@@ -204,6 +237,24 @@ class TestCli(unittest.TestCase):
         self.assertEqual({r["tier"] for r in rows[2:]}, {"T4"})
         self.assertIn("ranking.csv", out)
 
+    def test_invalid_outlier_factor_is_rejected_before_any_work(self):
+        for bad in ("nan", "inf", "0", "-1"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                cli.main([*self.args, "--inventory-only", "--outlier-factor", bad])
+            self.assertEqual(cm.exception.code, 2, bad)
+        self.assertFalse((self.tmp / "out").exists())
+
+    def test_failed_run_does_not_leave_a_previous_ranking(self):
+        self.assertEqual(run_cli(*self.args, "--inventory-only")[0], 0)
+        ranking = self.tmp / "out" / "ranking.csv"
+        self.assertTrue(ranking.is_file())
+        with self.assertRaises(SystemExit) as cm:
+            run_cli("--base", str(self.tmp / "nope.safetensors"), "--suspect", str(self.tmp / "suspect.safetensors"),
+                    "--out", str(self.tmp / "out"), "--inventory-only")
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertFalse(ranking.exists())
+
 
 def load_scorer():
     spec = importlib.util.spec_from_file_location("score_blind", SCRIPT)
@@ -255,6 +306,19 @@ class TestScorer(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("recall@10 = 0.500", out)
         self.assertIn("precision@2 = 0.500", out)
+
+    def test_duplicate_ranking_rows_neither_inflate_recall_nor_pass(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as cm:
+            self.score(["a", "a", "b"], "a\n")
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_duplicate_key_lines_count_once(self):
+        code, out = self.score(["a", "b"], "a\na\nb\nb\n")
+        self.assertEqual(code, 0, out)
+        self.assertIn("precision@2 = 1.000", out)
+        self.assertIn("recall@10 = 1.000", out)
 
     def test_nothing_is_printed_before_both_files_are_read(self):
         out = io.StringIO()

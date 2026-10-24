@@ -18,13 +18,17 @@ in the inventory. Every ranked tensor lands in one tier and carries a human-read
                      fewer than half of a kind's changed tensors are tampered with.
     T4 consistent    every other changed tensor.
 
-Inside a tier: effective_rank, then sv_001, both descending; tensors without stats follow in
-natural name order.
+A changed expected-kind tensor whose delta.csv effective_rank or sv_001 is NaN or infinite has
+unusable stats: it is T3 with a reason saying so, never T4, and it stays out of the medians.
+
+Inside a tier: effective_rank, then sv_001, both descending; tensors without usable (finite) stats
+follow in natural name order.
 """
 
 from __future__ import annotations
 
 import csv
+import math
 import re
 import statistics
 from collections import defaultdict
@@ -64,6 +68,16 @@ def parse_kinds(text: str) -> frozenset[str]:
     return kinds
 
 
+def parse_factor(text: str) -> float:
+    return check_factor(float(text))
+
+
+def check_factor(factor: float) -> float:
+    if not math.isfinite(factor) or factor <= 0:
+        raise ValueError(f"outlier factor must be a finite number above 0, got {factor}")
+    return factor
+
+
 def canonical_kind(kind: str) -> str:
     """`experts.down_proj` (fused MoE) -> `down_proj`; GGUF `ffn_down_exps` / `ffn_down_shexp` -> `ffn_down`."""
     return re.sub(r"_(exps|shexp)$", "", kind.removeprefix("experts."))
@@ -94,6 +108,7 @@ def rank_tensors(
     expected: frozenset[str] = DEFAULT_EXPECTED_KINDS,
     factor: float = DEFAULT_OUTLIER_FACTOR,
 ) -> list[RankedRow]:
+    check_factor(factor)
     delta = delta or {}
     expected = frozenset(canonical_kind(k) for k in expected)
     stats = {r.name: delta.get(r.name, (None, None)) for r in rows}
@@ -103,9 +118,9 @@ def rank_tensors(
     for r in rows:
         if r.status == CHANGED and canonical_kind(r.kind) in expected:
             er, sv = stats[r.name]
-            if er is not None and er > 0:
+            if er is not None and math.isfinite(er) and er > 0:
                 groups[canonical_kind(r.kind), 0].append(er)
-            elif er is None and sv is not None and sv > 0:
+            elif er is None and sv is not None and math.isfinite(sv) and sv > 0:
                 groups[canonical_kind(r.kind), 1].append(sv)
     medians = {g: statistics.median(v) for g, v in groups.items() if len(v) >= MIN_GROUP}
 
@@ -120,6 +135,10 @@ def rank_tensors(
             ranked.append((T2, r, f"changed {r.kind}: outside expected kinds ({', '.join(sorted(expected))})"))
         else:
             er, sv = stats[r.name]
+            if not all(v is None or math.isfinite(v) for v in (er, sv)):
+                ranked.append((T3, r, f"ΔW stats are not finite (effective_rank {er}, {SV1} {sv}): "
+                                      "cannot be judged consistent with abliteration"))
+                continue
             which, value = (0, er) if er is not None else (1, sv)
             median = medians.get((kind, which))
             if value is not None and value > 0 and median and value > factor * median:
@@ -132,7 +151,7 @@ def rank_tensors(
 
     def key(item):
         tier, r, _ = item
-        er, sv = stats[r.name]
+        er, sv = (v if v is not None and math.isfinite(v) else None for v in stats[r.name])
         return (tier, er is None, -(er or 0.0), sv is None, -(sv or 0.0), natural_key(r.name))
 
     ranked.sort(key=key)

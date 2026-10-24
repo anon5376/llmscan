@@ -2,7 +2,8 @@
 
     python scripts/score_blind.py --ranking out/<run>/ranking.csv --key key.txt
 
-The key holds one tensor name per line; blank lines and `#` comments are ignored. With n key
+The key holds one tensor name per line; blank lines, `#` comments and repeated names are ignored.
+A ranking that lists a name twice is rejected. With n key
 tensors, PASS means the top n ranked names are exactly the key set. Exit 0 on PASS, 1 otherwise.
 """
 
@@ -38,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     if not key:
         raise SystemExit(f"score_blind: {args.key}: no tensor names")
 
+    if len(set(ranked)) != len(ranked):
+        raise SystemExit(f"score_blind: {args.ranking}: duplicate tensor names in the ranking")
     position = {name: i for i, name in enumerate(ranked, 1)}
     n, wanted = len(key), set(key)
     precision = sum(name in wanted for name in ranked[:n]) / n
