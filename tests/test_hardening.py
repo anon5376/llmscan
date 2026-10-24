@@ -14,7 +14,7 @@ from unittest import mock
 import numpy as np
 
 from helpers import write_safetensors, write_sharded
-from llmscan import cli, core, inventory
+from llmscan import atomic, cli, core, inventory
 from llmscan.safetensors_io import MAX_OPEN_MAPS, Checkpoint, CheckpointError
 from test_pipeline import fake_analyze, run_cli
 
@@ -29,6 +29,16 @@ def write_raw(path: Path, header: dict | bytes, payload: bytes) -> None:
 
 def entry(dtype: str, shape: list, begin: int, end: int) -> dict:
     return {"dtype": dtype, "shape": shape, "data_offsets": [begin, end]}
+
+
+def link_or_skip(make, *args, **kw) -> None:
+    """Symlinks and hard links need a privilege or filesystem support that some systems lack."""
+    try:
+        make(*args, **kw)
+    except FileExistsError:
+        raise
+    except (OSError, NotImplementedError) as e:
+        raise unittest.SkipTest(f"cannot create the link here: {e}")
 
 
 def compare_one(tmp: Path, base: tuple[str, np.ndarray], suspect: tuple[str, np.ndarray]) -> str:
@@ -255,7 +265,8 @@ class TestCliOutputs(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("spectra.png", stdout)
             earlier = (out / "spectra.png").read_bytes()
-            code, stdout, err = run_cli("--base", base, "--suspect", base, "--out", str(out), "-k", "2")
+            write_safetensors(self.tmp / "b" / "model.safetensors", {"w": ("F32", np.full((4, 4), 1, np.float32))})  # now equal to a
+            code, stdout, err = run_cli("--base", base, "--suspect", other, "--out", str(out), "-k", "2")
         self.assertEqual(code, 0)
         self.assertNotIn("spectra.png", stdout)  # not written this run
         self.assertIn("left over", err)
@@ -266,7 +277,7 @@ class TestCliOutputs(unittest.TestCase):
         out.mkdir()
         model = self.tmp / "a" / "model.safetensors"
         before = model.read_bytes()
-        (out / "pair.txt").symlink_to(model)
+        link_or_skip((out / "pair.txt").symlink_to, model)
         with self.assertRaises(SystemExit) as cm:
             run_cli("--base", str(model), "--suspect", str(model), "--out", str(out), "--inventory-only")
         self.assertIn("symbolic link", str(cm.exception))
@@ -277,7 +288,7 @@ class TestCliOutputs(unittest.TestCase):
         other = self.tmp / "b" / "model.safetensors"
         (self.tmp / "a" / "spectra.png").write_bytes(b"someone else's figure")
         (self.tmp / "a" / "child").mkdir()
-        (self.tmp / "link").symlink_to(self.tmp / "a", target_is_directory=True)
+        link_or_skip((self.tmp / "link").symlink_to, self.tmp / "a", target_is_directory=True)
         for out in (self.tmp / "a", self.tmp / "a" / "child" / "..", self.tmp / "link"):
             with self.subTest(out=str(out)), self.assertRaises(SystemExit) as cm:
                 run_cli("--base", str(model), "--suspect", str(other), "--out", str(out))
@@ -306,6 +317,142 @@ class TestCliOutputs(unittest.TestCase):
         self.assertEqual((self.tmp / "out" / "model.safetensors-vs-model.safetensors" / "inventory.csv").read_text(), first)
         self.assertEqual(run_cli("--base", a, "--suspect", a, "--inventory-only")[0], 0)  # rerun of the same pair
         self.assertEqual(run_cli("--base", b, "--suspect", b, "--inventory-only", "--out", "elsewhere")[0], 0)
+
+    def test_a_link_that_appears_between_the_checks_and_the_writes_is_replaced_not_followed(self):
+        out, model = self.tmp / "o", self.tmp / "a" / "model.safetensors"
+        other = self.tmp / "b" / "model.safetensors"
+        victims = {name: self.tmp / f"victim-{name}" for name in ("pair.txt", "inventory.csv", "inventory.txt",
+                                                                  "delta.csv", "spectra.png", "effective_rank.png")}
+        for v in victims.values():
+            v.write_bytes(b"a checkpoint")
+
+        def plant(*names):
+            for name in names:
+                (out / name).unlink(missing_ok=True)  # the intruder takes the name over
+                link_or_skip((out / name).symlink_to, victims[name])
+
+        real_mkdir, real_analyze = Path.mkdir, fake_analyze
+        def mkdir_then_plant(self_, *a, **kw):  # after both guards have passed, before the first write
+            real_mkdir(self_, *a, **kw)
+            if self_ == out:
+                plant("pair.txt", "inventory.csv", "inventory.txt")
+        def analyze_then_plant(*a):  # while the scan runs, before delta.csv and the figures are written
+            plant("delta.csv", "spectra.png", "effective_rank.png")
+            return real_analyze(*a)
+        fake_analyze.calls = []
+        with mock.patch.object(Path, "mkdir", mkdir_then_plant), mock.patch.object(core, "analyze_delta", analyze_then_plant):
+            code, _, _ = run_cli("--base", str(model), "--suspect", str(other), "--out", str(out), "-k", "2")
+        self.assertEqual(code, 0)
+        for name, v in victims.items():
+            with self.subTest(name=name):
+                self.assertEqual(v.read_bytes(), b"a checkpoint")
+                self.assertFalse((out / name).is_symlink())
+                self.assertTrue((out / name).is_file())
+
+    def test_hard_linked_pair_txt_is_not_ours_and_is_not_truncated(self):
+        out, model = self.tmp / "o", self.tmp / "a" / "model.safetensors"
+        out.mkdir()
+        link_or_skip(os.link, model, out / "pair.txt")
+        before = model.read_bytes()
+        for extra in ([], ["--inventory-only"]):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit) as cm:
+                run_cli("--base", str(model), "--suspect", str(model), "--out", str(out), *extra)
+            self.assertIn("hard links", str(cm.exception))
+        self.assertEqual(model.read_bytes(), before)
+        self.assertEqual(sorted(p.name for p in out.iterdir()), ["pair.txt"])
+
+    def test_hard_linked_report_file_is_replaced_not_truncated(self):
+        out, model = self.tmp / "o", self.tmp / "a" / "model.safetensors"
+        self.assertEqual(run_cli("--base", str(model), "--suspect", str(model), "--out", str(out), "--inventory-only")[0], 0)
+        (out / "inventory.csv").unlink()
+        victim = self.tmp / "victim.csv"
+        victim.write_bytes(b"a checkpoint")
+        link_or_skip(os.link, victim, out / "inventory.csv")
+        self.assertEqual(run_cli("--base", str(model), "--suspect", str(model), "--out", str(out), "--inventory-only")[0], 0)
+        self.assertEqual(victim.read_bytes(), b"a checkpoint")
+        self.assertIn("name,", (out / "inventory.csv").read_text())
+
+    def test_explicit_out_marked_for_another_pair_is_refused(self):
+        a, b = str(self.tmp / "a" / "model.safetensors"), str(self.tmp / "b" / "model.safetensors")
+        out = self.tmp / "o"
+        self.assertEqual(run_cli("--base", a, "--suspect", a, "--out", str(out), "--inventory-only")[0], 0)
+        before = {p.name: p.read_bytes() for p in out.iterdir()}
+        with self.assertRaises(SystemExit) as cm:
+            run_cli("--base", b, "--suspect", b, "--out", str(out), "--inventory-only")
+        self.assertIn("different comparison", str(cm.exception))
+        self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
+        self.assertEqual(run_cli("--base", a, "--suspect", a, "--out", str(out), "--inventory-only")[0], 0)  # same pair: fine
+
+    def test_marker_that_is_not_text_is_refused_not_a_crash(self):
+        a = str(self.tmp / "a" / "model.safetensors")
+        out = self.tmp / "o"
+        out.mkdir()
+        (out / "pair.txt").write_bytes(b"\xff\xfe not utf-8")
+        with self.assertRaises(SystemExit) as cm:
+            run_cli("--base", a, "--suspect", a, "--out", str(out), "--inventory-only")
+        self.assertIn("different comparison", str(cm.exception))
+
+
+class TestAtomicWrite(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_replaces_the_name_and_leaves_no_temporary_file(self):
+        target = self.tmp / "report.csv"
+        target.write_text("old")
+        self.assertTrue(atomic.write(target, lambda tmp: tmp.write_text("new")))
+        self.assertEqual(target.read_text(), "new")
+        self.assertEqual(os.listdir(self.tmp), ["report.csv"])
+
+    def test_symlink_and_hard_link_on_the_name_are_replaced_not_followed(self):
+        victim = self.tmp / "victim"
+        victim.write_bytes(b"a checkpoint")
+        link_or_skip((self.tmp / "sym").symlink_to, victim)
+        link_or_skip(os.link, victim, self.tmp / "hard")
+        for name in ("sym", "hard"):
+            atomic.write_text(self.tmp / name, "ours")
+            self.assertEqual((self.tmp / name).read_text(), "ours")
+            self.assertFalse((self.tmp / name).is_symlink())
+        self.assertEqual(victim.read_bytes(), b"a checkpoint")
+
+    def test_failed_writer_keeps_the_old_file_and_leaves_no_temporary_file(self):
+        target = self.tmp / "report.csv"
+        target.write_text("old")
+
+        def broken(tmp):
+            tmp.write_text("half")
+            raise RuntimeError("boom")
+        with self.assertRaises(RuntimeError):
+            atomic.write(target, broken)
+        self.assertEqual(target.read_text(), "old")
+        self.assertEqual(os.listdir(self.tmp), ["report.csv"])
+
+    def test_keep_partial_installs_what_was_written_before_the_failure(self):
+        target = self.tmp / "delta.csv"
+        target.write_text("old")
+
+        def broken(tmp):
+            tmp.write_text("rows so far")
+            raise RuntimeError("boom")
+        with self.assertRaises(RuntimeError):
+            atomic.write(target, broken, keep_partial=True)
+        self.assertEqual(target.read_text(), "rows so far")
+        self.assertEqual(os.listdir(self.tmp), ["delta.csv"])
+
+    def test_writer_returning_false_writes_nothing(self):
+        target = self.tmp / "spectra.png"
+        target.write_bytes(b"old")
+        self.assertFalse(atomic.write(target, lambda tmp: False))
+        self.assertEqual(target.read_bytes(), b"old")
+        self.assertEqual(os.listdir(self.tmp), ["spectra.png"])
+
+    def test_temporary_file_keeps_the_suffix_so_savefig_can_pick_a_format(self):
+        seen = []
+        atomic.write(self.tmp / "x.png", lambda tmp: seen.append(tmp.suffix))
+        self.assertEqual(seen, [".png"])
+
+    def test_outputs_cover_every_file_the_cli_writes(self):
+        self.assertIn("ranking.csv", cli.OUTPUTS)
 
 
 class TestEmptyCheckpoints(unittest.TestCase):
