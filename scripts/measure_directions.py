@@ -73,11 +73,32 @@ def summary(values):
     return f"n={len(usable)} min={min(usable):.8f} median={np.median(usable):.8f}"
 
 
+def print_layer_pairs(rows, vectors):
+    by_kind = {"o_proj": {}, "down_proj": {}}
+    aliases = {"attn_output": "o_proj", "ffn_down": "down_proj",
+               "experts.down_proj": "down_proj", "ffn_down_exps": "down_proj", "ffn_down_shexp": "down_proj"}
+    for row, vector in zip(rows, vectors):
+        kind = aliases.get(row.kind, row.kind)
+        if kind in by_kind and row.layer is not None and vector is not None:
+            by_kind[kind].setdefault(row.layer, []).append(vector)
+
+    def compare(left, right, offset):
+        return summary(min(abs(float(a @ b)), 1.0)
+                       for layer, group in left.items()
+                       for a in group for b in right.get(layer + offset, ())
+                       if a.shape == b.shape)
+
+    within = compare(by_kind["o_proj"], by_kind["down_proj"], 0)
+    print(f"same layer |cos(o_proj, down_proj)| {within}")
+    for kind, layers in by_kind.items():
+        print(f"adjacent layers |cos| {kind} {compare(layers, layers, 1)}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base", type=Path, required=True)
     ap.add_argument("--suspect", type=Path, required=True)
-    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--out", type=Path, required=True, help="new or empty directory for directions.csv")
     ap.add_argument("--probe-layers", type=int, nargs="+", default=(), metavar="N",
                     help="try independent norm-matched BF16 replacements in o_proj and down_proj at these layers")
     args = ap.parse_args(argv)
@@ -89,7 +110,9 @@ def main(argv=None):
             model_dir = (path if path.is_dir() else path.parent).resolve()
             # resolve() preserves case even when the filesystem treats two spellings as one directory.
             if model_dir.is_dir() and any(d.samefile(model_dir) for d in existing_dirs):
-                ap.error(f"--out is inside the model directory {model_dir}")
+                raise SystemExit(f"measure_directions: --out is inside the model directory {model_dir}")
+    if out.is_dir() and any(out.iterdir()):
+        raise SystemExit("measure_directions: --out is not empty")
     out = _refuse_shared_location(out)
     _create_private_dirs(out)
 
@@ -113,6 +136,7 @@ def main(argv=None):
         group = [i for i, r in enumerate(rows) if r.kind == kind]
         print(f"{kind} changed={len(group)}  alignment {summary(scores[group])}  "
               f"energy_share {summary([stats[i].energy_share for i in group])}")
+    print_layer_pairs(rows, vectors)
 
     for i, trial in trials.items():
         peers = vectors.copy()

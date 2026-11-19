@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from helpers import write_safetensors
+from helpers import gguf_float, write_gguf, write_safetensors
 from llmscan.checkpoint import open_checkpoint
 from llmscan.direction import alignment_scores, analyze_direction
 from test_core import to_bf16
@@ -117,6 +117,57 @@ class TestDirection(unittest.TestCase):
 
 
 class TestDirectionCLI(unittest.TestCase):
+    def test_layer_pairs_follow_known_rotations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base, suspect = {}, {}
+            for layer in (0, 1, 2, 4):  # the gap from 2 to 4 is not an adjacent pair
+                for kind, step in (("attn_output", 120), ("ffn_down", 90)):
+                    angle = np.deg2rad(layer * step)
+                    edit = np.outer([np.cos(angle), np.sin(angle)], [1, 0, 0])
+                    name = f"blk.{layer}.{kind}.weight"
+                    base[name] = gguf_float("F32", np.zeros_like(edit))
+                    suspect[name] = gguf_float("F32", edit)
+            for label, tensors in (("base", base), ("suspect", suspect)):
+                (root / label).mkdir()
+                write_gguf(root / label / "model.gguf", tensors)
+            out = root / "report"
+            out.mkdir()  # an existing empty directory is a valid destination
+            run = subprocess.run([sys.executable, str(SCRIPT), "--base", str(root / "base" / "model.gguf"),
+                                  "--suspect", str(root / "suspect" / "model.gguf"), "--out", str(out)],
+                                 check=True, capture_output=True, text=True)
+            # The axes differ by 30 degrees per layer. Adjacent steps have |cos| of 1/2 and 0.
+            expected = {"same layer |cos(o_proj, down_proj)|": (4, 0.5, (0.5 + np.sqrt(3) / 2) / 2),
+                        "adjacent layers |cos| o_proj": (2, 0.5, 0.5),
+                        "adjacent layers |cos| down_proj": (2, 0.0, 0.0)}
+            for label, (count, low, middle) in expected.items():
+                with self.subTest(label=label):
+                    lines = [line for line in run.stdout.splitlines() if line.startswith(label + " ")]
+                    self.assertEqual(len(lines), 1, run.stdout)
+                    fields = dict(s.split("=") for s in lines[0][len(label):].split())
+                    self.assertEqual(int(fields["n"]), count)
+                    self.assertAlmostEqual(float(fields["min"]), low)
+                    self.assertAlmostEqual(float(fields["median"]), middle)
+
+    def test_refuses_nonempty_output_and_preserves_its_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_projection_pair(root)
+            original = b"unrelated,content\r\n\xff\x00"
+            for name in ("directions.csv", ".keep"):
+                with self.subTest(name=name):
+                    out = root / (name + "-report")
+                    out.mkdir()
+                    existing = out / name
+                    existing.write_bytes(original)
+                    run = subprocess.run([sys.executable, str(SCRIPT), "--base", str(root / "base"),
+                                          "--suspect", str(root / "suspect"), "--out", str(out)],
+                                         capture_output=True, text=True)
+                    self.assertEqual(existing.read_bytes(), original)
+                    self.assertEqual(list(out.iterdir()), [existing])
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertRegex(run.stderr, r"\Ameasure_directions: [^\n]*--out[^\n]*\n\Z")
+
     def test_changed_only_csv_and_independent_bf16_probes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
