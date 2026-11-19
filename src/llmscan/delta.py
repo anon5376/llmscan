@@ -53,6 +53,7 @@ def scan(
                 if count is not None:
                     row[precision.FIELD] = count
                 stats = core.analyze_delta(w_base, w_suspect, k)
+                del w_base, w_suspect
                 row["seconds"] = f"{time.perf_counter() - t0:.2f}"
                 row["effective_rank"] = f"{float(stats.effective_rank):.6g}"
                 for i, s in enumerate(stats.singular_values[:k]):
