@@ -15,7 +15,9 @@ in the inventory. Every ranked tensor lands in one tier and carries a human-read
                      positive effective_rank; a tensor without one is judged by sv_001 against its
                      kind's median the same way. The median, not a fixed rank, is the yardstick:
                      Heretic's rank-3 edits and norm-preserving variants are honest. It assumes
-                     fewer than half of a kind's changed tensors are tampered with.
+                     fewer than half of a kind's changed tensors are tampered with. Also flags
+                     extra F32 precision in a BF16-to-F32 re-save when at least three changed
+                     tensors of that kind were measured and a majority have no extra bits.
     T4 consistent    every other changed tensor.
 
 `delta` is None when no ΔW scan ran (--inventory-only, stub core): every other changed tensor is T4
@@ -134,26 +136,33 @@ def rank_tensors(
     delta: dict[str, tuple[float | None, float | None]] | None = None,
     expected: frozenset[str] = DEFAULT_EXPECTED_KINDS,
     factor: float = DEFAULT_OUTLIER_FACTOR,
+    precision_counts: dict[str, int] | None = None,
 ) -> list[RankedRow]:
     check_factor(factor)
     scanned = delta is not None  # an empty mapping is a scan that produced no rows, not "no scan"
     delta = delta or {}
+    precision_counts = precision_counts or {}
     expected = frozenset(canonical_kind(k) for k in expected)
     stats = {r.name: delta.get(r.name, (None, None)) for r in rows}
     bad = {r.name: None if not scanned else _unusable(stats[r.name]) if r.name in delta else _not_scanned(r) for r in rows}
 
     # medians per kind over changed, expected-kind tensors; effective_rank and sv_001 kept apart
     groups: dict[tuple[str, int], list[float]] = defaultdict(list)
+    precision_groups: dict[str, list[int]] = defaultdict(list)
     for r in rows:
         if r.status == CHANGED and canonical_kind(r.kind) in expected:
             er, sv = stats[r.name]
             if bad[r.name]:
                 continue
+            if r.name in precision_counts:
+                precision_groups[canonical_kind(r.kind)].append(precision_counts[r.name])
             if er is not None:
                 groups[canonical_kind(r.kind), 0].append(er)
             elif sv is not None:
                 groups[canonical_kind(r.kind), 1].append(sv)
     medians = {g: statistics.median(v) for g, v in groups.items() if len(v) >= MIN_GROUP}
+    bf16_peers = {kind for kind, counts in precision_groups.items()
+                  if len(counts) >= MIN_GROUP and statistics.median(counts) == 0}
 
     ranked: list[tuple[str, InventoryRow, str]] = []
     unusable: set[str] = set()
@@ -177,6 +186,9 @@ def rank_tensors(
                 label = "effective_rank" if which == 0 else SV1
                 ranked.append((T3, r, f"{label} {value:.4g} is {value / median:.1f}x the median {median:.4g} of changed {kind}"
                                       f" tensors (threshold {factor:g}x)"))
+            elif kind in bf16_peers and precision_counts.get(r.name, 0) > 0:
+                ranked.append((T3, r, f"precision outlier: {precision_counts[r.name]} of {r.numel} F32 values exceed BF16 precision; "
+                                      f"a majority of changed {kind} peers have none"))
             else:
                 note = "" if scanned else " (no ΔW stats)"
                 ranked.append((T4, r, f"changed {r.kind}, consistent with abliteration{note}"))

@@ -7,11 +7,11 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from llmscan import core
+from llmscan import core, precision
 from llmscan.inventory import CHANGED, DTYPE_MISMATCH, IDENTICAL, InventoryRow
 from llmscan.safetensors_io import FLOAT_DTYPES, Checkpoint
 
-FIELDS = ["name", "layer", "kind", "status", "shape", "effective_rank", "seconds"]
+FIELDS = ["name", "layer", "kind", "status", "shape", "effective_rank", "seconds", precision.FIELD]
 
 
 def sv_field(i: int) -> str:
@@ -48,7 +48,11 @@ def scan(
             if r.status != IDENTICAL:
                 t0 = time.perf_counter()
                 load = "to_float64" if "F64" in (r.base_dtype, r.suspect_dtype) else "to_float32"
-                stats = core.analyze_delta(getattr(base, load)(r.name), getattr(suspect, load)(r.name), k)
+                w_base, w_suspect = getattr(base, load)(r.name), getattr(suspect, load)(r.name)
+                count = precision.count_extra_bits(w_suspect, r.base_dtype, r.suspect_dtype)
+                if count is not None:
+                    row[precision.FIELD] = count
+                stats = core.analyze_delta(w_base, w_suspect, k)
                 row["seconds"] = f"{time.perf_counter() - t0:.2f}"
                 row["effective_rank"] = f"{float(stats.effective_rank):.6g}"
                 for i, s in enumerate(stats.singular_values[:k]):

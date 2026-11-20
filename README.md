@@ -108,13 +108,18 @@ Output goes to `out/<suspect>-vs-<base>/`:
 - `inventory.csv`, `inventory.txt`: every tensor in either model, marked identical, changed,
   dtype/shape mismatch, or missing from one side;
 - `delta.csv`: for each 2-D tensor, the top-k singular values of ΔW and its effective rank;
+  for a BF16 base compared with an F32 suspect, `non_bf16_values` counts suspect values that
+  carry precision beyond BF16;
 - `spectra.png`, `effective_rank.png`.
 
 Safetensors checkpoints (single file or sharded directory) are memory-mapped and read one tensor at
 a time. The inventory compares tensors in chunks, so it needs a few megabytes of RAM
 whatever the model size (4.2 MB of allocations measured on a pair of 160 MB tensors); the ΔW scan loads the two copies of one 2-D tensor at a time as float32, so
 RAM must hold twice the float32 size of the largest 2-D tensor (4 bytes per element each). CPU only; the only
-dependencies are numpy and matplotlib, no torch. GGUF support is next.
+dependencies are numpy and matplotlib, no torch. Both `--base` and `--suspect` accept a single
+`.gguf` file to compare F32, F16 and BF16 tensors and scan matching 2-D matrices. The inventory
+compares supported quantized tensors byte for byte, and the ranking marks changed ones of an
+expected kind T3 ("not scanned").
 
 `scripts/fetch_hf.sh <org/name> <revision> <dir>` downloads a model's safetensors at a pinned revision.
 
@@ -131,6 +136,10 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
    the changed tensors of the same kind in the same model (`--outlier-factor`). The yardstick is the model's
    own median, not rank 1, because Heretic-style rank-3 edits and norm-preserving variants are honest.
    Assumes fewer than half of a kind's changed tensors are tampered with.
+   A BF16-to-F32 comparison also flags precision outliers: a changed tensor has values beyond
+   BF16 precision while a majority of measured changed tensors of the same kind have none.
+   At least three measured tensors are required. Uniformly higher-precision changes do not
+   trigger this signal; a legitimate localized F32 edit can, and a BF16-rounded edit cannot.
    A changed tensor of an expected kind whose `delta.csv` stats are unusable is also T3, ordered after the
    genuine outliers (reason: `stats unusable: <why>`): no row in `delta.csv` (including a tensor the 2-D float
    scanner skips, such as a 3-D MoE tensor or a quantized GGUF one: `not scanned (<why>)`), both cells blank, or an

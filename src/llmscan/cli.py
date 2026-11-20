@@ -8,7 +8,7 @@ import stat
 import sys
 from pathlib import Path
 
-from llmscan import atomic, delta, inventory, rank
+from llmscan import atomic, delta, inventory, precision, rank
 from llmscan.checkpoint import open_checkpoint
 from llmscan.safetensors_io import CheckpointError
 
@@ -86,7 +86,8 @@ def _slug(spec: str) -> str:
 def _rank(args, rows, out: Path, delta_csv: Path | None = None) -> str:
     """Write ranking.csv (with ΔW stats when delta_csv is given); return the top-N text."""
     ranked = rank.rank_tensors(rows, rank.read_delta_csv(delta_csv) if delta_csv else None,
-                               args.expected_kinds, args.outlier_factor)
+                               args.expected_kinds, args.outlier_factor,
+                               precision_counts=precision.read_counts(delta_csv) if delta_csv else None)
     atomic.write(out / "ranking.csv", lambda tmp: rank.write_csv(ranked, tmp))
     return rank.summarize(ranked, args.top)
 
