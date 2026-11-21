@@ -34,7 +34,7 @@ import numpy as np
 
 from llmscan.delta import EXTRA_FIELDS, sv_field
 from llmscan.inventory import CHANGED, IDENTICAL, ONLY_BASE, ONLY_SUSPECT, SHAPE_MISMATCH, InventoryRow, natural_key
-from llmscan.names import EMBEDDINGS, RESIDUAL_WRITERS, canonical_kind
+from llmscan.names import EMBEDDINGS, RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind
 from llmscan.safetensors_io import FLOAT_DTYPES
 from llmscan.signals import Measurements, direction_cosines, outlier_reasons, peer_groups
 
@@ -106,11 +106,13 @@ def _unusable(stats: Measurements) -> str | None:
     for label, v in stats._asdict().items():
         if v is not None and not math.isfinite(v):
             return f"{label} {v} is not finite"
-        if label in ("second_tail_share", "token_row_fraction") and v is not None:
+        if label in ("second_tail_share", "token_row_fraction", "projection_error") and v is not None:
             if not 0 <= v <= 1:
                 return f"{label} {v:g} is outside [0, 1]"
-            if label == "second_tail_share":
+            if label != "token_row_fraction":
                 continue
+        if label == "token_row_spike" and v == 0:
+            continue
         if v is not None and v <= 0:
             return f"{label} {v:g} is not positive"
     return None
@@ -142,7 +144,9 @@ def rank_tensors(
 
     usable = [r for r in rows if r.status == CHANGED and canonical_kind(r.kind) in expected and not bad[r.name]]
     groups = peer_groups(usable, stats)
-    cosines = direction_cosines(usable, directions or {})
+    other_token_kinds = TOKEN_MATRICES - expected
+    other_tokens = [r for r in rows if r.status == CHANGED and r.kind in other_token_kinds and not bad[r.name]]
+    cosines = direction_cosines(usable + other_tokens, directions or {})
 
     ranked: list[tuple[str, InventoryRow, str]] = []
     unusable: set[str] = set()

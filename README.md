@@ -133,19 +133,30 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      (default 3×). A smaller increase can also qualify when it exceeds both 1% of the median and six
      MAD-based standard deviations, and the second mode contains at least a quarter of the non-leading energy.
      This distinguishes a second coherent mode from diffuse rounding noise.
-   - **Magnitude.** For a residual writer, projection gain is σ₁ divided by the norm of the base weights along
+   - **Projection fit and magnitude.** For a residual writer, projection gain is σ₁ divided by the norm of the base weights along
      the leading output direction. A full orthogonal projection along that direction gives gain one. A gain
      above `--outlier-factor` (with a minimum bound of one) is a finding even without peers. The adaptive
-     check compares log magnitudes within the same kind and shape. It requires a greater than twofold increase
-     over the median, six MAD-based standard deviations, and for gain, a value above 1.05. When gain is
-     unavailable the scan uses the Frobenius norm or, for older CSVs, the leading singular value.
+     check compares log magnitudes within the same kind and shape. Gain must exceed both 1.05 and 105% of
+     its peer median. Raw Frobenius or spectral norms require a twofold increase. Both checks also require
+     six MAD-based standard deviations. A full scan fits the signed leading change to a partial or full
+     removal of the base projection. `projection_error` measures the unexplained fraction of the leading
+     change in norm. A finding requires that error to exceed 5% and the norm of the remaining modes
+     multiplied by `--outlier-factor`, expressed in units of σ₁. With eight or more comparable fits,
+     the error must also exceed its peer median by five percentage points and six MAD-based standard
+     deviations. This accommodates editing methods that systematically depart from a pure projection.
    - **Residual direction.** Each layer gets one vote in its stack and residual width. Writers within a
      voting layer must agree up to sign. When a strict majority agrees (absolute cosine ≥0.9), the scanner
      compares each writer and embedding to at least three *other* agreeing layers. A median absolute cosine
-     below 0.5 is a finding. The scanner uses a direction only when σ₁ > 2σ₂ or there is a single mode.
+     below 0.5 is a finding. An embedding or output head above the blocks can use a unique descendant
+     stack of matching width. Output heads retain their location tier. The scanner uses a direction only
+     when σ₁ > 2σ₂ or there is a single mode.
    - **Embedding concentration.** For token-row energies `e`, the effective fraction of rows changed is
      `sum(e)² / (number_of_rows × sum(e²))`. A fraction below 5% is a finding even for a singleton
      embedding. Its residual direction is the leading *right* singular vector in token-by-hidden layout.
+     `token_row_spike` measures the largest centered token coefficient error after fitting the base
+     projection. Values above one exceed both the RMS leading coefficient and a vocabulary-size-adjusted
+     bound on residual variation. Naturally large token changes explained by the base projection have zero
+     coefficient error in exact arithmetic.
 
    MAD-based checks need eight usable samples and estimate standard deviation as 1.4826 × median absolute
    deviation. Peer checks assume a representative majority. Gain and row concentration also work in

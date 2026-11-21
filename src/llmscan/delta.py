@@ -11,11 +11,12 @@ import numpy as np
 
 from llmscan import core
 from llmscan.inventory import CHANGED, DTYPE_MISMATCH, IDENTICAL, InventoryRow
-from llmscan.names import EMBEDDINGS, RESIDUAL_WRITERS, canonical_kind
+from llmscan.names import RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind
 from llmscan.safetensors_io import FLOAT_DTYPES, Checkpoint
 
 FIELDS = ["name", "layer", "kind", "status", "shape", "effective_rank", "seconds"]
-EXTRA_FIELDS = ["frobenius", "projection_gain", "second_tail_share", "token_row_fraction"]
+EXTRA_FIELDS = ["frobenius", "projection_gain", "second_tail_share", "token_row_fraction",
+                "projection_error", "token_row_spike"]
 
 
 def sv_field(i: int) -> str:
@@ -55,15 +56,17 @@ def scan(
                 load = "to_float64" if "F64" in (r.base_dtype, r.suspect_dtype) else "to_float32"
                 a, b = getattr(base, load)(r.name), getattr(suspect, load)(r.name)
                 kind = canonical_kind(r.kind)
-                embedding = kind in EMBEDDINGS
-                if embedding:
+                token_matrix = kind in TOKEN_MATRICES and r.layer is None
+                projection = token_matrix or kind in RESIDUAL_WRITERS
+                if token_matrix:
                     a, b = a.T, b.T
                 stats = core.analyze_delta(a, b, k)
                 del a, b
-                if directions is not None and kind in EMBEDDINGS | RESIDUAL_WRITERS and stats.direction is not None:
+                if directions is not None and projection and stats.direction is not None:
                     directions[r.name] = stats.direction
-                values = (stats.frobenius, stats.projection_gain if kind in EMBEDDINGS | RESIDUAL_WRITERS else None,
-                          stats.second_tail_share, stats.column_fraction if embedding else None)
+                values = (stats.frobenius, stats.projection_gain if projection else None, stats.second_tail_share,
+                          stats.column_fraction if token_matrix else None, stats.projection_error if projection else None,
+                          stats.column_spike if token_matrix else None)
                 for field, value in zip(EXTRA_FIELDS, values):
                     if value is not None:
                         row[field] = f"{value:.8g}"
