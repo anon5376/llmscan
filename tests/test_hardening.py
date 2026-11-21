@@ -15,7 +15,8 @@ import numpy as np
 
 from helpers import write_safetensors, write_sharded
 from llmscan import atomic, cli, core, inventory
-from llmscan.safetensors_io import MAX_OPEN_MAPS, Checkpoint, CheckpointError
+from llmscan import safetensors_io
+from llmscan.safetensors_io import MAX_HEADER_BYTES, MAX_OPEN_MAPS, Checkpoint, CheckpointError
 from test_pipeline import fake_analyze, run_cli
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -141,6 +142,76 @@ class TestMalformedHeaders(unittest.TestCase):
                               "e": entry("F32", [0], 12, 12)}, self.f4 + bytes(4))
         with Checkpoint(self.path) as c:
             self.assertEqual(sorted(c.tensors), ["a", "b", "e"])
+
+    def test_sparse_oversized_header_is_rejected_before_json_loads(self):
+        header_len = MAX_HEADER_BYTES + 1
+        with open(self.path, "wb") as f:
+            f.write(struct.pack("<Q", header_len))
+            f.truncate(8 + header_len)
+        with mock.patch.object(safetensors_io.json, "loads") as loads:
+            with self.assertRaisesRegex(CheckpointError, "limit"):
+                Checkpoint(self.path)
+        loads.assert_not_called()
+
+    def test_million_zero_sized_tensor_header_is_rejected_at_byte_gate(self):
+        record = b'{"dtype":"F32","shape":[0],"data_offsets":[0,0]}'
+        with open(self.path, "w+b") as f:
+            f.write(bytes(8) + b"{")
+            for i in range(1_000_000):
+                f.write(("," if i else "").encode() + f'"t{i}":'.encode() + record)
+            f.write(b"}")
+            header_len = f.tell() - 8
+            f.seek(0)
+            f.write(struct.pack("<Q", header_len))
+        self.assertGreater(header_len, MAX_HEADER_BYTES)
+        with mock.patch.object(safetensors_io.json, "loads") as loads:
+            with self.assertRaisesRegex(CheckpointError, "limit"):
+                Checkpoint(self.path)
+        loads.assert_not_called()
+
+    def test_header_byte_limit_boundary(self):
+        write_raw(self.path, b"{}", b"")
+        with mock.patch.object(safetensors_io, "MAX_HEADER_BYTES", 2):
+            with Checkpoint(self.path) as c:
+                self.assertEqual(c.tensors, {})
+        with mock.patch.object(safetensors_io, "MAX_HEADER_BYTES", 1):
+            with self.assertRaisesRegex(CheckpointError, "2 exceeds the 1-byte limit"):
+                Checkpoint(self.path)
+
+    def test_default_tensor_limit_accepts_large_sharded_checkpoint(self):
+        sharded = self.tmp / "large-sharded"
+        sharded.mkdir()
+        for shard in range(2):
+            header = {f"t{shard}_{i}": entry("F32", [0], 0, 0) for i in range(70_000)}
+            write_raw(sharded / f"shard-{shard}.safetensors", header, b"")
+        with Checkpoint(sharded) as c:
+            self.assertEqual(len(c.tensors), 140_000)
+        self.assertEqual(safetensors_io.MAX_TENSORS, 300_000)
+
+    def test_tensor_count_boundary_and_shard_aggregate_limit(self):
+        write_raw(self.path, {f"t{i}": entry("F32", [0], 0, 0) for i in range(3)}, b"")
+        with mock.patch.object(safetensors_io, "MAX_TENSORS", 2), \
+                mock.patch.object(safetensors_io, "TensorInfo") as tensor_info:
+            readers = (lambda: Checkpoint(self.path), lambda: safetensors_io.read_header(self.path),
+                       lambda: safetensors_io.read_header(self.path, tensor_limit=10))
+            for read in readers:
+                with self.assertRaisesRegex(CheckpointError, "tensor count 3"):
+                    read()
+            tensor_info.assert_not_called()
+
+        zero = np.zeros(0, np.float32)
+        sharded = self.tmp / "sharded"
+        write_sharded(sharded, [{"a": ("F32", zero), "b": ("F32", zero)}, {"c": ("F32", zero)}])
+        original = safetensors_io.TensorInfo
+        with mock.patch.object(safetensors_io, "MAX_TENSORS", 2), \
+                mock.patch.object(safetensors_io, "TensorInfo", wraps=original) as tensor_info:
+            with self.assertRaisesRegex(CheckpointError, "tensor count 1 exceeds the 0-tensor limit"):
+                Checkpoint(sharded)
+        self.assertEqual(tensor_info.call_count, 2)
+
+    def test_deeply_nested_json_is_a_checkpoint_error(self):
+        raw = b'{"x":' + b"[" * 2_000 + b"0" + b"]" * 2_000 + b"}"
+        self.assert_rejected(raw, b"", "invalid safetensors header")
 
     def test_negative_offsets(self):
         self.assert_rejected({"x": entry("F32", [1], -4, 0)}, bytes(4), "data_offsets")

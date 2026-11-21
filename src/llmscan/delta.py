@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from llmscan import core
+from llmscan.csv_safety import csv_fieldnames, encode_row
 from llmscan.inventory import CHANGED, DTYPE_MISMATCH, IDENTICAL, InventoryRow
 from llmscan.safetensors_io import FLOAT_DTYPES, Checkpoint
 
@@ -41,7 +42,7 @@ def scan(
     n_core = sum(r.status != IDENTICAL for r in todo)
     done = 0
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS + [sv_field(i + 1) for i in range(k)])
+        w = csv.DictWriter(f, fieldnames=csv_fieldnames(FIELDS + [sv_field(i + 1) for i in range(k)]))
         w.writeheader()
         for r in todo:
             row = {"name": r.name, "layer": r.layer, "kind": r.kind, "status": r.status, "shape": r.base_shape}
@@ -55,6 +56,6 @@ def scan(
                     row[sv_field(i + 1)] = f"{float(s):.6g}"
                 done += 1
                 log(f"[{done}/{n_core}] {r.name}  eff_rank={row['effective_rank']}  ({row['seconds']}s)")
-            w.writerow(row)
+            w.writerow(encode_row(row))
             f.flush()
     return done

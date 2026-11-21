@@ -16,6 +16,7 @@ import numpy as np
 
 from helpers import tiny_llama, write_safetensors
 from llmscan import cli, core, inventory, rank
+from llmscan.csv_safety import ENCODING_COLUMN
 from llmscan.inventory import CHANGED, DTYPE_MISMATCH, IDENTICAL, ONLY_BASE, ONLY_SUSPECT, SHAPE_MISMATCH, InventoryRow
 from llmscan.names import kind_of, layer_of
 from test_hardening import link_or_skip
@@ -293,7 +294,7 @@ class TestCli(unittest.TestCase):
         code, out, _ = run_cli(*self.args, "--inventory-only", "--top", "3")
         self.assertEqual(code, 0, out)
         rows = read_ranking(self.tmp / "out" / "ranking.csv")
-        self.assertEqual(list(rows[0]), rank.FIELDS)
+        self.assertEqual(list(rows[0]), rank.FIELDS + [ENCODING_COLUMN])
         self.assertEqual(len(rows), len(self.changed))  # identical + dtype-only re-save are not ranked
         self.assertEqual((rows[0]["tier"], rows[0]["name"]), ("T2", layer_name(0, "mlp.gate_proj")))
         self.assertEqual({r["tier"] for r in rows[1:]}, {"T4"})
