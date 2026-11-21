@@ -161,6 +161,17 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      `a > --outlier-factor × b`. The latter check also works on singletons.
      Current reports store `tail_norm_fraction` from the scaled spectrum so this comparison also works
      at subnormal F64 scales. Older reports estimate the tail from their recorded norms.
+
+     A separate check uses the unexplained leading coefficients as a unit input vector `z`.
+     If `Δ = −αuuᵀB` removes a unit direction from the base `B` with strength `0 ≤ α ≤ 1`,
+     then `(B + 2Δ)z = (I − 2αuuᵀ)Bz` has norm at most `‖Bz‖`.
+     The scanner measures half the growth in norm along this input, allows for entrywise
+     rounding of both checkpoints and arithmetic error, and reports the positive remainder
+     divided by `‖Δ‖F` as `contraction_excess`. This check is independent of the spectral
+     tail and works on a single tensor. With eight or more comparable fits, the signed fit
+     error must also exceed the peer median by six MAD-based standard deviations and the
+     numerical floor above. This accommodates systematic departures from partial removal.
+     A zero result means the chosen input yielded no evidence of excess growth.
    - **Residual direction.** Each layer gets one vote in its stack and residual width. Writers within a
      voting layer must agree up to sign. When a strict majority agrees (absolute cosine ≥0.9), the scanner
      compares each writer and embedding to at least three *other* agreeing layers. A median absolute cosine

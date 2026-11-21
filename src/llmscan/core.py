@@ -34,6 +34,7 @@ class DeltaStats(NamedTuple):
     projection_error: float | None = None
     column_spike: float | None = None
     tail_norm_fraction: float | None = None
+    fit_residual: np.ndarray | None = None
 
 
 # Spacing at one and at zero for the supported checkpoint storage formats.
@@ -68,7 +69,53 @@ def rank_one_excess(base: np.ndarray, stats: DeltaStats, base_dtype: str, suspec
     return max(0., stats.tail_norm_fraction - budget / total)
 
 
-def _projection_fit(right: np.ndarray, projected: np.ndarray, gain: float | None) -> tuple[float, float]:
+def contraction_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
+                       base_dtype: str, suspect_dtype: str) -> float | None:
+    """Test one input direction against the contraction 2W_suspect − W_base.
+
+    For a partial removal P = αuuᵀ, I − 2P has operator norm at most one.
+    For any unit z, (‖(B + 2Δ)z‖ − ‖Bz‖)/2 thus lower bounds the norm of
+    the error on this input, even if the estimated removal axis was wrong.
+    """
+    residual, total = stats.fit_residual, stats.frobenius
+    if residual is None or not total or not math.isfinite(total):
+        return None
+    length = np.linalg.norm(residual)
+    if not length:
+        return 0.
+    z = residual / length
+    abs_z = np.abs(z)
+    scale = max(total, float(base.max()), -float(base.min()))
+    base_norm = reflected_norm = envelope_norm = 0.
+    # Bound temporary memory for wide matrices, especially residual × vocabulary.
+    block_rows = max(1, _ROWS_PER_BLOCK * min(base.shape) // base.shape[1])
+    for start in range(0, len(base), block_rows):
+        sl = slice(start, start + block_rows)
+        b = base[sl].astype(np.float64) / scale
+        d = delta[sl].astype(np.float64) / scale
+        x = b @ z
+        reflected = x + 2 * (d @ z)
+        envelope = (np.abs(b) + np.abs(d)) @ abs_z
+        base_norm = math.hypot(base_norm, *x)
+        reflected_norm = math.hypot(reflected_norm, *reflected)
+        envelope_norm = math.hypot(envelope_norm, *envelope)
+
+    # Triangle inequality charges rounding of *both* checkpoints. One ULP
+    # at the coarser precision covers their two half-ULPs. Charge the
+    # subtraction at its working precision, then the scaled float64 products
+    # and summations. |B| + |Δ| bounds the entrywise magnitude of B + Δ.
+    relative, absolute = map(max, zip(_SPACING[base_dtype], _SPACING[suspect_dtype]))
+    arithmetic = float(np.finfo(delta.dtype).eps) + 4 * math.ulp(1.) * (sum(base.shape) + 2)
+    budget = (relative + arithmetic) * envelope_norm
+    budget += 2 * (absolute / scale) * math.sqrt(len(base)) * abs_z.sum()
+    growth = (reflected_norm - base_norm) / 2
+    if growth <= budget:
+        return 0.
+    denominator = total / scale + math.ulp(total) / scale
+    return min(1., (growth - budget) / denominator) if denominator else None
+
+
+def _projection_fit(right: np.ndarray, projected: np.ndarray, gain: float | None) -> tuple[float, float, np.ndarray]:
     """Fit the signed coefficients of a partial removal, in units of σ₁."""
     residual = right.copy()
     if gain is not None and gain > 0:
@@ -84,7 +131,7 @@ def _projection_fit(right: np.ndarray, projected: np.ndarray, gain: float | None
     n = len(right)
     robust_sigma = 1.4826 * np.median(deviations)
     bound = max(1 / np.sqrt(n), robust_sigma * np.sqrt(2 * np.log(2 * n / 0.01)))
-    return error, float(deviations.max() / bound)
+    return error, float(deviations.max() / bound), residual
 
 
 def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaStats:
@@ -109,6 +156,7 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
         projection_error: relative error of the best partial removal along u₁.
         column_spike: largest centered coefficient error relative to its robust noise bound.
         tail_norm_fraction: Frobenius distance to the best rank-one delta divided by the delta norm.
+        fit_residual: unexplained leading coefficients in input space, used as a contraction probe.
 
     The pipeline never calls this for bit-identical tensors.
     """
@@ -149,7 +197,7 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
     second_share = float(energy[1] / tail) if tail else 0.0
 
     # A repeated or nearly repeated leading singular value has no stable axis.
-    direction = gain = projection_error = column_spike = None
+    direction = gain = projection_error = column_spike = fit_residual = None
     if len(energy) == 1 or energy[0] > 4 * energy[1]:
         small = vectors[:, -1].copy()
         other = np.empty(dw.shape[0])
@@ -172,7 +220,8 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
         if projected_norm:
             gain = float((np.sqrt(energy[0]) / projected_norm) * (scale / base_scale))
             projected /= projected_norm
-        projection_error, column_spike = _projection_fit(right, projected, gain)
+        projection_error, column_spike, fit_residual = _projection_fit(right, projected, gain)
 
     return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),
-                      fraction, second_share, direction, gain, projection_error, column_spike, tail_norm_fraction)
+                      fraction, second_share, direction, gain, projection_error, column_spike, tail_norm_fraction,
+                      fit_residual)

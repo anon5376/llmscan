@@ -16,7 +16,7 @@ from llmscan.safetensors_io import FLOAT_DTYPES, Checkpoint
 
 FIELDS = ["name", "layer", "kind", "status", "shape", "effective_rank", "seconds"]
 EXTRA_FIELDS = ["frobenius", "projection_gain", "second_tail_share", "token_row_fraction",
-                "projection_error", "token_row_spike", "rank_one_excess", "tail_norm_fraction"]
+                "projection_error", "token_row_spike", "rank_one_excess", "tail_norm_fraction", "contraction_excess"]
 
 
 def sv_field(i: int) -> str:
@@ -62,12 +62,14 @@ def scan(
                     a, b = a.T, b.T
                 stats = core.analyze_delta(a, b, k)
                 excess = core.rank_one_excess(a, stats, r.base_dtype, r.suspect_dtype)
+                # analyze_delta has replaced b with the checkpoint difference.
+                contraction = core.contraction_excess(a, b, stats, r.base_dtype, r.suspect_dtype) if projection else None
                 del a, b
                 if directions is not None and projection and stats.direction is not None:
                     directions[r.name] = stats.direction
                 values = (stats.frobenius, stats.projection_gain if projection else None, stats.second_tail_share,
                           stats.column_fraction if token_matrix else None, stats.projection_error if projection else None,
-                          stats.column_spike if token_matrix else None, excess, stats.tail_norm_fraction)
+                          stats.column_spike if token_matrix else None, excess, stats.tail_norm_fraction, contraction)
                 for field, value in zip(EXTRA_FIELDS, values):
                     if value is not None:
                         row[field] = f"{value:.8g}"
