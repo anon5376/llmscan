@@ -518,12 +518,12 @@ class TestAnomalySignals(unittest.TestCase):
                 ranked = rank.rank_tensors(rows, stats, subspaces=spaces, directions={r.name: eye[0] for r in rows})
                 self.assertTrue(all(r.tier == "T4" for r in ranked))
 
-    def test_terminal_switch_replaces_the_entire_secondary_space(self):
+    def test_terminal_switch_separates_all_secondary_modes_relative_to_peer_spread(self):
         eye = np.eye(6)
         rows = [row(layer_name(i)) for i in range(16)]
         stats = {r.name: Measurements(1.5, 1.) for r in rows}
         axes = {r.name: (-1) ** r.layer * eye[0] for r in rows}
-        for early, dim, angle in product([False, True], [2, 3], [60., 90.]):
+        for early, dim, angle in product([False, True], [2, 3], [40., 60., 90.]):
             with self.subTest(early=early, dim=dim, angle=angle):
                 minority = rows[:4] if early else rows[-4:]
                 spaces = {}
@@ -535,8 +535,41 @@ class TestAnomalySignals(unittest.TestCase):
                     spaces[r.name] = np.roll(basis, r.layer % dim, axis=1)
                 ranked = rank.rank_tensors(rows, stats, directions=axes, subspaces=spaces)
                 flagged = {r.name for r in ranked if r.tier == "T3"}
-                self.assertEqual(flagged, {r.name for r in minority} if angle == 90 else set())
-                self.assertTrue(all("maximum secondary overlap" in r.reason for r in ranked if r.tier == "T3"))
+                self.assertEqual(flagged, {r.name for r in minority})
+                self.assertTrue(all("minimum secondary angle" in r.reason for r in ranked if r.tier == "T3"))
+
+    def test_terminal_switch_calibrates_the_closest_secondary_mode(self):
+        eye = np.eye(5)
+        rows = [row(layer_name(i)) for i in range(16)]
+        directions = {r.name: eye[0] for r in rows}
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        for step, expected in [(12., set()), (40., {12, 13, 14, 15})]:
+            with self.subTest(step=step):
+                spaces = {}
+                for r in rows:
+                    # One secondary axis jumps 90 degrees. The other varies
+                    # by 5 degrees within groups and changes by a smaller angle.
+                    terminal = r.layer >= 12
+                    theta = np.radians((step if terminal else 0.) + 5 * (r.layer % 2))
+                    axis = np.cos(theta) * eye[1] + np.sin(theta) * eye[2]
+                    spaces[r.name] = np.column_stack((eye[0], axis, eye[4 if terminal else 3]))
+                ranked = rank.rank_tensors(rows, stats, directions=directions, subspaces=spaces)
+                self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, expected)
+
+    def test_terminal_primary_jump_compared_with_neighbors_under_global_drift(self):
+        rows = [row(layer_name(i)) for i in range(16)]
+        eye = np.eye(5)
+        for jump, expected in [(0, {12, 13, 14, 15}), (7, set())]:
+            with self.subTest(jump=jump):
+                axes, spaces = {}, {}
+                for r in rows:
+                    terminal = r.layer >= 12
+                    theta = np.radians(r.layer + (jump if terminal else 0))
+                    axes[r.name] = np.cos(theta) * eye[0] + np.sin(theta) * eye[1]
+                    spaces[r.name] = np.column_stack((axes[r.name], eye[3 if terminal else 2]))
+                stats = {r.name: Measurements(1.5, 1.) for r in rows}
+                result = subspace_outliers(rows, spaces, 3., stats, axes)
+                self.assertEqual(set(result), {layer_name(i) for i in expected})
 
     def test_terminal_switch_needs_an_observed_boundary_and_resolved_primary(self):
         eye = np.eye(4)

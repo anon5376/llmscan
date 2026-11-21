@@ -252,20 +252,23 @@ def _secondary_switch(ids: list[int], names: list[str], majority: np.ndarray, an
             and primary[~same].max() <= factor * max(floor, primary[same].max())):
         return None
     across, within = angles[~same].min(), angles[same].max()
-    if across <= factor * max(floor, within):
+    separation_limit = factor * max(floor, within)
+    if across <= separation_limit:
         return None
     boundary = ""
     if terminal:
-        # One discontinuity can mark an ordinary change of editing regime.
-        # The second canonical correlation measures the strongest overlap
-        # left after the best aligned pair. Require *every* other mode to
-        # be orthogonal within the measured angular spread of the cohorts.
-        overlap = secondary_overlap[~same].max()
-        if overlap > math.sin(max(floor, within)):
-            return None
         i = int(np.flatnonzero(switches)[0])
-        boundary = (f" at layers {ids[i]}–{ids[i+1]} "
-                    f"(maximum secondary overlap {overlap:.3g})")
+        primary_steps = primary.diagonal(offset=1)
+        if primary_steps[i] > factor * max(floor, primary_steps[~switches].max()):
+            return None  # The leading edit itself changes at this boundary.
+        # Use the smallest angle after the best aligned pair. Even the
+        # most similar remaining directions must separate by more than
+        # ordinary variation across either group, including adjacent steps.
+        secondary = math.acos(min(1., secondary_overlap[~same].max()))
+        if secondary <= separation_limit:
+            return None
+        boundary = (f" at boundary {ids[i]}–{ids[i+1]} "
+                    f"(minimum secondary angle {math.degrees(secondary):.2f} degrees)")
     return (f"abrupt secondary subspace switch in {(~majority).sum()} layers{boundary} "
             f"(minimum between-group angle {math.degrees(across):.2f} degrees, "
             f"maximum within-group angle {math.degrees(within):.2f} degrees, "

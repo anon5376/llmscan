@@ -251,10 +251,11 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      The leading axes must agree across groups within their usual dispersion. Normally
      transitions in both directions must occur between adjacent layer IDs. For a single
      transition at the beginning or end of an uninterrupted cohort, the scanner also
-     checks the second canonical correlation of every cross-group pair. After the best
-     aligned direction, all remaining modes must be orthogonal within the measured
-     within-group angular spread. A terminal regime retaining another common direction
-     or rotating its secondary direction only partway can therefore stay clear. A deliberate
+     checks the second principal angle of every cross-group pair. After the best
+     aligned direction, even the closest remaining directions must be separated by more
+     than the outlier factor times the largest within-group angle. The step in the leading
+     direction at the boundary must also be within that factor of the largest adjacent
+     leading-direction step inside either group, allowing for numerical precision. A deliberate
      change of secondary editing concept with the same geometry gives the same finding.
 
      An isolated minority can also be corroborated by effective rank, including when the
