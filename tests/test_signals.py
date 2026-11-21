@@ -280,6 +280,56 @@ class TestAnomalySignals(unittest.TestCase):
         axes = {r.name: eye[i] for i, r in enumerate(self.rows)}
         self.assertEqual(self.flagged(directions=axes), {})
 
+    def test_direction_outlier_scales_with_same_kind_dispersion(self):
+        # The same held-out writer is unusual in one cohort and ordinary
+        # in the other. Attention writers provide a coherent stack in both.
+        rows = [row(layer_name(i, kind)) for i in range(16) for kind in ("mlp.down_proj", "self_attn.o_proj")]
+        stats = {r.name: Measurements(1., 1.) for r in rows}
+        target = layer_name(7)
+        for spread, expected in [(0.001, {target}), (0.1, set())]:
+            with self.subTest(spread=spread):
+                axes = {}
+                for r in rows:
+                    angle = spread * (-1) ** r.layer if r.kind == "down_proj" else 0.
+                    if r.name == target:
+                        angle = 0.12
+                    axes[r.name] = (-1) ** r.layer * np.array([np.cos(angle), np.sin(angle)])
+                ranked = rank.rank_tensors(rows, stats, directions=axes)
+                self.assertEqual({r.name for r in ranked if r.tier == "T3"}, expected)
+                if expected:
+                    finding = next(r for r in ranked if r.name == target)
+                    self.assertIn("orthogonal component", finding.reason)
+                    self.assertGreater(finding.direction_cosine, 0.9)
+
+    def test_coherent_direction_drift_at_end_of_stack(self):
+        # A strict majority shares one direction. The last layers follow a
+        # smooth rotation, reaching well past the sparse-cohort cosine cutoff.
+        rows = [row(layer_name(2 * i)) for i in range(32)]
+        stats = {r.name: Measurements(1., 1.) for r in rows}
+        axes = {}
+        for i, r in enumerate(rows):
+            angle = 0.2 * max(0, i - 25)
+            axes[r.name] = (-1) ** i * np.array([np.cos(angle), np.sin(angle)])
+        ranked = rank.rank_tensors(rows, stats, directions=axes)
+        self.assertLess(next(r.direction_cosine for r in ranked if r.name == rows[-1].name), 0.5)
+        self.assertTrue(all(r.tier == "T4" for r in ranked))
+
+    def test_sparse_direction_cohort_counts_independent_layers(self):
+        # Several experts in one layer do not supply additional layer votes.
+        rows = [row(layer_name(i)) for i in range(8)]
+        rows += [row(layer_name(0, f"mlp.experts.{i}.down_proj")) for i in range(8)]
+        stats = {r.name: Measurements(1., 1.) for r in rows}
+        axes = {r.name: np.array([1., 0.]) for r in rows}
+        axes[layer_name(7)] = np.array([0.8, 0.6])
+        ranked = rank.rank_tensors(rows, stats, directions=axes)
+        self.assertTrue(all(r.tier == "T4" for r in ranked))
+        extra = row(layer_name(8))
+        rows.append(extra)
+        stats[extra.name] = Measurements(1., 1.)
+        axes[extra.name] = np.array([1., 0.])
+        ranked = rank.rank_tensors(rows, stats, directions=axes)
+        self.assertEqual([r.name for r in ranked if r.tier == "T3"], [layer_name(7)])
+
     def test_dense_embedding_compared_to_projection_layers(self):
         name = "model.embed_tokens.weight"
         self.rows.append(row(name))
