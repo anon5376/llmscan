@@ -90,6 +90,28 @@ class TestProjectionMeasurements(unittest.TestCase):
         self.assertEqual(stats.projection_gain, 1.)
         self.assertEqual(stats.projection_error, 1.)
 
+    def test_contraction_accounts_for_rounding_of_both_checkpoints(self):
+        # A reflection preserves norms in exact arithmetic. These independently
+        # rounded checkpoints exhibit *positive* raw growth on the fit probe.
+        for dtype, scale, seed in [("BF16", 1., 2), ("F16", 1., 0), ("F16", 1e-5, 1),
+                                   ("F64", 8 * np.finfo(np.float64).smallest_subnormal, 0)]:
+            with self.subTest(dtype=dtype, scale=scale):
+                rng = np.random.default_rng(seed)
+                w = rng.normal(size=(8, 11))
+                axis = rng.normal(size=len(w))
+                axis /= np.linalg.norm(axis)
+                base, edited = w * scale, (w - np.outer(axis, axis @ w)) * scale
+                if dtype == "BF16":
+                    base, edited = to_bf16(base), to_bf16(edited)
+                elif dtype == "F16":
+                    base, edited = [x.astype(np.float16).astype(np.float32) for x in (base, edited)]
+                stats = core.analyze_delta(base, edited, 1)
+                z = stats.fit_residual / np.linalg.norm(stats.fit_residual)
+                x = (base.astype(float) / scale) @ z
+                diff = (edited.astype(float) / scale) @ z
+                self.assertGreater(np.linalg.norm(x + 2 * diff), np.linalg.norm(x))
+                self.assertEqual(core.contraction_excess(base, edited, stats, dtype, dtype), 0.)
+
     def test_local_column_error_with_dense_background(self):
         w = np.ones((1, 16384))
         w[:, 1] = 4.  # an unusually large but genuine base coefficient
@@ -142,6 +164,18 @@ class TestAnomalySignals(unittest.TestCase):
         self.assertEqual(self.flagged(), {})
         self.stats[self.last] = self.stats[self.last]._replace(projection_error=0.9)
         self.assertIn("projection law", self.flagged()[self.last])
+
+    def test_contraction_witness_with_and_without_a_reference_population(self):
+        # Some published editing methods systematically depart from partial
+        # removal. An unusual signed fit and a contraction violation corroborate
+        # one another when a reference distribution exists.
+        self.stats = {r.name: Measurements(1.1, 1., 1.1, projection_error=0.1, contraction_excess=0.01)
+                      for r in self.rows}
+        self.assertEqual(self.flagged(), {})
+        self.stats[self.last] = self.stats[self.last]._replace(projection_error=0.11)
+        self.assertIn("contraction", self.flagged()[self.last])
+        self.rows = self.rows[:3]
+        self.assertEqual(set(self.flagged()), {r.name for r in self.rows})
 
     def test_large_fit_error_proportional_to_diffuse_noise(self):
         # Both residual components grow together in a noisier layer.
@@ -201,7 +235,8 @@ class TestAnomalySignals(unittest.TestCase):
         for changes in [dict(projection_error=-0.01), dict(projection_error=1.01),
                         dict(token_row_spike=float("inf")), dict(token_row_spike=-1.),
                         dict(rank_one_excess=-0.1), dict(rank_one_excess=1.1),
-                        dict(tail_norm_fraction=-0.1), dict(tail_norm_fraction=1.1)]:
+                        dict(tail_norm_fraction=-0.1), dict(tail_norm_fraction=1.1),
+                        dict(contraction_excess=-0.1), dict(contraction_excess=1.1)]:
             with self.subTest(changes=changes):
                 self.stats[self.last] = Measurements(1., 1., **changes)
                 self.assertIn("unusable", self.flagged()[self.last])
@@ -304,6 +339,34 @@ class TestAnomalySignals(unittest.TestCase):
 
 
 class TestControlCheckpoints(unittest.TestCase):
+    def test_singleton_contraction_with_coherent_tail_through_cli(self):
+        # Large base energy in an untouched coordinate makes the global
+        # Frobenius rounding bound loose. Along the second input coordinate
+        # the base maps to zero, so growth there contradicts any removal.
+        for shape in [(4, 8), (8, 4)]:
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                name = layer_name(0)
+                w = np.zeros(shape, dtype=np.float32)
+                w[0, 0], w[2, 2] = 1., 128.
+                edited = w.copy()
+                edited[0, :2] = [0., 0.5]
+                edited[1, 3] = 0.25
+                write_safetensors(tmp / "b.safetensors", {name: ("BF16", w)})
+                write_safetensors(tmp / "s.safetensors", {name: ("BF16", edited)})
+                rc, out, err = run_cli("--base", str(tmp / "b.safetensors"), "--suspect", str(tmp / "s.safetensors"),
+                                       "--out", str(tmp / "out"), "-k", "1")
+                self.assertEqual(rc, 0, out + err)
+                m = rank.read_delta_csv(tmp / "out" / "delta.csv")[name]
+                self.assertEqual(m.rank_one_excess, 0.)
+                residual = m.projection_residual()
+                self.assertLess(residual.leading, rank.DEFAULT_OUTLIER_FACTOR * residual.tail)
+                self.assertGreater(m.contraction_excess, 0.4)
+                with (tmp / "out" / "ranking.csv").open() as f:
+                    finding, = csv.DictReader(f)
+                self.assertEqual(finding["tier"], "T3")
+                self.assertIn("contraction", finding["reason"])
+
     def test_signed_fit_under_checkpoint_rounding(self):
         axis = np.ones(16) / 4
         for dtype, scale in [("BF16", 1.), ("F16", 1.), ("F16", 1e-5)]:
