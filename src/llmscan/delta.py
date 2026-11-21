@@ -53,8 +53,9 @@ def scan(
             row = {"name": r.name, "layer": r.layer, "kind": r.kind, "status": r.status, "shape": r.base_shape}
             if r.status != IDENTICAL:
                 t0 = time.perf_counter()
-                load = "to_float64" if "F64" in (r.base_dtype, r.suspect_dtype) else "to_float32"
-                a, b = getattr(base, load)(r.name), getattr(suspect, load)(r.name)
+                wide = "F64" in (r.base_dtype, r.suspect_dtype)
+                # Neither tensor is loaded whole: the core reads both a row block at a time.
+                a, b = base.matrix(r.name, wide), suspect.matrix(r.name, wide)
                 kind = canonical_kind(r.kind)
                 token_matrix = kind in TOKEN_MATRICES and r.layer is None
                 projection = token_matrix or kind in RESIDUAL_WRITERS

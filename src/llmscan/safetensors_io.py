@@ -24,6 +24,7 @@ DTYPE_BYTES = {
     "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
 }
 FLOAT_DTYPES = {"F64": "<f8", "F32": "<f4", "F16": "<f2", "BF16": None}  # BF16 decoded by hand
+RAW_DTYPES = {**FLOAT_DTYPES, "BF16": "<u2"}  # how the stored bytes are viewed before decoding
 MAX_OPEN_MAPS = 4  # per checkpoint; each mmap holds a file descriptor, and sharded models have hundreds of files
 
 
@@ -141,6 +142,75 @@ def tied_embeddings(path: Path) -> bool:
     return bool(c.get("tie_word_embeddings", (c.get("text_config") or {}).get("tie_word_embeddings", False)))
 
 
+def _decode(raw: np.ndarray, dtype: str, wide: bool) -> np.ndarray:
+    """A fresh C-ordered copy of stored values: float64 if `wide`, else float32."""
+    if dtype == "BF16":
+        bits = raw.astype(np.uint32, order="C")
+        bits <<= 16  # bf16 is the top half of a float32
+        out = bits.view(np.float32)
+    else:
+        out = raw.astype(np.float64 if wide and dtype == "F64" else np.float32, order="C")
+    return out.astype(np.float64) if wide and out.dtype != np.float64 else out
+
+
+class StoredMatrix:
+    """A 2-D float tensor that stays in its checkpoint and is decoded a row block at a time.
+
+    It stands in for the array `to_float32` (or `to_float64`, if `wide`) returns wherever that
+    array is only read in row blocks: every value it yields is the one that array holds.
+    """
+
+    ndim = 2
+
+    def __init__(self, checkpoint: "Checkpoint", info: TensorInfo, wide: bool, transposed: bool = False,
+                 largest: list | None = None):
+        self._checkpoint, self._info, self._wide, self._transposed = checkpoint, info, wide, transposed
+        self._largest = [None] if largest is None else largest  # shared with the transpose
+        self.shape = info.shape[::-1] if transposed else info.shape
+
+    @property
+    def T(self) -> "StoredMatrix":
+        return StoredMatrix(self._checkpoint, self._info, self._wide, not self._transposed, self._largest)
+
+    def _stored_rows(self, rows: slice) -> np.ndarray:
+        """A fresh copy of some rows in the stored layout. Their file pages are given back afterwards."""
+        t = self._info
+        start, stop, _ = rows.indices(t.shape[0])
+        width = t.nbytes // max(t.shape[0], 1)
+        lo, hi = t.start + start * width, t.start + max(start, stop) * width
+        with memoryview(self._checkpoint._map(t.file)) as whole, whole[lo:hi] as buf:
+            out = _decode(np.frombuffer(buf, dtype=RAW_DTYPES[t.dtype]).reshape(max(start, stop) - start, t.shape[1]),
+                          t.dtype, self._wide)
+        self._checkpoint.release(t.name, lo, hi)
+        return out
+
+    def rows(self, rows: slice) -> np.ndarray:
+        """A fresh copy of those rows, laid out in memory in the stored order."""
+        if not self._transposed:
+            return self._stored_rows(rows)
+        t = self._info
+        with memoryview(self._checkpoint._map(t.file)) as whole, whole[t.start:t.end] as buf:
+            stored = np.frombuffer(buf, dtype=RAW_DTYPES[t.dtype]).reshape(t.shape)
+            out = _decode(stored[:, rows], t.dtype, self._wide)
+            del stored
+        self._checkpoint.release(t.name)
+        return out.T
+
+    def largest(self, block: int = 4096) -> float:
+        """The largest |entry|, found a block of rows at a time and then remembered."""
+        if self._largest[0] is None:
+            found = 0.0
+            stored, width = self._info.shape
+            if width > stored:  # few long rows: as many entries at a time as `block` rows of the transpose
+                block = max(1, block * stored // width)
+            for start in range(0, stored, block):
+                part = self._stored_rows(slice(start, start + block))
+                if part.size:
+                    found = max(found, float(part.max()), -float(part.min()))
+            self._largest[0] = found
+        return self._largest[0]
+
+
 class Checkpoint:
     """All tensors of one checkpoint. Nothing is read until a tensor is requested."""
 
@@ -218,6 +288,31 @@ class Checkpoint:
         with memoryview(self._map(t.file)) as whole, whole[t.start:t.end] as buf:
             out = np.frombuffer(buf, dtype="<f8").copy()
         return out.reshape(t.shape)
+
+    def matrix(self, name: str, wide: bool = False) -> "StoredMatrix":
+        """A 2-D float tensor to be read in pieces: float64 values if `wide`, else float32."""
+        t = self.tensors[name]
+        if t.dtype not in FLOAT_DTYPES:
+            raise CheckpointError(f"{name}: dtype {t.dtype} is not a supported float type")
+        if len(t.shape) != 2:
+            raise CheckpointError(f"{name}: not a matrix, shape {t.shape}")
+        return StoredMatrix(self, t, wide)
+
+    def release(self, name: str, start: int | None = None, end: int | None = None) -> None:
+        """Let the OS drop the mapped pages of a tensor, or of bytes `start` to `end` of its file,
+        once they have been read. They come back from the file if read again; without this, every
+        page ever touched counts towards resident memory. Does nothing where the OS has no such call."""
+        t = self.tensors[name]
+        mm = self._maps.get(t.file)
+        if mm is None or not hasattr(mm, "madvise") or not hasattr(mmap, "MADV_DONTNEED"):
+            return
+        start, end = t.start if start is None else start, t.end if end is None else end
+        start -= start % mmap.ALLOCATIONGRANULARITY
+        if end > start:
+            try:
+                mm.madvise(mmap.MADV_DONTNEED, start, end - start)
+            except (OSError, ValueError):
+                pass
 
     def close(self) -> None:
         for mm in self._maps.values():
