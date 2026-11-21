@@ -106,7 +106,8 @@ def _unusable(stats: Measurements) -> str | None:
     for label, v in stats._asdict().items():
         if v is not None and not math.isfinite(v):
             return f"{label} {v} is not finite"
-        if label in ("second_tail_share", "token_row_fraction", "projection_error", "rank_one_excess") and v is not None:
+        if label in ("second_tail_share", "token_row_fraction", "projection_error",
+                     "rank_one_excess", "tail_norm_fraction") and v is not None:
             if not 0 <= v <= 1:
                 return f"{label} {v:g} is outside [0, 1]"
             if label != "token_row_fraction":

@@ -14,6 +14,16 @@ from llmscan.inventory import InventoryRow
 from llmscan.names import RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind, stack_of
 
 
+class ProjectionResidual(NamedTuple):
+    """Orthogonal parts of the signed projection's misfit, in units of ‖ΔW‖F."""
+    leading: float
+    tail: float
+
+    def leading_share(self) -> float | None:
+        norm = math.hypot(self.leading, self.tail)
+        return self.leading / norm if norm else None
+
+
 class Measurements(NamedTuple):
     effective_rank: float | None = None
     sv_001: float | None = None
@@ -24,6 +34,18 @@ class Measurements(NamedTuple):
     projection_error: float | None = None
     token_row_spike: float | None = None
     rank_one_excess: float | None = None
+    tail_norm_fraction: float | None = None
+
+    def projection_residual(self) -> ProjectionResidual | None:
+        if self.projection_error is None or not self.frobenius or not self.sv_001:
+            return None
+        tail = self.tail_norm_fraction
+        if tail is None:  # Older CSVs only store the two norms in physical units.
+            leading = min(1., self.sv_001 / self.frobenius)
+            tail = math.sqrt((1 - leading) * (1 + leading))
+        else:
+            leading = math.sqrt((1 - tail) * (1 + tail))
+        return ProjectionResidual(self.projection_error * leading, tail)
 
 
 @dataclass(frozen=True)
@@ -52,8 +74,13 @@ def peer_groups(rows: list[InventoryRow], stats: dict[str, Measurements]) -> dic
             groups[kind, "rank"].append(m.effective_rank)
         elif m.sv_001 is not None:
             groups[kind, "sv_only"].append(m.sv_001)
+        fit_group = (kind, r.base_shape, r.base_dtype, r.suspect_dtype)
         if m.projection_error is not None:
-            groups[kind, r.base_shape, "projection_error"].append(m.projection_error)
+            groups[*fit_group, "projection_error"].append(m.projection_error)
+        residual = m.projection_residual()
+        share = residual.leading_share() if residual is not None else None
+        if share is not None:
+            groups[*fit_group, "leading_share"].append(share)
         if m.rank_one_excess is not None:
             groups[kind, r.base_shape, "rank_one_excess"].append(m.rank_one_excess)
         # A gain measures the leading change relative to the base's weight in
@@ -74,17 +101,19 @@ def _projection_reason(r: InventoryRow, m: Measurements, peers: dict[tuple, Peer
     if m.projection_gain is not None and kind in RESIDUAL_WRITERS | TOKEN_MATRICES and m.projection_gain > max(1., factor):
         return (f"projection_gain {m.projection_gain:.4g} exceeds a full projection of the base "
                 f"(threshold {max(1., factor):g}x)")
-    # Compare the unexplained part of the leading mode against both a
-    # practical relative tolerance and the energy in all remaining modes.
-    # This permits BF16 rounding, partial removal and diffuse healing edits.
-    if m.projection_error is not None and m.frobenius and m.sv_001:
-        ratio = m.frobenius / m.sv_001
-        tail_ratio = math.sqrt(max(0., (ratio - 1) * (ratio + 1)))
-        # Some editing methods systematically depart from orthogonal removal.
-        # With enough comparable layers, also require an unusual fit for that method.
-        fits = peers.get((kind, r.base_shape, "projection_error"))
+    residual = m.projection_residual()
+    if residual is not None and m.projection_error is not None and m.projection_error > 0.05:
+        fit_group = (kind, r.base_shape, r.base_dtype, r.suspect_dtype)
+        fits = peers.get((*fit_group, "projection_error"))
         unusual_fit = fits is None or fits.count < 8 or fits.high(m.projection_error, 0.05)
-        if unusual_fit and m.projection_error > max(0.05, factor * tail_ratio):
+        # Comparable layers measure how much of a rounding/healing residual
+        # normally lies along the leading axis. Give correlated tests one vote.
+        shares = peers.get((*fit_group, "leading_share"))
+        share = residual.leading_share()
+        if unusual_fit and shares and share is not None and shares.high(share, 0.05):
+            return (f"projection law leaves {m.projection_error:.1%} of the leading change unexplained, and "
+                    f"its axis carries {share:.1%} of the residual norm (peer median {shares.median:.1%})")
+        if unusual_fit and residual.leading > factor * residual.tail:
             return (f"projection law leaves {m.projection_error:.1%} of the leading change unexplained "
                     "after fitting partial removal against the base")
     for metric in ("projection_gain", "frobenius", "sv_001"):

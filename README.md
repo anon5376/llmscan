@@ -148,10 +148,15 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      its peer median. Raw Frobenius or spectral norms require a twofold increase. Both checks also require
      six MAD-based standard deviations. A full scan fits the signed leading change to a partial or full
      removal of the base projection. `projection_error` measures the unexplained fraction of the leading
-     change in norm. A finding requires that error to exceed 5% and the norm of the remaining modes
-     multiplied by `--outlier-factor`, expressed in units of σ₁. With eight or more comparable fits,
-     the error must also exceed its peer median by five percentage points and six MAD-based standard
-     deviations. This accommodates editing methods that systematically depart from a pure projection.
+     change in norm. A finding requires more than 5% error. With eight or more comparable fits the
+     error must also exceed its peer median by five percentage points and six MAD-based standard deviations.
+     The unexplained leading component has norm `a = σ₁ × projection_error`. All other modes together
+     have norm `b`. A finding requires either `a > --outlier-factor × b` or an unusually large leading
+     share of the residual norm, `a / hypot(a, b)`. The latter comparison requires at least eight fits
+     of the same kind, shape and storage precisions and uses the same median and dispersion thresholds.
+     This accounts for rounding and editing methods that leave diffuse residuals throughout a stack.
+     Current reports store `tail_norm_fraction` from the scaled spectrum so this comparison also works
+     at subnormal F64 scales. Older reports estimate the tail from their recorded norms.
    - **Residual direction.** Each layer gets one vote in its stack and residual width. Writers within a
      voting layer must agree up to sign. When a strict majority agrees (absolute cosine ≥0.9), the scanner
      compares each writer and embedding to at least three *other* agreeing layers. A median absolute cosine
