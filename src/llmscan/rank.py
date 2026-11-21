@@ -152,7 +152,7 @@ def rank_tensors(
     other_token_kinds = TOKEN_MATRICES - expected
     other_tokens = [r for r in rows if r.status == CHANGED and r.kind in other_token_kinds and not bad[r.name]]
     cosines = direction_cosines(usable + other_tokens, directions or {})
-    direction_flags = direction_outliers(usable, directions or {}, cosines, factor)
+    direction_flags = direction_outliers(usable, directions or {}, cosines, factor, subspaces)
     direction_flags.update(subspace_outliers(usable, subspaces or {}, factor, stats, directions))
 
     ranked: list[tuple[str, InventoryRow, str]] = []

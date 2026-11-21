@@ -503,20 +503,51 @@ class TestAnomalySignals(unittest.TestCase):
                     self.assertEqual(flagged, set() if min(minority) == 13 else minority)
                     self.assertTrue(all("secondary subspace switch" in r.reason for r in ranked if r.tier == "T3"))
 
-    def test_secondary_switch_abstains_at_missing_boundaries_and_for_several_concepts(self):
+    def test_multiple_secondary_switches_need_stable_primary_axes_and_observed_boundaries(self):
         eye = np.eye(6)
-        for layers, third in [(list(range(17)), True), ([i for i in range(17) if i != 6], False)]:
-            with self.subTest(third=third):
-                rows = [row(layer_name(i)) for i in layers]
+        for missing, shift, expected in [(None, 0., {1, 2, 3, 7, 8, 9}), (6, 0., {1, 2, 3}), (None, .1, set())]:
+            with self.subTest(missing=missing, shift=shift):
+                rows = [row(layer_name(i)) for i in range(17) if i != missing]
                 stats = {r.name: Measurements(1.5, 1.) for r in rows}
-                spaces = {}
+                spaces, axes = {}, {}
                 for r in rows:
                     axis = 2 if 7 <= r.layer <= 9 else 1
-                    if third and r.layer in (1, 2, 3):
+                    if r.layer in (1, 2, 3):
                         axis = 3
-                    spaces[r.name] = eye[:, [0, axis]]
-                ranked = rank.rank_tensors(rows, stats, subspaces=spaces, directions={r.name: eye[0] for r in rows})
-                self.assertTrue(all(r.tier == "T4" for r in ranked))
+                    theta = (axis - 1) * shift
+                    axes[r.name] = np.cos(theta) * eye[0] + np.sin(theta) * eye[4]
+                    spaces[r.name] = np.column_stack((axes[r.name], eye[axis]))
+                ranked = rank.rank_tensors(rows, stats, subspaces=spaces, directions=axes)
+                self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
+
+    def test_secondary_switches_at_different_angular_scales_and_both_ends(self):
+        rows = [row(layer_name(i)) for i in range(30)]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        eye = np.eye(4)
+        # The first two minority concepts border each other and the second
+        # recurs. Their separation is smaller than the usual coherence radius.
+        groups = [{0, 1, 2}, {3, 4, 5, 16, 17, 18}, {27, 28, 29}]
+        axes, spaces = {}, {}
+        for r in rows:
+            angle = next((a for a, g in zip((8., 18., 65.), groups) if r.layer in g), 0.)
+            theta = np.radians(angle + .1 * (r.layer % 3))
+            secondary = np.cos(theta) * eye[1] + np.sin(theta) * eye[2]
+            axes[r.name] = (-1) ** r.layer * eye[0]
+            spaces[r.name] = np.column_stack((eye[0], secondary))
+        ranked = rank.rank_tensors(rows[::-1], stats, subspaces=spaces, directions=axes)
+        self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, set.union(*groups))
+
+    def test_gradual_transitions_between_three_plateaus(self):
+        eye = np.eye(3)
+        angles = [0.] * 20 + list(range(5, 35, 5)) + [30.] * 3 + list(range(35, 65, 5)) + [60.] * 3
+        rows = [row(layer_name(i)) for i in range(len(angles))]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        axes, spaces = {}, {}
+        for r, theta in zip(rows, np.radians(angles)):
+            axes[r.name] = eye[0]
+            spaces[r.name] = np.column_stack((eye[0], np.cos(theta) * eye[1] + np.sin(theta) * eye[2]))
+        ranked = rank.rank_tensors(rows, stats, subspaces=spaces, directions=axes)
+        self.assertTrue(all(r.tier == "T4" for r in ranked))
 
     def test_terminal_switch_separates_all_secondary_modes_relative_to_peer_spread(self):
         eye = np.eye(6)

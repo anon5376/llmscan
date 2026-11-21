@@ -243,20 +243,23 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      the largest principal angle, which is invariant to basis rotations and ordering inside a tied
      cluster. With eight other independent layers and a coherent majority, it tests the candidate's
      median angle against peer dispersion, allowing for local angular drift.
-     Two internally coherent groups can share a stable, separately resolved leading direction
-     while differing sharply in their secondary modes. The scanner flags the minority for
-     review if it has at least three layers and the reference has at least eight. The
-     smallest angle across groups must exceed the largest angle within either group by
-     the configured outlier factor.
-     The leading axes must agree across groups within their usual dispersion. Normally
-     transitions in both directions must occur between adjacent layer IDs. For a single
-     transition at the beginning or end of an uninterrupted cohort, the scanner also
-     checks the second principal angle of every cross-group pair. After the best
-     aligned direction, even the closest remaining directions must be separated by more
-     than the outlier factor times the largest within-group angle. The step in the leading
-     direction at the boundary must also be within that factor of the largest adjacent
-     leading-direction step inside either group, allowing for numerical precision. A deliberate
-     change of secondary editing concept with the same geometry gives the same finding.
+     When several groups share a leading edit, the scanner compares their secondary modes.
+     It chooses representative layers in order of distance from the nearest representative
+     already chosen. It keeps the finest partition with at least three layers per group
+     and a strict majority of at least eight layers. Each group's full diameter must be
+     within the coherence radius. The smallest angle between any two groups must exceed
+     the largest diameter by the configured outlier factor, allowing for numerical precision.
+     These checks use all layer pairs.
+
+     Each minority group can produce a T3 finding when its boundaries are observed at
+     consecutive layer IDs. The separately measured leading axes must agree across groups,
+     and each boundary step in the leading direction must be consistent with adjacent steps
+     inside the groups. For a single terminal boundary, the cohort must be uninterrupted
+     and even the second principal angle to every other group must exceed the separation
+     bound. An intentional secondary-direction change with the same geometry gives the same
+     finding. For individual layer outliers, two adjacent peers can confirm a local plateau
+     even at its edge. The leading-direction comparison checks both the axis and the resolved
+     output space before accepting this evidence of a local editing regime.
 
      An isolated minority can also be corroborated by effective rank, including when the
      other layers lack a recurring group. For this test the group must recur across separate ranges of observed

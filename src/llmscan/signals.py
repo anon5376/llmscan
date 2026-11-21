@@ -208,6 +208,11 @@ def _orthogonal_fraction(cosine: float) -> float:
     return math.sqrt((1 - c) * (1 + c))
 
 
+def _on_plateau(layer: int, neighbors: set[int]) -> bool:
+    """Does this layer belong to three consecutive, independently matching observations?"""
+    return any(layer + a in neighbors and layer + b in neighbors for a, b in [(-2, -1), (-1, 1), (1, 2)])
+
+
 def _recurring_rank_shift(names: list[str], members: np.ndarray, stats: dict[str, Measurements]) -> str | None:
     """Corroborate a recurring subspace by a consistent one-sided departure in effective rank."""
     if not np.any(np.diff(np.flatnonzero(members)) > 1):
@@ -224,55 +229,78 @@ def _recurring_rank_shift(names: list[str], members: np.ndarray, stats: dict[str
     return None
 
 
-def _secondary_switch(ids: list[int], names: list[str], majority: np.ndarray, angles: np.ndarray,
-                      secondary_overlap: np.ndarray, agreement: np.ndarray, directions: dict[str, np.ndarray] | None,
-                      width: int, factor: float) -> str | None:
-    """Look for an isolated switch of secondary modes under a stable leading edit."""
-    if majority.sum() < 8 or (~majority).sum() < 3:
-        return None
-    same = majority[:, None] == majority
-    if not np.array_equal(agreement, same):
-        return None  # Need two distinct, internally coherent groups and no transitional layers.
-    adjacent = np.diff(ids) == 1
-    switches = majority[:-1] != majority[1:]
-    terminal = switches.sum() == 1
-    if terminal:
-        if not adjacent.all():
-            return None  # Gaps can hide a transition or a return to the majority.
-    elif not (np.any(adjacent & majority[:-1] & ~majority[1:])
-              and np.any(adjacent & ~majority[:-1] & majority[1:])):
-        return None
+def _coherent_groups(angles: np.ndarray, layer_count: int, factor: float, floor: float) -> np.ndarray | None:
+    """Find the finest supported partition with a gap between all within- and between-group angles."""
+    best = None
+    labels = np.zeros(len(angles), dtype=int)
+    nearest = angles[0].copy()
+    # If every inter-group distance exceeds every group diameter, farthest-first
+    # visits each group once before revisiting any. Test the partition at each size.
+    for label in range(1, len(angles) // 3):
+        center = int(nearest.argmax())
+        spacing = nearest[center]
+        if spacing <= floor:
+            break
+        closer = angles[center] < nearest
+        labels[closer] = label
+        nearest[closer] = angles[center, closer]
+        sizes = np.bincount(labels)
+        if sizes.min() < 3:
+            break  # An existing center can only lose members to later centers.
+        if sizes.max() <= layer_count / 2 or sizes.max() < 8 or spacing <= factor * max(floor, nearest.max()):
+            continue
+        same = labels[:, None] == labels
+        within = angles[same].max()
+        if within <= math.acos(0.9) and angles[~same].min() > factor * max(floor, within):
+            best = labels.copy()
+    return best
+
+
+def _secondary_switches(ids: list[int], names: list[str], layer_count: int, angles: np.ndarray,
+                        secondary_overlap: np.ndarray, directions: dict[str, np.ndarray] | None,
+                        width: int, factor: float) -> dict[str, str]:
+    """Locate abrupt changes of secondary modes under a shared, separately resolved leading edit."""
     if not directions or any(name not in directions or directions[name].shape != (width,) for name in names):
-        return None  # A tied leading space has no independently resolved primary direction.
+        return {}
+    floor = math.sqrt(2 * width * math.ulp(1.))
+    factor = max(1., factor)
+    labels = _coherent_groups(angles, layer_count, factor, floor)
+    if labels is None:
+        return {}
+    same = labels[:, None] == labels
     axes = np.stack([directions[name] for name in names])
     primary = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
-    floor = math.sqrt(2 * axes.shape[1] * math.ulp(1.))
-    factor = max(1., factor)
     if not (primary.max() <= math.acos(0.9)
             and primary[~same].max() <= factor * max(floor, primary[same].max())):
-        return None
-    across, within = angles[~same].min(), angles[same].max()
-    separation_limit = factor * max(floor, within)
-    if across <= separation_limit:
-        return None
-    boundary = ""
-    if terminal:
-        i = int(np.flatnonzero(switches)[0])
-        primary_steps = primary.diagonal(offset=1)
-        if primary_steps[i] > factor * max(floor, primary_steps[~switches].max()):
-            return None  # The leading edit itself changes at this boundary.
-        # Use the smallest angle after the best aligned pair. Even the
-        # most similar remaining directions must separate by more than
-        # ordinary variation across either group, including adjacent steps.
-        secondary = math.acos(min(1., secondary_overlap[~same].max()))
-        if secondary <= separation_limit:
-            return None
-        boundary = (f" at boundary {ids[i]}–{ids[i+1]} "
-                    f"(minimum secondary angle {math.degrees(secondary):.2f} degrees)")
-    return (f"abrupt secondary subspace switch in {(~majority).sum()} layers{boundary} "
-            f"(minimum between-group angle {math.degrees(across):.2f} degrees, "
-            f"maximum within-group angle {math.degrees(within):.2f} degrees, "
-            f"leading axes within {math.degrees(primary.max()):.2f} degrees)")
+        return {}
+    adjacent = np.diff(ids) == 1
+    primary_steps = primary.diagonal(offset=1)
+    usual_step = primary_steps[adjacent & (labels[:-1] == labels[1:])].max(initial=floor)
+    within = angles[same].max()
+    sizes = np.bincount(labels)
+    findings = {}
+    for label in np.flatnonzero(sizes < sizes.max()):
+        members = labels == label
+        switches = members[:-1] != members[1:]
+        if not adjacent[switches].all() or primary_steps[switches].max() > factor * usual_step:
+            continue  # Each observed boundary needs neighboring layers with a stable leading edit.
+        outside = members[:, None] & ~members
+        boundary = ""
+        if switches.sum() == 1:
+            secondary = math.acos(min(1., secondary_overlap[outside].max()))
+            if not adjacent.all() or secondary <= factor * max(floor, within):
+                continue  # A terminal regime needs independent separation of every secondary mode.
+            i = int(np.flatnonzero(switches)[0])
+            boundary = (f" at boundary {ids[i]}–{ids[i+1]} "
+                        f"(minimum secondary angle {math.degrees(secondary):.2f} degrees)")
+        across = angles[outside].min()
+        reason = (f"abrupt secondary subspace switch in {sizes[label]} layers{boundary} "
+                  f"(minimum between-group angle {math.degrees(across):.2f} degrees, "
+                  f"maximum within-group angle {math.degrees(within):.2f} degrees, "
+                  f"leading axes within {math.degrees(primary.max()):.2f} degrees)")
+        for i in np.flatnonzero(members):
+            findings[names[i]] = reason
+    return findings
 
 
 def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float,
@@ -319,14 +347,14 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
                         findings[names[i]] = (f"recurring {dim}-dimensional output subspace in {len(member_ids)} "
                                               f"layers without a comparable peer group ({shift})")
             continue
-        switch = _secondary_switch(ids, names, supporters, angles, secondary_overlap, agreement, directions,
-                                   width, factor)
+        if dim >= 2:
+            findings.update(_secondary_switches(ids, names, len(layers), angles, secondary_overlap,
+                                                directions, width, factor))
         # Compare each candidate with the coherent population excluding itself.
         np.fill_diagonal(angles, np.nan)
         separation = np.nanmedian(angles[:, supporters], axis=1)
         for i, name in enumerate(names):
-            if switch and not supporters[i]:
-                findings[name] = switch
+            if name in findings:
                 continue
             peers = Peers.summarize(np.delete(separation, i).tolist())
             limit = max(max(1., factor) * peers.median, peers.median + 6 * 1.4826 * peers.mad,
@@ -337,8 +365,15 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
             # concept. Demand spectral corroboration for an isolated cohort.
             members = agreement[i]
             if (stats is not None and members.sum() >= 3 and not np.any(members & supporters)
-                    and np.all(agreement[members] == members) and not _recurring_rank_shift(names, members, stats)):
-                continue
+                    and np.all(agreement[members] == members)):
+                if not _recurring_rank_shift(names, members, stats):
+                    continue
+            else:
+                # At a plateau edge a constant-speed prediction can fail even
+                # though two consecutive peers confirm the measured space.
+                matching = np.flatnonzero(members & (angles[i] <= limit))
+                if _on_plateau(ids[i], {ids[j] for j in matching}):
+                    continue
             # Allow smooth drift. The largest principal angle is a metric.
             # A constant-speed path through the adjacent layers covers each
             # interval in proportion to its length, also at either endpoint.
@@ -379,7 +414,8 @@ def _follows_drift(layer: int, axis: np.ndarray, neighbors: list[int], axes: dic
 
 
 def direction_outliers(rows: list[InventoryRow], directions: dict[str, np.ndarray],
-                       cosines: dict[str, float], factor: float) -> dict[str, str]:
+                       cosines: dict[str, float], factor: float,
+                       subspaces: dict[str, np.ndarray] | None = None) -> dict[str, str]:
     """Calibrate departure from a coherent stack against comparable writer layers."""
     groups = defaultdict(lambda: defaultdict(list))
     for r in rows:
@@ -411,6 +447,20 @@ def direction_outliers(rows: list[InventoryRow], directions: dict[str, np.ndarra
                 neighbors = sorted(i for i in axes if i != layer)
                 if len(neighbors) >= 2 and _follows_drift(layer, directions[name], neighbors, axes, limit):
                     continue
+                if subspaces and name in subspaces and layer in axes:
+                    # A sustained multi-concept edit may change both its leading
+                    # axis and full edit space. Require support for both locally.
+                    space = subspaces[name]
+                    matching = set()
+                    for j in (layer - 2, layer - 1, layer + 1, layer + 2):
+                        if j not in axes or _orthogonal_fraction(float(axes[j] @ axes[layer])) > limit:
+                            continue
+                        peer = subspaces.get(layers[j][0])
+                        if peer is not None and peer.shape == space.shape:
+                            if np.linalg.svd(space.T @ peer, compute_uv=False)[-1] >= 0.9:
+                                matching.add(j)
+                    if _on_plateau(layer, matching):
+                        continue
                 findings[name] = (f"residual direction has {separation:.2%} orthogonal component to coherent layers "
                                   f"(peer median {peers.median:.2%}, upper bound {limit:.2%})")
     return findings
