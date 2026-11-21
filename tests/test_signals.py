@@ -64,6 +64,14 @@ class TestProjectionMeasurements(unittest.TestCase):
         self.assertEqual(stats.singular_values[0] / step, 5.)
         self.assertEqual(stats.frobenius / step, 6.)
         self.assertEqual(core.rank_one_excess(base, stats, "F64", "F64"), 0.)
+        # Both parts of the signed fit use that same scaled spectrum, even
+        # when the norms written in physical units round to different steps.
+        fit = Measurements(stats.effective_rank, stats.singular_values[0], stats.frobenius,
+                           projection_error=stats.projection_error, tail_norm_fraction=stats.tail_norm_fraction)
+        regular = core.analyze_delta(units, projected.copy(), 1)
+        expected = regular.projection_error * regular.singular_values[0] / regular.frobenius
+        self.assertAlmostEqual(fit.projection_residual().leading, expected)
+        self.assertAlmostEqual(fit.projection_residual().tail, regular.tail_norm_fraction)
 
     def test_signed_partial_projection_fit_for_wide_and_tall_weights(self):
         rng = np.random.default_rng(5)
@@ -135,10 +143,30 @@ class TestAnomalySignals(unittest.TestCase):
         self.stats[self.last] = self.stats[self.last]._replace(projection_error=0.9)
         self.assertIn("projection law", self.flagged()[self.last])
 
+    def test_large_fit_error_proportional_to_diffuse_noise(self):
+        # Both residual components grow together in a noisier layer.
+        self.stats = {r.name: Measurements(1., 1., np.hypot(1., 0.08), projection_error=0.02)
+                      for r in self.rows}
+        self.stats[self.last] = Measurements(1., 1., np.hypot(1., 0.4), projection_error=0.1)
+        self.assertEqual(self.flagged(), {})
+
+    def test_residual_share_needs_peers_at_matching_precision(self):
+        self.stats = {r.name: Measurements(1., 1., 1.02, projection_error=0.01) for r in self.rows}
+        self.stats[self.last] = self.stats[self.last]._replace(projection_error=0.2)
+        self.assertIn("residual norm", self.flagged()[self.last])
+        self.rows[-1].suspect_dtype = "F16"
+        self.assertEqual(self.flagged(), {})
+
+    def test_exact_fits_do_not_supply_residual_share_measurements(self):
+        self.stats = {r.name: Measurements(1., 1., 1., projection_error=0.) for r in self.rows}
+        self.stats[self.last] = Measurements(1., 1., 1.02, projection_error=0.1)
+        self.assertEqual(self.flagged(), {})
+
     def test_invalid_new_stats_are_unusable_but_a_perfect_fit_is_valid(self):
         for changes in [dict(projection_error=-0.01), dict(projection_error=1.01),
                         dict(token_row_spike=float("inf")), dict(token_row_spike=-1.),
-                        dict(rank_one_excess=-0.1), dict(rank_one_excess=1.1)]:
+                        dict(rank_one_excess=-0.1), dict(rank_one_excess=1.1),
+                        dict(tail_norm_fraction=-0.1), dict(tail_norm_fraction=1.1)]:
             with self.subTest(changes=changes):
                 self.stats[self.last] = Measurements(1., 1., **changes)
                 self.assertIn("unusable", self.flagged()[self.last])
@@ -241,6 +269,44 @@ class TestAnomalySignals(unittest.TestCase):
 
 
 class TestControlCheckpoints(unittest.TestCase):
+    def test_signed_fit_under_checkpoint_rounding(self):
+        axis = np.ones(16) / 4
+        for dtype, scale in [("BF16", 1.), ("F16", 1.), ("F16", 1e-5)]:
+            with self.subTest(dtype=dtype, scale=scale), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                rng = np.random.default_rng(17)
+                base, suspect = {}, {}
+                for i in range(10):
+                    weights = scale * rng.normal(size=(16, 32))
+                    w = to_bf16(weights) if dtype == "BF16" else weights.astype(np.float16).astype(np.float32)
+                    w[:, -1] = 0.
+                    if scale < 1:
+                        self.assertLess(np.max(np.abs(w)), np.finfo(np.float16).smallest_normal)
+                    strength = 0.125 if scale == 1 else 1.
+                    edited = w - strength * np.outer(axis, axis @ w)
+                    if i == 9 and dtype == "BF16":
+                        # The zero base column is orthogonal to the true right
+                        # coefficients. This discrepancy has the same left axis.
+                        edited[:, -1] = axis / 16
+                    base[layer_name(i)] = (dtype, w)
+                    suspect[layer_name(i)] = (dtype, to_bf16(edited) if dtype == "BF16" else edited)
+                write_safetensors(tmp / "b.safetensors", base)
+                write_safetensors(tmp / "s.safetensors", suspect)
+                rc, out, err = run_cli("--base", str(tmp / "b.safetensors"), "--suspect", str(tmp / "s.safetensors"),
+                                       "--out", str(tmp / "out"), "-k", "1")
+                self.assertEqual(rc, 0, out + err)
+                with (tmp / "out" / "ranking.csv").open() as f:
+                    flagged = {r["name"]: r["reason"] for r in csv.DictReader(f) if r["tier"] != "T4"}
+                if dtype == "BF16":
+                    self.assertEqual(set(flagged), {layer_name(9)})
+                    self.assertIn("residual norm", flagged[layer_name(9)])
+                    stats = rank.read_delta_csv(tmp / "out" / "delta.csv")[layer_name(9)]
+                    residual = stats.projection_residual()
+                    self.assertLess(residual.leading, rank.DEFAULT_OUTLIER_FACTOR * residual.tail)
+                    self.assertEqual(stats.rank_one_excess, 0.)
+                else:
+                    self.assertEqual(flagged, {})
+
     def test_top_one_scan_identifies_spread_tail_and_degenerate_singleton(self):
         names = [layer_name(i) for i in range(10)]
         embed = "model.embed_tokens.weight"
