@@ -200,7 +200,10 @@ class StoredMatrix:
         """The largest |entry|, found a block of rows at a time and then remembered."""
         if self._largest[0] is None:
             found = 0.0
-            for start in range(0, self._info.shape[0], block):
+            stored, width = self._info.shape
+            if width > stored:  # few long rows: as many entries at a time as `block` rows of the transpose
+                block = max(1, block * stored // width)
+            for start in range(0, stored, block):
                 part = self._stored_rows(slice(start, start + block))
                 if part.size:
                     found = max(found, float(part.max()), -float(part.min()))

@@ -239,6 +239,22 @@ class TestStoredMatrices(Equivalence):
                     ck.release(dtype)  # dropped pages are read again from the file
                     np.testing.assert_array_equal(ck.to_float64(dtype) if wide else ck.to_float32(dtype), whole)
 
+    def test_largest_entry_of_a_wide_tensor_is_found_in_pieces(self):
+        rng = np.random.default_rng(17)
+        tensors = {"wide": ("F32", rng.standard_normal((6, 20)).astype(np.float32)),
+                   "one row": ("F32", rng.standard_normal((1, 50)).astype(np.float32)),
+                   "tall": ("F32", rng.standard_normal((20, 6)).astype(np.float32))}
+        with self.pair(tensors, tensors)[0] as ck:
+            for name, (_, x) in tensors.items():
+                for turn in (lambda m: m, lambda m: m.T):
+                    m = turn(ck.matrix(name))
+                    with self.subTest(name=name, shape=m.shape), \
+                            mock.patch.object(type(m), "_stored_rows", autospec=True, side_effect=type(m)._stored_rows) as read:
+                        self.assertEqual(m.largest(block=10), float(np.abs(x).max()))
+                        sizes = [read.side_effect(*call.args).size for call in read.call_args_list]
+                        self.assertGreater(len(sizes), 1 if min(x.shape) > 1 else 0)
+                        self.assertLessEqual(max(sizes), max(10 * min(x.shape), max(x.shape)))  # 10 rows of the long side
+
     def test_only_float_matrices_can_be_streamed(self):
         tensors = {"ids": ("I64", np.arange(6).reshape(2, 3)), "bias": ("F32", np.ones(4, np.float32))}
         with self.pair(tensors, tensors)[0] as ck:
