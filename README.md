@@ -201,9 +201,19 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      so its inner product with any matrix whose symmetric part is positive semidefinite
      is nonpositive. Each weight has one rounding error shared across the selected inputs.
      Combining their coefficients before applying the entrywise intervals can certify
-     a violation that separate response bounds miss. The joint search uses at most
+     a violation that separate response bounds miss. The first joint search uses at most
      256 columns, and runs when the initial gap on those columns exceeds the individual
      first-order allowances of both checkpoints.
+     If it finds no certificate and the positive response on the seed columns exceeds
+     the Frobenius norm of the reciprocity defect times the squared input norm,
+     the scanner tries a wider fit (up to 1,024 columns and 1,048,576 weights).
+     It searches for a witness by moving the two matrices within their storage
+     intervals to reduce the positive and skew parts of the linearized Gram form.
+     For each candidate witness it bounds the **original quadratic** over every
+     row's two intervals. A convex lower bound keeps the shared rounding errors
+     in the linear and quadratic terms. A positive minimum of its tangent plane
+     certifies a violation even with adversarially aligned rounding.
+     This fallback can require up to 512 dense eigensolves for a candidate tensor.
      `removal_excess` is the fraction of the measured positive value beyond this budget.
      A zero means the search found no certificate. With eight or more comparable tensors,
      the excess must also exceed the cohort's upper outer fence (third quartile plus three

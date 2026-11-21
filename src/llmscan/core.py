@@ -20,6 +20,7 @@ from typing import NamedTuple
 
 import numpy as np
 
+from .interval_fit import fit_excess
 from .removal import joint_excess
 
 _ROWS_PER_BLOCK = 4096
@@ -236,7 +237,19 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     selected = np.argsort(-np.abs(x), kind="stable")[:width]
     b = np.ldexp(base[:, selected], -exponent, dtype=np.float64)
     s = np.ldexp(suspect[:, selected], -exponent, dtype=np.float64)
-    return joint_excess(b, s, storage_radius(b, base_dtype), storage_radius(s, suspect_dtype), x[selected], value)
+    rb, rs = storage_radius(b, base_dtype), storage_radius(s, suspect_dtype)
+    z = x[selected]
+    excess = joint_excess(b, s, rb, rs, z, value)
+    if excess:
+        return excess
+    # A symmetric violation can be coherent across more columns than the
+    # small joint search uses. Compare the positive response to the whole
+    # reciprocity defect on its seed columns before trying the wider fit.
+    seed = z[:256]
+    form = s[:, :len(seed)].T @ (s[:, :len(seed)] - b[:, :len(seed)])
+    if seed @ form @ seed <= (seed @ seed) * np.linalg.norm(form - form.T):
+        return 0.
+    return fit_excess(b, s, rb, rs)
 
 
 def reciprocity_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,

@@ -10,6 +10,7 @@ import numpy as np
 
 from helpers import gguf_float, write_gguf, write_safetensors
 from llmscan import core, rank
+from llmscan.interval_fit import _box_excess, fit_excess
 from llmscan.names import stack_of
 from llmscan.removal import joint_excess
 from llmscan.signals import Measurements, subspace_outliers
@@ -237,6 +238,31 @@ class TestProjectionMeasurements(unittest.TestCase):
         x = np.ones(8) / np.sqrt(8)
         value = (s @ x) @ ((s - b) @ x)
         self.assertEqual(joint_excess(b, s, radius, radius, x, value), 0.)
+
+    def test_quadratic_box_certificate_is_bounded_by_the_exact_minimum(self):
+        b, s = np.array([[0.8]]), np.ones((1, 1))
+        rb, rs = np.array([[0.1]]), np.array([[0.08]])
+        # Charging the linear and mixed errors separately consumes the gap.
+        gap = 0.2
+        self.assertGreater(1.2 * rs.item() + rb.item() + (rs * rb).item(), gap)
+        excess = _box_excess(b, s, rb, rs, s, np.zeros_like(s))
+        self.assertGreater(excess, 0.)
+        self.assertLessEqual(excess * gap, 0.92 * (0.92 - 0.9))
+        # The enlarged intervals touch at a common exact weight.
+        self.assertEqual(_box_excess(b, s, rb, np.array([[0.1]]), s, np.zeros_like(s)), 0.)
+
+    def test_interval_fit_with_coherent_errors_on_rectangular_matrices(self):
+        rng = np.random.default_rng(432)
+        for shape in [(13, 18), (18, 13)]:
+            b = rng.normal(size=shape)
+            axes = np.linalg.qr(rng.normal(size=(len(b), 3)))[0]
+            radius = np.abs(b) / 256
+            error = radius * rng.choice([-1., 1.], size=shape)
+            for strengths, gain in [([0.03, 0.02, 0.], True), ([-1., -0.1, -0.1], False)]:
+                with self.subTest(shape=shape, strengths=strengths):
+                    s = b + (axes * strengths) @ (axes.T @ b)
+                    excess = fit_excess(b + error, s - error, radius, radius)
+                    self.assertEqual(excess > 0., gain)
 
 
 class TestAnomalySignals(unittest.TestCase):
