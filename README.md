@@ -201,12 +201,17 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      so its inner product with any matrix whose symmetric part is positive semidefinite
      is nonpositive. Each weight has one rounding error shared across the selected inputs.
      Combining their coefficients before applying the entrywise intervals can certify
-     a violation that separate response bounds miss. The first joint search uses at most
-     256 columns, and runs when the initial gap on those columns exceeds the individual
-     first-order allowances of both checkpoints.
-     If it finds no certificate and the positive response on the seed columns exceeds
-     the Frobenius norm of the reciprocity defect times the squared input norm,
-     the scanner tries a wider fit (up to 1,024 columns and 1,048,576 weights).
+     a violation that separate response bounds miss. On the selected columns (up to
+     1,024 columns and 1,048,576 weights), the scanner also looks for a plane of
+     coherent reciprocity error. It sketches the action of the skew form and checks
+     the strongest plane it finds against both original storage intervals. This test
+     applies even when every measured quadratic response is nonpositive.
+     The next joint search uses at most 256 columns and runs when the initial gap
+     exceeds the individual first-order allowances of both checkpoints.
+     A positive quadratic response on these seed columns can also trigger a wider
+     fit. The scanner compares it with the root mean square Frobenius scale of
+     linearized, independent uniform storage errors. This comparison only selects
+     candidates. Every finding must still survive the full entrywise intervals.
      It searches for a witness by moving the two matrices within their storage
      intervals to reduce the positive and skew parts of the linearized Gram form.
      For each candidate witness it bounds the **original quadratic** over every

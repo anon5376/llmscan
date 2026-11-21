@@ -21,7 +21,7 @@ from typing import NamedTuple
 import numpy as np
 
 from .interval_fit import fit_excess
-from .removal import joint_excess
+from .removal import joint_excess, promising_symmetric_response, skew_excess
 
 _ROWS_PER_BLOCK = 4096
 
@@ -194,8 +194,6 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     basis = (np.eye(cols) if cols <= sketch_width else
              range_basis(np.random.default_rng(0).standard_normal((cols, sketch_width))))
     value, x = leading(basis)
-    if value <= 0:
-        return 0.
     abs_x = np.abs(x)
 
     arithmetic = 8 * math.ulp(1.) * (rows + cols + 2)
@@ -229,8 +227,6 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     # influential columns. These limits cap work and never relax a bound.
     if cols > sketch_width:
         value, x = leading(range_basis(basis))
-    if value <= math.sqrt(np.finfo(float).tiny):
-        return 0.
     width = min(cols, 1024, (1 << 20) // rows)
     if not width:
         return 0.
@@ -239,15 +235,14 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     s = np.ldexp(suspect[:, selected], -exponent, dtype=np.float64)
     rb, rs = storage_radius(b, base_dtype), storage_radius(s, suspect_dtype)
     z = x[selected]
+    # Symmetry is required even if every quadratic response is nonpositive.
+    excess = skew_excess(b, s, rb, rs)
+    if excess or value <= math.sqrt(np.finfo(float).tiny):
+        return excess
     excess = joint_excess(b, s, rb, rs, z, value)
     if excess:
         return excess
-    # A symmetric violation can be coherent across more columns than the
-    # small joint search uses. Compare the positive response to the whole
-    # reciprocity defect on its seed columns before trying the wider fit.
-    seed = z[:256]
-    form = s[:, :len(seed)].T @ (s[:, :len(seed)] - b[:, :len(seed)])
-    if seed @ form @ seed <= (seed @ seed) * np.linalg.norm(form - form.T):
+    if not promising_symmetric_response(b, s, rb, rs, z):
         return 0.
     return fit_excess(b, s, rb, rs)
 

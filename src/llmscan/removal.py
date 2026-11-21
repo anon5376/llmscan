@@ -5,6 +5,66 @@ import math
 import numpy as np
 
 
+def skew_excess(b, s, rb, rs):
+    """Test reciprocity on a plane of the full skew form on the selected columns."""
+    d = s - b
+
+    def action(q):
+        return b.T @ (d @ q) - d.T @ (b @ q)
+
+    # Two range iterations find coherent skew modes without building a
+    # columns-by-columns Gram matrix. The search only selects the witness.
+    cols = b.shape[1]
+    if cols < 2:
+        return 0.
+    if cols <= 8:
+        basis = np.eye(cols)
+    else:
+        basis = np.random.default_rng(0).standard_normal((cols, 8))
+        for _ in range(2):
+            basis = np.linalg.qr(action(basis))[0]
+    form = basis.T @ action(basis)
+    left, singular, right = np.linalg.svd((form - form.T) / 2)
+    if not singular[0]:
+        return 0.
+    x, y = basis @ left[:, 0], basis @ right[0]
+
+    bx, by = b @ x, b @ y
+    gap = abs(bx @ (d @ y) - by @ (d @ x))
+    # For M = xyᵀ − yxᵀ the two linear terms charge each weight
+    # only once. The mixed term is bounded by ||Rb||F ||Rs||F ||M||2,
+    # where ||M||2 is the area of the parallelogram spanned by x and y.
+    size = np.linalg.norm(x) * np.linalg.norm(y)
+    cost = size * np.linalg.norm(rb) * np.linalg.norm(rs)
+    weights = sum(np.linalg.norm(a) for a in (b, s, rb, rs))
+    guard = 128 * (sum(b.shape) + 1) * math.ulp(1.) * weights**2 * size
+    guard += 16 * b.size * np.finfo(float).tiny
+    if gap <= cost + guard:
+        return 0.
+    cost += np.sum(rs * np.abs(np.outer(bx, y) - np.outer(by, x)), axis=1).sum()
+    cost += np.sum(rb * np.abs(np.outer(s @ x, y) - np.outer(s @ y, x)), axis=1).sum()
+    return float(1 - (cost + guard) / gap) if gap > cost + guard else 0.
+
+
+def promising_symmetric_response(b, s, rb, rs, x):
+    """Screen the wider fit by comparing its seed with a storage-noise scale."""
+    z = x[:256]
+    b, s, rb, rs = (a[:, :len(z)] for a in (b, s, rb, rs))
+    sx = s @ z
+    gap = sx @ (sx - b @ z)
+    if gap <= 0:
+        return False
+    # Linearization of sym(SᵀΔ) gives sym(Esᵀ(2S−B) − EbᵀS).
+    # For independent uniform errors the expected squared Frobenius norm
+    # before symmetrizing is the row sum below divided by three. This
+    # scale *only* controls search effort; certification uses the full boxes.
+    def row_energy(a):
+        return np.einsum("ij,ij->i", a, a)
+
+    noise = row_energy(rs) @ row_energy(2 * s - b) + row_energy(rb) @ row_energy(s)
+    return gap > (z @ z) * math.sqrt(noise / 3)
+
+
 def _sparse_input(b, s, rb, rs, x, eigenvalue):
     """Improve the measured gap / interval cost before choosing the columns."""
     def responses(z):

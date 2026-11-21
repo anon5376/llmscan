@@ -12,7 +12,7 @@ from helpers import gguf_float, write_gguf, write_safetensors
 from llmscan import core, rank
 from llmscan.interval_fit import _box_excess, fit_excess
 from llmscan.names import stack_of
-from llmscan.removal import joint_excess
+from llmscan.removal import joint_excess, promising_symmetric_response, skew_excess
 from llmscan.signals import Measurements, subspace_outliers
 from test_core import to_bf16
 from test_rank import layer_name, row, run_cli
@@ -238,6 +238,30 @@ class TestProjectionMeasurements(unittest.TestCase):
         x = np.ones(8) / np.sqrt(8)
         value = (s @ x) @ ((s - b) @ x)
         self.assertEqual(joint_excess(b, s, radius, radius, x, value), 0.)
+
+    def test_skew_certificate_charges_both_storage_boxes(self):
+        rng = np.random.default_rng(521)
+        for shape in [(6, 13), (17, 7)]:
+            with self.subTest(shape=shape):
+                exact = rng.normal(size=shape)
+                rb, rs = rng.uniform(0.01, 0.05, (2, *shape))
+                b = exact + rb * rng.choice([-1, 1], shape)
+                s = exact - rs * rng.choice([-1, 1], shape)
+                self.assertGreater(skew_excess(b, s, rb * 0, rs * 0), 0.99)
+                self.assertEqual(skew_excess(b, s, rb, rs), 0.)
+
+    def test_wide_fit_screen_uses_symmetric_response_and_storage(self):
+        b = np.eye(5)
+        s = b.copy()
+        s[0, 0] += 1 / 16
+        s[2, 3] += 0.5
+        z = b[0]
+        form = s.T @ (s - b)
+        self.assertLess(z @ form @ z, np.linalg.norm(form - form.T))
+        radius = np.full_like(b, 1 / 1024)
+        self.assertTrue(promising_symmetric_response(b, s, radius, radius, z))
+        self.assertFalse(promising_symmetric_response(b, s, radius, radius, b[1]))
+        self.assertFalse(promising_symmetric_response(b, s, 100 * radius, 100 * radius, z))
 
     def test_quadratic_box_certificate_is_bounded_by_the_exact_minimum(self):
         b, s = np.array([[0.8]]), np.ones((1, 1))
@@ -804,6 +828,32 @@ class TestControlCheckpoints(unittest.TestCase):
                     finding, = csv.DictReader(f)
                 self.assertEqual(finding["tier"], "T3")
                 self.assertIn("reciprocity", finding["reason"])
+
+    def test_inner_product_certificate_on_a_strict_contraction_through_cli(self):
+        # The strongest changed coordinate is an ordinary half removal.
+        # Every scalar quadratic response is negative. Only the joint
+        # cross responses exclude a symmetric partial removal.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            name = layer_name(0)
+            b = np.eye(12, 9, dtype=np.float32)
+            b[0, 0] = 4.
+            s = b / 2
+            s[3, 4] = 0.125
+            form = s.T @ (s - b)
+            self.assertLess(np.linalg.eigvalsh((form + form.T) / 2)[-1], 0.)
+            write_safetensors(tmp / "b.safetensors", {name: ("BF16", b)})
+            write_safetensors(tmp / "s.safetensors", {name: ("BF16", s)})
+            rc, out, err = run_cli("--base", str(tmp / "b.safetensors"),
+                                   "--suspect", str(tmp / "s.safetensors"), "--out", str(tmp / "out"))
+            self.assertEqual(rc, 0, out + err)
+            m = rank.read_delta_csv(tmp / "out" / "delta.csv")[name]
+            self.assertEqual(m.reciprocity_excess, 0.)
+            self.assertGreater(m.removal_excess, 0.)
+            with (tmp / "out" / "ranking.csv").open() as f:
+                finding, = csv.DictReader(f)
+            self.assertEqual(finding["tier"], "T3")
+            self.assertIn("inner product constraints", finding["reason"])
 
     def test_singleton_contraction_with_coherent_tail_through_cli(self):
         # Large base energy in an untouched coordinate makes the global
