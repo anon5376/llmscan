@@ -37,6 +37,7 @@ class Measurements(NamedTuple):
     tail_norm_fraction: float | None = None
     contraction_excess: float | None = None
     reciprocity_excess: float | None = None
+    removal_excess: float | None = None
 
     def projection_residual(self) -> ProjectionResidual | None:
         if self.projection_error is None or not self.frobenius or not self.sv_001:
@@ -55,11 +56,13 @@ class Peers:
     count: int
     median: float
     mad: float
+    outer_fence: float
 
     @classmethod
     def summarize(cls, values: list[float]) -> Peers:
         median = statistics.median(values)
-        return cls(len(values), median, statistics.median(abs(x - median) for x in values))
+        q1, _, q3 = statistics.quantiles(values, method="inclusive")
+        return cls(len(values), median, statistics.median(abs(x - median) for x in values), q3 + 3 * (q3 - q1))
 
     def high(self, value: float, floor: float) -> bool:
         # Six robust standard deviations and a practical effect size. Small
@@ -81,6 +84,8 @@ def peer_groups(rows: list[InventoryRow], stats: dict[str, Measurements]) -> dic
             groups[*fit_group, "projection_error"].append(m.projection_error)
         elif m.reciprocity_excess is not None:
             groups[*fit_group, "multimode_reciprocity"].append(m.reciprocity_excess)
+        if m.removal_excess is not None:
+            groups[*fit_group, "removal_excess"].append(m.removal_excess)
         residual = m.projection_residual()
         share = residual.leading_share() if residual is not None else None
         if share is not None:
@@ -141,6 +146,13 @@ def _projection_reason(r: InventoryRow, m: Measurements, peers: dict[tuple, Peer
             if m.reciprocity_excess is not None and m.reciprocity_excess > 0:
                 return (f"base and edited responses violate projection reciprocity "
                         f"({m.reciprocity_excess:.1%} of the discrepancy exceeds rounding)")
+    if m.removal_excess is not None and m.removal_excess > 0:
+        excess = peers.get((kind, r.base_shape, r.base_dtype, r.suspect_dtype, "removal_excess"))
+        # Values below the rounding bound are clipped to zero. Their MAD can
+        # vanish even when resolvable violations recur throughout the cohort.
+        if excess is None or excess.count < 8 or m.removal_excess > excess.outer_fence + math.sqrt(math.ulp(1.)):
+            return (f"edited response has positive inner product with the change, inconsistent with partial removal "
+                    f"({m.removal_excess:.1%} of the measured violation exceeds rounding)")
     for metric in ("projection_gain", "frobenius", "sv_001"):
         magnitude = getattr(m, metric)
         group_stats = peers.get((kind, r.base_shape, metric))
