@@ -25,6 +25,8 @@ DTYPE_BYTES = {
 }
 FLOAT_DTYPES = {"F64": "<f8", "F32": "<f4", "F16": "<f2", "BF16": None}  # BF16 decoded by hand
 MAX_OPEN_MAPS = 4  # per checkpoint; each mmap holds a file descriptor, and sharded models have hundreds of files
+MAX_HEADER_BYTES = 16 * 1024 * 1024
+MAX_TENSORS = 300_000
 
 
 class CheckpointError(ValueError):
@@ -80,9 +82,10 @@ def _whole_number(v: object) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and v >= 0
 
 
-def read_header(file: Path) -> dict[str, TensorInfo]:
+def read_header(file: Path, tensor_limit: int | None = None) -> dict[str, TensorInfo]:
     """Parse and validate one file's header: the tensors must tile the payload exactly,
     in order, with sizes that match their dtype and shape (the rules of the reference reader)."""
+    tensor_limit = MAX_TENSORS if tensor_limit is None else min(MAX_TENSORS, tensor_limit)
     size = file.stat().st_size
     with open(file, "rb") as f:
         raw_len = f.read(8)
@@ -91,12 +94,17 @@ def read_header(file: Path) -> dict[str, TensorInfo]:
         (header_len,) = struct.unpack("<Q", raw_len)
         if header_len > size - 8:
             raise CheckpointError(f"{file}: header length {header_len} exceeds file size")
+        if header_len > MAX_HEADER_BYTES:
+            raise CheckpointError(f"{file}: header length {header_len} exceeds the {MAX_HEADER_BYTES}-byte limit")
         try:
             header = json.loads(f.read(header_len), object_pairs_hook=_no_duplicate_keys)
-        except ValueError as e:  # includes bad UTF-8, bad JSON and duplicate tensor names
+        except (ValueError, RecursionError) as e:  # includes bad UTF-8, bad JSON and duplicate tensor names
             raise CheckpointError(f"{file}: invalid safetensors header: {e}") from None
     if not isinstance(header, dict):
         raise CheckpointError(f"{file}: safetensors header is not a JSON object")
+    tensor_count = sum(name != "__metadata__" for name in header)
+    if tensor_count > tensor_limit:
+        raise CheckpointError(f"{file}: tensor count {tensor_count} exceeds the {tensor_limit}-tensor limit")
     data_start = 8 + header_len
     out = {}
     for name, meta in header.items():
@@ -149,7 +157,8 @@ class Checkpoint:
         self.files = shard_files(self.path)
         self.tensors: dict[str, TensorInfo] = {}
         for file in self.files:
-            for name, info in read_header(file).items():
+            remaining = MAX_TENSORS - len(self.tensors)
+            for name, info in read_header(file, tensor_limit=remaining).items():
                 if name in self.tensors:
                     raise CheckpointError(f"tensor {name} appears in more than one shard")
                 self.tensors[name] = info

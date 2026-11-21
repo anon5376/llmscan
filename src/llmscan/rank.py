@@ -38,6 +38,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from llmscan.csv_safety import csv_fieldnames, decode_row, encode_row
 from llmscan.delta import sv_field
 from llmscan.inventory import CHANGED, IDENTICAL, ONLY_BASE, ONLY_SUSPECT, SHAPE_MISMATCH, InventoryRow, natural_key
 from llmscan.safetensors_io import FLOAT_DTYPES
@@ -93,7 +94,8 @@ def read_delta_csv(path: Path) -> dict[str, tuple[float | None, float | None]]:
         return float(cell) if cell not in (None, "") else None
 
     with open(path, newline="", encoding="utf-8") as f:
-        return {r["name"]: (num(r.get("effective_rank")), num(r.get(SV1))) for r in csv.DictReader(f)}
+        return {r["name"]: (num(r.get("effective_rank")), num(r.get(SV1)))
+                for r in map(decode_row, csv.DictReader(f))}
 
 
 def _structure_reason(r: InventoryRow) -> str:
@@ -195,14 +197,14 @@ def rank_tensors(
 
 def write_csv(ranked: list[RankedRow], path: Path) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS)
+        w = csv.DictWriter(f, fieldnames=csv_fieldnames(FIELDS))
         w.writeheader()
         for r in ranked:
             d = asdict(r)
             d["layer"] = "" if r.layer is None else r.layer
             for col in ("effective_rank", SV1):
                 d[col] = "" if d[col] is None else f"{d[col]:.6g}"
-            w.writerow(d)
+            w.writerow(encode_row(d))
 
 
 def summarize(ranked: list[RankedRow], top: int = 10) -> str:
