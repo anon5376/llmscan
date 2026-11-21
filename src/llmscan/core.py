@@ -21,7 +21,7 @@ from typing import NamedTuple
 import numpy as np
 
 from .interval_fit import fit_excess
-from .removal import joint_excess, promising_symmetric_response, skew_excess
+from .removal import joint_excess, promising_symmetric_response, skew_probe
 
 _ROWS_PER_BLOCK = 4096
 
@@ -152,6 +152,22 @@ def _skew_columns(base: np.ndarray, delta: np.ndarray, scale: float) -> tuple[in
     return i, int(np.argmax(np.abs(action(i))))
 
 
+def _fit_storage_box(weights, dtype, exponent, arithmetic):
+    """Enclose the nearest-rounding cell of each power-of-two scaled weight."""
+    relative, absolute = _SPACING[dtype]
+    mantissa, power = np.frexp(weights)
+    floor = math.ldexp(absolute, -exponent - 1)
+    away = np.maximum(floor, np.ldexp(relative / 4, power))
+    away[weights == 0] = floor
+    # At a binade boundary the neighbor toward zero is twice as close,
+    # except where both neighbors are on the uniform subnormal grid.
+    toward = np.where(np.abs(mantissa) == 0.5, np.maximum(floor, away / 2), away)
+    offset = (away - toward) / 2
+    center = weights + np.copysign(offset, weights)
+    radius = away - offset + arithmetic * np.abs(weights) + np.finfo(float).tiny
+    return center, radius
+
+
 def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspect_dtype: str) -> float | None:
     """Test the symmetric negative semidefinite form SᵀΔ of a partial removal.
 
@@ -236,11 +252,15 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     rb, rs = storage_radius(b, base_dtype), storage_radius(s, suspect_dtype)
     z = x[selected]
     # Symmetry is required even if every quadratic response is nonpositive.
-    skew = skew_excess(b, s, rb, rs)
-    if value <= math.sqrt(np.finfo(float).tiny):
-        return skew
-    excess = joint_excess(b, s, rb, rs, z, value)
-    if not excess and promising_symmetric_response(b, s, rb, rs, z):
+    skew, try_fit = skew_probe(b, s, rb, rs)
+    excess = 0.
+    if value > math.sqrt(np.finfo(float).tiny):
+        excess = joint_excess(b, s, rb, rs, z, value)
+        if not excess and not try_fit:
+            try_fit = promising_symmetric_response(b, s, rb, rs, z)
+    if not excess and try_fit:
+        b, rb = _fit_storage_box(b, base_dtype, exponent, arithmetic)
+        s, rs = _fit_storage_box(s, suspect_dtype, exponent, arithmetic)
         excess = fit_excess(b, s, rb, rs)
     # The peer ranker compares margins. A weak skew certificate must not
     # replace a stronger certificate from the quadratic response.

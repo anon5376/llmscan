@@ -212,8 +212,13 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      fit. The scanner compares it with the root mean square Frobenius scale of
      linearized, independent uniform storage errors. Seeds that exceed the measured
      Frobenius norm of the skew defect times the squared input norm also qualify.
-     Either condition selects a candidate. Every finding must still survive the
-     full entrywise intervals. The scanner keeps the larger of the skew-plane
+     An inconclusive skew plane can independently trigger the same fit when
+     neither checkpoint's rounding errors alone can account for its gap.
+     Every finding must still survive the full entrywise intervals. The wider
+     fit uses the midpoints to adjacent storage values as interval endpoints,
+     with a float64 arithmetic allowance. This accounts for unequal spacings
+     at powers of two and uniform spacing among subnormals.
+     The scanner keeps the larger of the skew-plane
      margin and the margin from the joint interval search for peer comparison.
      It searches for a witness by moving the two matrices within their storage
      intervals to reduce the positive and skew parts of the linearized Gram form.

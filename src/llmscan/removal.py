@@ -5,8 +5,8 @@ import math
 import numpy as np
 
 
-def skew_excess(b, s, rb, rs):
-    """Test reciprocity on a plane of the full skew form on the selected columns."""
+def skew_probe(b, s, rb, rs):
+    """Return the certified plane margin and whether it warrants a joint fit."""
     d = s - b
 
     def action(q):
@@ -16,7 +16,7 @@ def skew_excess(b, s, rb, rs):
     # columns-by-columns Gram matrix. The search only selects the witness.
     cols = b.shape[1]
     if cols < 2:
-        return 0.
+        return 0., False
     if cols <= 8:
         basis = np.eye(cols)
     else:
@@ -26,7 +26,7 @@ def skew_excess(b, s, rb, rs):
     form = basis.T @ action(basis)
     left, singular, right = np.linalg.svd((form - form.T) / 2)
     if not singular[0]:
-        return 0.
+        return 0., False
     x, y = basis @ left[:, 0], basis @ right[0]
 
     bx, by = b @ x, b @ y
@@ -40,10 +40,21 @@ def skew_excess(b, s, rb, rs):
     guard = 128 * (sum(b.shape) + 1) * math.ulp(1.) * weights**2 * size
     guard += 16 * b.size * np.finfo(float).tiny
     if gap <= cost + guard:
-        return 0.
-    cost += np.sum(rs * np.abs(np.outer(bx, y) - np.outer(by, x)), axis=1).sum()
-    cost += np.sum(rb * np.abs(np.outer(s @ x, y) - np.outer(s @ y, x)), axis=1).sum()
-    return float(1 - (cost + guard) / gap) if gap > cost + guard else 0.
+        return 0., False
+    suspect_cost = np.sum(rs * np.abs(np.outer(bx, y) - np.outer(by, x)), axis=1).sum()
+    base_cost = np.sum(rb * np.abs(np.outer(s @ x, y) - np.outer(s @ y, x)), axis=1).sum()
+    budget = cost + suspect_cost + base_cost + guard
+    if gap > budget:
+        return float(1 - budget / gap), False
+    # With one checkpoint fixed the mixed term vanishes. If neither box
+    # alone can explain the plane, try fitting *both* boxes to the full
+    # symmetric NSD constraint. This screen alone never certifies a finding.
+    return 0., gap > max(suspect_cost, base_cost) + guard
+
+
+def skew_excess(b, s, rb, rs):
+    """Certified reciprocity excess on a plane of the selected columns."""
+    return skew_probe(b, s, rb, rs)[0]
 
 
 def promising_symmetric_response(b, s, rb, rs, x):

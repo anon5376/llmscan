@@ -255,9 +255,48 @@ class TestProjectionMeasurements(unittest.TestCase):
         b = np.eye(6)
         s = b * (1 + 0.001)
         for skew, joint in [(0.02, 0.4), (0.4, 0.02)]:
-            with self.subTest(skew=skew), patch.object(core, "skew_excess", return_value=skew), \
+            with self.subTest(skew=skew), patch.object(core, "skew_probe", return_value=(skew, False)), \
                     patch.object(core, "joint_excess", return_value=joint):
                 self.assertEqual(core.removal_excess(b, s, "BF16", "BF16"), 0.4)
+
+    def test_skew_can_start_joint_fit_with_no_positive_quadratic_seed(self):
+        b = np.array([[1., 1.], [1., -1.]])
+        s = b / 2
+        s[0, 1] += 3 / 256
+        form = s.T @ (s - b)
+        self.assertLess(np.linalg.eigvalsh((form + form.T) / 2).max(), 0.)
+        # Either checkpoint alone has too little latitude on the skew plane.
+        # The two-box fit still has to certify a violation before reporting it.
+        with patch.object(core, "fit_excess", wraps=fit_excess) as fit:
+            self.assertEqual(core.removal_excess(b, s, "BF16", "BF16"), 0.)
+            fit.assert_called_once()
+
+    def test_joint_witness_uses_one_correction_for_symmetry_and_quadratic_response(self):
+        # F = Sᵀ(S−B) has one free entry F01 in [-1, 1]. Symmetry
+        # requires F01 = 1, where the (1, 1) response becomes positive.
+        b, s = np.array([[1.5, 0.], [-1., 1.5]]), np.eye(2)
+        rb, rs = np.array([[0., 1.], [0., 0.]]), np.zeros((2, 2))
+        factor = np.ones((2, 1)) / np.sqrt(2.)
+        skew = np.array([[0., -.5], [.5, 0.]])
+        self.assertEqual(_box_excess(b, s, rb, rs, factor, 0 * skew), 0.)
+        self.assertEqual(_box_excess(b, s, rb, rs, 0 * factor, skew), 0.)
+        self.assertGreater(_box_excess(b, s, rb, rs, factor, skew), 0.)
+        self.assertGreater(fit_excess(b, s, rb, rs), 0.)
+        rb[1, 0] = 1.  # F01 = F10 = 0 now satisfies both constraints.
+        self.assertEqual(fit_excess(b, s, rb, rs), 0.)
+
+    def test_bf16_fit_boxes_match_adjacent_storage_midpoints(self):
+        values = (np.arange(1 << 16, dtype=np.uint32) << 16).view(np.float32)
+        levels = np.unique(values[np.isfinite(values)]).astype(float)
+        # Sweep both signs, zero, the subnormal/normal transition and every
+        # interior binade boundary. Repeat after a common rescaling.
+        for exponent in (0, 11):
+            with self.subTest(exponent=exponent):
+                scaled = np.ldexp(levels, -exponent)
+                center, radius = core._fit_storage_box(scaled[1:-1], "BF16", exponent, 0.)
+                midpoints = (scaled[1:] + scaled[:-1]) / 2
+                np.testing.assert_array_equal(center - radius, midpoints[:-1])
+                np.testing.assert_array_equal(center + radius, midpoints[1:])
 
     def test_wide_fit_screen_uses_symmetric_response_and_storage(self):
         b = np.eye(5)
