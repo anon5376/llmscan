@@ -11,7 +11,7 @@ from typing import NamedTuple
 import numpy as np
 
 from llmscan.inventory import InventoryRow
-from llmscan.names import EMBEDDINGS, RESIDUAL_WRITERS, canonical_kind, stack_of
+from llmscan.names import RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind, stack_of
 
 
 class Measurements(NamedTuple):
@@ -21,6 +21,8 @@ class Measurements(NamedTuple):
     projection_gain: float | None = None
     second_tail_share: float | None = None
     token_row_fraction: float | None = None
+    projection_error: float | None = None
+    token_row_spike: float | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,37 @@ def peer_groups(rows: list[InventoryRow], stats: dict[str, Measurements]) -> dic
     return {group: Peers.summarize(v) for group, v in groups.items() if len(v) >= 3}
 
 
+def _projection_reason(r: InventoryRow, m: Measurements, peers: dict[tuple, Peers], factor: float) -> str | None:
+    """Choose one finding from correlated measurements of the leading change."""
+    kind = canonical_kind(r.kind)
+    # A local magnitude bound also works for a singleton or a shifted peer
+    # median: removal of a unit direction can account for at most one full
+    # projection. Allow the same factor of slack as the coarse rank check.
+    if m.projection_gain is not None and kind in RESIDUAL_WRITERS | TOKEN_MATRICES and m.projection_gain > max(1., factor):
+        return (f"projection_gain {m.projection_gain:.4g} exceeds a full projection of the base "
+                f"(threshold {max(1., factor):g}x)")
+    # Compare the unexplained part of the leading mode against both a
+    # practical relative tolerance and the energy in all remaining modes.
+    # This permits BF16 rounding, partial removal and diffuse healing edits.
+    if m.projection_error is not None and m.frobenius and m.sv_001:
+        ratio = m.frobenius / m.sv_001
+        tail_ratio = math.sqrt(max(0., (ratio - 1) * (ratio + 1)))
+        if m.projection_error > max(0.05, factor * tail_ratio):
+            return (f"projection law leaves {m.projection_error:.1%} of the leading change unexplained "
+                    "after fitting partial removal against the base")
+    for metric in ("projection_gain", "frobenius", "sv_001"):
+        magnitude = getattr(m, metric)
+        group_stats = peers.get((kind, r.base_shape, metric))
+        if group_stats and group_stats.count >= 8 and magnitude is not None:
+            # Gain is dimensionless and physically bounded. Raw norms, which
+            # vary widely between genuine layers, need a larger effect size.
+            floor = math.log1p(0.05) if metric == "projection_gain" else math.log(2)
+            if group_stats.high(math.log(magnitude), floor) and (metric != "projection_gain" or magnitude > 1.05):
+                return f"{metric} {magnitude:.4g} above peer dispersion (median {math.exp(group_stats.median):.4g})"
+            break
+    return None
+
+
 def outlier_reasons(r: InventoryRow, m: Measurements, peers: dict[tuple, Peers],
                     cosine: float | None, factor: float) -> list[str]:
     reasons = []
@@ -75,26 +108,14 @@ def outlier_reasons(r: InventoryRow, m: Measurements, peers: dict[tuple, Peers],
             reasons.append(f"effective_rank {er:.4g} above peer dispersion (median {median:.4g}); "
                            f"second mode carries {m.second_tail_share:.0%} of non-leading energy")
 
-    # A local magnitude bound also works for a singleton or a shifted peer
-    # median: removal of a unit direction can account for at most one full
-    # projection. Allow the same factor of slack as the coarse rank check.
-    over_projection = (m.projection_gain is not None and kind in RESIDUAL_WRITERS | EMBEDDINGS
-                       and m.projection_gain > max(1., factor))
-    if over_projection:
-        reasons.append(f"projection_gain {m.projection_gain:.4g} exceeds a full projection of the base "
-                       f"(threshold {max(1., factor):g}x)")
-    for metric in ("projection_gain", "frobenius", "sv_001"):
-        magnitude = getattr(m, metric)
-        group_stats = peers.get((kind, r.base_shape, metric))
-        if group_stats and group_stats.count >= 8 and magnitude is not None:
-            if (not over_projection and group_stats.high(math.log(magnitude), math.log(2))
-                    and (metric != "projection_gain" or magnitude > 1.05)):
-                reasons.append(f"{metric} {magnitude:.4g} above peer dispersion "
-                               f"(median {math.exp(group_stats.median):.4g})")
-            break
-    if kind in EMBEDDINGS:
+    projection = _projection_reason(r, m, peers, factor)
+    if projection:
+        reasons.append(projection)
+    if kind in TOKEN_MATRICES and r.layer is None:
         if m.token_row_fraction is not None and m.token_row_fraction < 0.05:
             reasons.append(f"token-row energy concentrated in {m.token_row_fraction:.2%} effective rows")
+        if m.token_row_spike is not None and m.token_row_spike > 1:
+            reasons.append(f"token-row residual spike {m.token_row_spike:.2f}x the vocabulary-adjusted bound")
     if cosine is not None and cosine < 0.5:
         reasons.append(f"residual direction disagrees with coherent peer layers (absolute cosine {cosine:.3f})")
     return reasons
@@ -107,9 +128,22 @@ def direction_cosines(rows: list[InventoryRow], directions: dict[str, np.ndarray
     layers), abstain. Embeddings can be judged but never set the reference.
     """
     spaces = defaultdict(list)
+    stacks = defaultdict(set)
     for r in rows:
-        if r.name in directions:
-            spaces[stack_of(r.name), len(directions[r.name])].append(r)
+        if r.name in directions and r.layer is not None and canonical_kind(r.kind) in RESIDUAL_WRITERS:
+            stacks[len(directions[r.name])].add(stack_of(r.name))
+    for r in rows:
+        if r.name not in directions:
+            continue
+        width = len(directions[r.name])
+        stack = stack_of(r.name)
+        if r.layer is None and canonical_kind(r.kind) in TOKEN_MATRICES and stack not in stacks[width]:
+            # An outer head may sit above the block stack (lm_head vs
+            # model.layers). Never choose between multiple matching subtrees.
+            candidates = [s for s in stacks[width] if not stack or s.startswith(stack + ".")]
+            if len(candidates) == 1:
+                stack = candidates[0]
+        spaces[stack, width].append(r)
     result = {}
     for members in spaces.values():
         layers = defaultdict(list)

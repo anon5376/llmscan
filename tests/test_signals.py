@@ -9,6 +9,7 @@ import numpy as np
 
 from helpers import gguf_float, write_gguf, write_safetensors
 from llmscan import core, rank
+from llmscan.names import stack_of
 from llmscan.signals import Measurements
 from test_core import to_bf16
 from test_rank import layer_name, row, run_cli
@@ -34,7 +35,43 @@ class TestProjectionMeasurements(unittest.TestCase):
         stats = core.analyze_delta(np.zeros((32, 32)), np.eye(32), 1)
         self.assertIsNone(stats.direction)
         self.assertIsNone(stats.projection_gain)
+        self.assertIsNone(stats.projection_error)
         self.assertAlmostEqual(stats.second_tail_share, 1 / 31)
+
+    def test_signed_partial_projection_fit_for_wide_and_tall_weights(self):
+        rng = np.random.default_rng(5)
+        for shape in [(8, 15), (15, 8)]:
+            w = rng.normal(size=shape)
+            axis = rng.normal(size=shape[0])
+            axis /= np.linalg.norm(axis)
+            projected = np.outer(axis, axis @ w)
+            for strength, expected in [(0.3, 0.), (1., 0.), (1.5, 1 / 3), (-1., 1.)]:
+                with self.subTest(shape=shape, strength=strength):
+                    stats = core.analyze_delta(w, w - strength * projected, 1)
+                    self.assertAlmostEqual(stats.projection_error, expected)
+
+    def test_incompatible_coefficients_at_unit_gain(self):
+        stats = core.analyze_delta(np.array([[1., 0.]]), np.array([[1., 1.]]), 1)
+        self.assertEqual(stats.projection_gain, 1.)
+        self.assertEqual(stats.projection_error, 1.)
+
+    def test_local_column_error_with_dense_background(self):
+        w = np.ones((1, 16384))
+        w[:, 1] = 4.  # an unusually large but genuine base coefficient
+        clean = np.zeros_like(w)
+        self.assertLess(core.analyze_delta(w, clean.copy(), 1).column_spike, 1e-10)
+        clean[:, -1] = 3.
+        measured = core.analyze_delta(w, clean, 1)
+        self.assertGreater(measured.column_fraction, 0.9)
+        self.assertLess(measured.projection_error, 0.05)
+        self.assertGreater(measured.column_spike, 1.)
+        name = "model.embed_tokens.weight"
+        stats = Measurements(measured.effective_rank, measured.singular_values[0], measured.frobenius,
+                             measured.projection_gain, measured.second_tail_share, measured.column_fraction,
+                             measured.projection_error, measured.column_spike)
+        finding, = rank.rank_tensors([row(name)], {name: stats})
+        self.assertEqual(finding.tier, "T3")
+        self.assertIn("token-row residual spike", finding.reason)
 
 
 class TestAnomalySignals(unittest.TestCase):
@@ -51,6 +88,27 @@ class TestAnomalySignals(unittest.TestCase):
         self.assertIn("projection_gain", self.flagged()[self.last])
         self.stats[self.last] = self.stats[self.last]._replace(projection_gain=1.)
         self.assertEqual(self.flagged(), {})  # large natural variation in the base projection
+
+    def test_gain_compared_to_peer_dispersion_even_in_older_reports(self):
+        self.stats[self.last] = Measurements(1.001, 1.25, 1.25, 1.25)
+        self.assertIn("projection_gain", self.flagged()[self.last])
+        self.stats[self.last] = self.stats[self.last]._replace(projection_gain=1.)
+        self.assertEqual(self.flagged(), {})  # low effective rank alone is consistent
+
+    def test_projection_law_compared_to_nonleading_energy(self):
+        self.stats[self.last] = Measurements(1., 1., 1., 1., projection_error=0.5)
+        self.assertIn("projection law", self.flagged()[self.last])
+        self.stats[self.last] = self.stats[self.last]._replace(frobenius=1.1)
+        self.assertEqual(self.flagged(), {})
+
+    def test_invalid_new_stats_are_unusable_but_a_perfect_fit_is_valid(self):
+        for changes in [dict(projection_error=-0.01), dict(projection_error=1.01),
+                        dict(token_row_spike=float("inf")), dict(token_row_spike=-1.)]:
+            with self.subTest(changes=changes):
+                self.stats[self.last] = Measurements(1., 1., **changes)
+                self.assertIn("unusable", self.flagged()[self.last])
+        self.stats[self.last] = Measurements(1., 1., projection_error=0., token_row_spike=0.)
+        self.assertEqual(self.flagged(), {})
 
     def test_magnitude_fallback_for_legacy_csv_or_missing_axis(self):
         self.stats[self.last] = Measurements(1.0, 4., 4.)
@@ -91,6 +149,28 @@ class TestAnomalySignals(unittest.TestCase):
         axes[name] = np.array([0., 1.])
         self.assertEqual(set(self.flagged(directions=axes)), {name})
 
+    def test_hf_and_gguf_embedding_stack_names(self):
+        for embed, writer, namespace in [("model.embed_tokens.weight", layer_name(0), "model"),
+                                          ("token_embd.weight", "blk.0.ffn_down.weight", "")]:
+            self.assertEqual(stack_of(embed), namespace)
+            self.assertEqual(stack_of(writer), namespace)
+
+    def test_root_output_head_uses_only_an_unambiguous_stack(self):
+        head = row("lm_head.weight")
+        self.rows.append(head)
+        self.stats[head.name] = Measurements(1., 1.)
+        axes = {r.name: np.array([1., 0.]) for r in self.rows}
+        axes[head.name] = np.array([0., 1.])
+        def result():
+            return next(r for r in rank.rank_tensors(self.rows, self.stats, directions=axes) if r.name == head.name)
+        self.assertEqual((result().tier, result().direction_cosine), ("T2", 0.))
+        for i in range(4):
+            extra = row(f"encoder.layers.{i}.o_proj.weight")
+            self.rows.append(extra)
+            self.stats[extra.name] = Measurements(1., 1.)
+            axes[extra.name] = np.array([0., 1.])
+        self.assertIsNone(result().direction_cosine)
+
     def test_separate_stacks_and_widths_do_not_vote_against_one_another(self):
         axes = {}
         self.rows = []
@@ -120,6 +200,32 @@ class TestAnomalySignals(unittest.TestCase):
 
 
 class TestControlCheckpoints(unittest.TestCase):
+    def test_cli_reports_external_heads_residual_axis_and_location(self):
+        rng = np.random.default_rng(6)
+        head = "lm_head.weight"
+        w = rng.normal(size=(64, 8))
+        base = {head: ("F32", w)}
+        suspect = {head: ("F32", w.copy())}
+        suspect[head][1][:, 0] = 0
+        for i in range(4):
+            name = layer_name(i)
+            w = rng.normal(size=(8, 12))
+            base[name] = ("F32", w)
+            edited = w.copy()
+            edited[0] = 0
+            suspect[name] = ("F32", edited)
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            write_safetensors(tmp / "base.safetensors", base)
+            write_safetensors(tmp / "suspect.safetensors", suspect)
+            rc, stdout, stderr = run_cli("--base", str(tmp / "base.safetensors"),
+                                         "--suspect", str(tmp / "suspect.safetensors"), "--out", str(tmp / "out"))
+            self.assertEqual(rc, 0, stdout + stderr)
+            with (tmp / "out" / "ranking.csv").open() as f:
+                finding = next(r for r in csv.DictReader(f) if r["name"] == head)
+            self.assertEqual(finding["tier"], "T2")
+            self.assertAlmostEqual(float(finding["direction_cosine"]), 1.)
+
     def test_honest_bf16_projections_and_embedding_axis_through_cli(self):
         rng = np.random.default_rng(42)
         axis = np.ones(16) / 4

@@ -30,6 +30,27 @@ class DeltaStats(NamedTuple):
     second_tail_share: float | None = None
     direction: np.ndarray | None = None
     projection_gain: float | None = None
+    projection_error: float | None = None
+    column_spike: float | None = None
+
+
+def _projection_fit(right: np.ndarray, projected: np.ndarray, gain: float | None) -> tuple[float, float]:
+    """Fit the signed coefficients of a partial removal, in units of σ₁."""
+    residual = right.copy()
+    if gain is not None and gain > 0:
+        # A partial or full removal lies on the segment from zero to
+        # -Wᵀu₁/σ₁. Here projected is its unit base direction.
+        length = np.clip(-(right @ projected), 0.0, 1.0 / gain)
+        residual += length * projected
+    error = min(1.0, float(np.linalg.norm(residual)))
+    # Large coefficients already explained by the base row have zero error.
+    # Use both the RMS of a unit coefficient vector and a vocabulary-size
+    # adjusted Gaussian maximum, with MAD estimating the background scale.
+    deviations = np.abs(residual - np.median(residual))
+    n = len(right)
+    robust_sigma = 1.4826 * np.median(deviations)
+    bound = max(1 / np.sqrt(n), robust_sigma * np.sqrt(2 * np.log(2 * n / 0.01)))
+    return error, float(deviations.max() / bound)
 
 
 def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaStats:
@@ -51,6 +72,8 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
         second_tail_share: fraction of non-leading energy in the second singular mode.
         direction: leading left singular vector when the leading mode is separated.
         projection_gain: σ₁ / ‖u₁ᵀ W_base‖₂ when the denominator is nonzero.
+        projection_error: relative error of the best partial removal along u₁.
+        column_spike: largest centered coefficient error relative to its robust noise bound.
 
     The pipeline never calls this for bit-identical tensors.
     """
@@ -88,17 +111,17 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
     second_share = float(energy[1] / tail) if tail else 0.0
 
     # A repeated or nearly repeated leading singular value has no stable axis.
-    direction = gain = None
+    direction = gain = projection_error = column_spike = None
     if len(energy) == 1 or energy[0] > 4 * energy[1]:
         small = vectors[:, -1].copy()
-        direction = np.empty(dw.shape[0]) if tall else small
+        other = np.empty(dw.shape[0])
+        direction, right = (other, small) if tall else (small, other)
         base = w_base if tall else w_base.T
         base_scale = max(float(w_base.max()), -float(w_base.min()))
         projected = np.zeros(w_suspect.shape[1])
         for start in range(0, dw.shape[0], _ROWS_PER_BLOCK):
             sl = slice(start, start + _ROWS_PER_BLOCK)
-            if tall:
-                direction[sl] = ((dw[sl].astype(np.float64) / scale) @ small) / np.sqrt(energy[0])
+            other[sl] = ((dw[sl].astype(np.float64) / scale) @ small) / np.sqrt(energy[0])
             if base_scale:
                 block = base[sl].astype(np.float64) / base_scale
                 if tall:
@@ -110,6 +133,8 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
         projected_norm = np.linalg.norm(projected)
         if projected_norm:
             gain = float((np.sqrt(energy[0]) / projected_norm) * (scale / base_scale))
+            projected /= projected_norm
+        projection_error, column_spike = _projection_fit(right, projected, gain)
 
     return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),
-                      fraction, second_share, direction, gain)
+                      fraction, second_share, direction, gain, projection_error, column_spike)
