@@ -140,6 +140,78 @@ def _skew_columns(base: np.ndarray, delta: np.ndarray, scale: float) -> tuple[in
     return i, int(np.argmax(np.abs(action(i))))
 
 
+def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspect_dtype: str) -> float | None:
+    """Certify a positive Rayleigh quotient of sym(SᵀΔ), using the stored checkpoints.
+
+    For S = (I − P)B, 0 ≼ P ≼ I, (Sx)ᵀΔx = −(Bx)ᵀ(I − P)P(Bx) ≤ 0.
+    Return the fraction of a positive value left after bounding rounding. The
+    search only selects x. Its accuracy is immaterial to the certificate.
+    """
+    extrema = [base.min(), base.max(), suspect.min(), suspect.max()]
+    if not np.isfinite(extrema).all():
+        return None
+    b_step = _SPACING[base_dtype][1]
+    s_step = _SPACING[suspect_dtype][1]
+    # A common power of two preserves the sign, including for subnormal
+    # checkpoints. Include the storage floors before rescaling mixed dtypes.
+    _, exponent = math.frexp(max(b_step, s_step, *(abs(float(v)) for v in extrema)))
+    rows, cols = base.shape
+    block_rows = max(1, _ROWS_PER_BLOCK * min(rows, cols) // cols)
+
+    def blocks():
+        for start in range(0, rows, block_rows):
+            sl = slice(start, start + block_rows)
+            yield (np.ldexp(base[sl], -exponent, dtype=np.float64),
+                   np.ldexp(suspect[sl], -exponent, dtype=np.float64))
+
+    # A bounded range sketch keeps the search linear in tensor size. For
+    # narrow matrices the small eigensolve spans the entire input space.
+    sketch_width = 8
+    if cols <= sketch_width:
+        basis = np.eye(cols)
+    else:
+        probes = np.random.default_rng(0).standard_normal((cols, sketch_width))
+        action = np.zeros_like(probes)
+        for b, s in blocks():
+            d = s - b
+            action += s.T @ (d @ probes) + d.T @ (s @ probes)
+        basis, _ = np.linalg.qr(action)
+
+    form = np.zeros((basis.shape[1], basis.shape[1]))
+    for b, s in blocks():
+        form += (s @ basis).T @ ((s - b) @ basis)
+    values, vectors = np.linalg.eigh((form + form.T) / 2)
+    if values[-1] <= 0:
+        return 0.
+    x = basis @ vectors[:, -1]
+    abs_x = np.abs(x)
+
+    arithmetic = 8 * math.ulp(1.) * (rows + cols + 2)
+
+    def response_error(weights: np.ndarray, dtype: str) -> np.ndarray:
+        # For a stored normal w = mantissa * 2**e, |mantissa| in [1/2,1),
+        # half the larger adjacent spacing is 2**(e-2) times spacing at 1.
+        relative, absolute = _SPACING[dtype]
+        radius = np.ldexp(relative / 4, np.frexp(weights)[1])
+        radius[weights == 0] = 0.
+        np.maximum(radius, math.ldexp(absolute, -exponent), out=radius)
+        return (radius + arithmetic * np.abs(weights)) @ abs_x
+
+    gap = 0.
+    # An absolute float64 floor also covers underflow in scaled arithmetic.
+    budget = 16 * base.size * float(np.finfo(float).tiny)
+    for b, s in blocks():
+        bx, sx = b @ x, s @ x
+        dx = sx - bx
+        gap += float(sx @ dx)
+        eb, es = response_error(b, base_dtype), response_error(s, suspect_dtype)
+        # Expanding (s+δs)(s+δs−b−δb) row by row gives (2s−b)δs
+        # − sδb − δsδb + δs². The final square is nonnegative.
+        budget += float(np.abs(sx + dx) @ es + np.abs(sx) @ eb + es @ eb
+                        + arithmetic * (np.abs(sx) @ np.abs(dx)))
+    return 1. - budget / gap if gap > budget else 0.
+
+
 def reciprocity_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
                        base_dtype: str, suspect_dtype: str) -> float | None:
     """Fraction of a two-input reciprocity discrepancy left after bounding rounding.

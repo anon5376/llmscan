@@ -172,6 +172,35 @@ class TestProjectionMeasurements(unittest.TestCase):
         finding, = rank.rank_tensors([row(name)], {name: Measurements(6., 1., reciprocity_excess=excess)})
         self.assertIn("multi-mode change violates projection reciprocity", finding.reason)
 
+    def test_removal_certificate_allows_independent_rounding_of_both_checkpoints(self):
+        rng = np.random.default_rng(412)
+        for modes in [1, 4]:
+            b = rng.normal(size=(17, 8))
+            u = np.linalg.qr(rng.normal(size=(len(b), modes)))[0]
+            p = (u * np.linspace(1., 0.25, modes)) @ u.T
+            s = b - p @ b
+            for dtype, save in [("BF16", to_bf16), ("F16", np.float16)]:
+                with self.subTest(modes=modes, dtype=dtype):
+                    stored_b, stored_s = save(b), save(s)
+                    form = stored_s.astype(float).T @ (stored_s.astype(float) - stored_b)
+                    self.assertGreater(np.linalg.eigvalsh((form + form.T) / 2)[-1], 0.)
+                    self.assertEqual(core.removal_excess(stored_b, stored_s, dtype, dtype), 0.)
+
+    def test_removal_certificate_checks_both_ends_of_strength_interval(self):
+        for scale in [1e-250, 1., 1e250]:
+            b = scale * np.eye(4)
+            for strength in [-0.25, 0., 0.5, 1., 1.25]:
+                with self.subTest(scale=scale, strength=strength):
+                    excess = core.removal_excess(b, (1 - strength) * b, "F64", "F64")
+                    if 0 <= strength <= 1:
+                        self.assertEqual(excess, 0.)
+                    else:
+                        self.assertGreater(excess, 0.99)
+        unit = np.finfo(float).smallest_subnormal
+        # Rounded half-removal from 3 subnormal units to 2.
+        self.assertEqual(core.removal_excess(np.eye(3) * 3 * unit, np.eye(3) * 2 * unit, "F64", "F64"), 0.)
+        self.assertEqual(core.removal_excess(np.eye(3) * unit, np.zeros((3, 3)), "F64", "F16"), 0.)
+
 
 class TestAnomalySignals(unittest.TestCase):
     def setUp(self):
@@ -213,6 +242,18 @@ class TestAnomalySignals(unittest.TestCase):
         self.stats[self.last] = self.stats[self.last]._replace(reciprocity_excess=0.8)
         self.assertEqual(set(self.flagged()), {self.last})
         self.assertIn("projection reciprocity", self.flagged()[self.last])
+
+    def test_removal_violation_can_be_independent_of_the_leading_fit(self):
+        self.stats = {r.name: Measurements(1.1, 1., projection_error=0., removal_excess=0.4) for r in self.rows}
+        self.assertEqual(self.flagged(), {})
+        self.stats[self.last] = self.stats[self.last]._replace(removal_excess=0.9)
+        self.assertEqual(set(self.flagged()), {self.last})
+
+        # Recurrent departures can coexist with a majority below the rounding
+        # bound. Clipping at zero gives this cohort a zero MAD.
+        for i, name in enumerate(self.stats):
+            self.stats[name] = self.stats[name]._replace(removal_excess=0.4 if i % 3 == 0 else 0.)
+        self.assertEqual(self.flagged(), {})
 
     def test_contraction_witness_with_and_without_a_reference_population(self):
         # Some published editing methods systematically depart from partial
@@ -286,7 +327,8 @@ class TestAnomalySignals(unittest.TestCase):
                         dict(rank_one_excess=-0.1), dict(rank_one_excess=1.1),
                         dict(tail_norm_fraction=-0.1), dict(tail_norm_fraction=1.1),
                         dict(contraction_excess=-0.1), dict(contraction_excess=1.1),
-                        dict(reciprocity_excess=-0.1), dict(reciprocity_excess=1.1)]:
+                        dict(reciprocity_excess=-0.1), dict(reciprocity_excess=1.1),
+                        dict(removal_excess=-0.1), dict(removal_excess=1.1)]:
             with self.subTest(changes=changes):
                 self.stats[self.last] = Measurements(1., 1., **changes)
                 self.assertIn("unusable", self.flagged()[self.last])
@@ -453,6 +495,28 @@ class TestAnomalySignals(unittest.TestCase):
 
 
 class TestControlCheckpoints(unittest.TestCase):
+    def test_symmetric_cross_terms_outside_the_leading_axis_through_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            name = layer_name(0)
+            base = np.eye(20)
+            base[0, 0], base[-1, -1] = 4., 256.
+            edited = base.copy()
+            edited[0, 0] = 0.  # exact leading projection
+            edited[1, 2] = edited[2, 1] = 0.25
+            write_safetensors(tmp / "b.safetensors", {name: ("BF16", base)})
+            write_safetensors(tmp / "s.safetensors", {name: ("BF16", edited)})
+            rc, out, err = run_cli("--base", str(tmp / "b.safetensors"), "--suspect", str(tmp / "s.safetensors"),
+                                   "--out", str(tmp / "out"), "-k", "1")
+            self.assertEqual(rc, 0, out + err)
+            m = rank.read_delta_csv(tmp / "out" / "delta.csv")[name]
+            self.assertEqual((m.projection_error, m.contraction_excess, m.reciprocity_excess), (0., 0., 0.))
+            self.assertGreater(m.removal_excess, 0.9)
+            with (tmp / "out" / "ranking.csv").open() as f:
+                finding, = csv.DictReader(f)
+            self.assertEqual(finding["tier"], "T3")
+            self.assertIn("positive inner product", finding["reason"])
+
     def test_rank_three_shared_subspace_through_cli(self):
         # Every change is a genuine removal with three tied modes. The bases
         # rotate within the same space except for one different output axis.

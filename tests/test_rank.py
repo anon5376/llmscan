@@ -307,7 +307,7 @@ class TestCli(unittest.TestCase):
         self.changed.append(layer_name(0, "mlp.gate_proj"))
         for name in self.changed:
             dt, w = base[name]
-            suspect[name] = (dt, w + 1 / 16)
+            suspect[name] = (dt, w * 0.5)  # a partial removal, so only the canned rank is anomalous
         # dtype-only re-save: same values stored as F16, must not be ranked
         suspect[layer_name(1, "self_attn.q_proj")] = ("F16", base[layer_name(1, "self_attn.q_proj")][1])
         write_safetensors(self.tmp / "base.safetensors", base)

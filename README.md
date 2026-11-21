@@ -189,6 +189,18 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      of input coordinates. It checks their cross response against entrywise rounding bounds.
      With eight or more comparable multi-mode measurements, the excess must also exceed the
      peer median by six MAD-based standard deviations and the numerical floor.
+
+     For a removal of any rank, write `S = (I − P)B` with `0 ≼ P ≼ I` and `Δ = S − B`.
+     Every input then satisfies `(Sx)ᵀΔx = −(Bx)ᵀ(I − P)P(Bx) ≤ 0`. The scanner searches
+     for a positive value using the largest eigenvalue of the symmetric form on a small
+     input subspace. It uses the full input space up to dimension eight and a reproducible
+     eight-vector range sketch for larger tensors. It checks the selected input against both
+     checkpoints' entrywise rounding intervals and a float64 arithmetic allowance.
+     `removal_excess` is the fraction of the measured positive value beyond this budget.
+     A zero means the search found no certificate. With eight or more comparable tensors,
+     the excess must also exceed the cohort's upper outer fence (third quartile plus three
+     interquartile ranges) by the numerical floor. This accounts for editing methods that
+     systematically depart from the partial-removal model.
    - **Residual direction.** Each layer gets one vote in its stack and residual width. Writers within a
      voting layer must agree up to sign. When a strict majority agrees (absolute cosine ≥0.9), the scanner
      compares each writer and embedding to at least three *other* agreeing layers. For writers with eight
