@@ -35,6 +35,7 @@ class DeltaStats(NamedTuple):
     column_spike: float | None = None
     tail_norm_fraction: float | None = None
     fit_residual: np.ndarray | None = None
+    base_probe: np.ndarray | None = None
 
 
 # Spacing at one and at zero for the supported checkpoint storage formats.
@@ -115,6 +116,54 @@ def contraction_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
     return min(1., (growth - budget) / denominator) if denominator else None
 
 
+def reciprocity_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
+                       base_dtype: str, suspect_dtype: str) -> float | None:
+    """Fraction of a two-input reciprocity discrepancy left after bounding rounding.
+
+    If S = (I − αuuᵀ)B, then BᵀS is symmetric. For *any* probes x and y,
+    (Bx)ᵀ(Sy) = (By)ᵀ(Sx), even when neither probe recovers the true axis.
+    """
+    x, residual = stats.base_probe, stats.fit_residual
+    scale = stats.frobenius
+    if x is None or residual is None or not scale or not math.isfinite(scale):
+        return None
+    y = residual - (x @ residual) * x
+    length = np.linalg.norm(y)
+    if length <= math.sqrt(math.ulp(1.)):
+        return 0.
+    probes = np.column_stack((x, y / length))
+    magnitudes = np.abs(probes)
+    scale = max(scale, float(base.max()), -float(base.min()))
+    # Half a storage ULP on each side, plus conservative error in the
+    # subtraction, scaled matvecs, inner products and their accumulation.
+    arithmetic = 2 * float(np.finfo(delta.dtype).eps) + 8 * math.ulp(1.) * (sum(base.shape) + 2)
+    b_rel, b_abs = _SPACING[base_dtype]
+    s_rel, s_abs = _SPACING[suspect_dtype]
+    one_norms = magnitudes.sum(axis=0)
+    gap = 0.
+    # Scaled products can still underflow when most of the base's energy is
+    # outside the probe subspace. Charge an absolute arithmetic floor too.
+    budget = 8 * base.size * float(np.finfo(np.float64).tiny)
+    block_rows = max(1, _ROWS_PER_BLOCK * min(base.shape) // base.shape[1])
+    for start in range(0, len(base), block_rows):
+        sl = slice(start, start + block_rows)
+        b = base[sl].astype(np.float64) / scale
+        d = delta[sl].astype(np.float64) / scale
+        bp = b @ probes
+        dp = d @ probes
+        sp = bp + dp
+        # BᵀB is symmetric, so the measured skew needs only B and Δ.
+        gap += float(bp[:, 0] @ dp[:, 1] - bp[:, 1] @ dp[:, 0])
+        b_mag = np.abs(b) @ magnitudes
+        s_mag = b_mag + np.abs(d) @ magnitudes
+        be = (0.5 * b_rel + arithmetic) * b_mag + (b_abs / scale) * one_norms
+        se = (0.5 * s_rel + arithmetic) * s_mag + (s_abs / scale) * one_norms
+        # Error of each product in (Bx)ᵀ(Sy) − (By)ᵀ(Sx), including
+        # the product of the two input error bounds.
+        budget += float(np.sum(np.abs(bp) * se[:, ::-1] + be * (np.abs(sp[:, ::-1]) + se[:, ::-1])))
+    return 1. - budget / abs(gap) if abs(gap) > budget else 0.
+
+
 def _projection_fit(right: np.ndarray, projected: np.ndarray, gain: float | None) -> tuple[float, float, np.ndarray]:
     """Fit the signed coefficients of a partial removal, in units of σ₁."""
     residual = right.copy()
@@ -157,6 +206,7 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
         column_spike: largest centered coefficient error relative to its robust noise bound.
         tail_norm_fraction: Frobenius distance to the best rank-one delta divided by the delta norm.
         fit_residual: unexplained leading coefficients in input space, used as a contraction probe.
+        base_probe: normalized base coefficients along the leading output direction.
 
     The pipeline never calls this for bit-identical tensors.
     """
@@ -197,7 +247,7 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
     second_share = float(energy[1] / tail) if tail else 0.0
 
     # A repeated or nearly repeated leading singular value has no stable axis.
-    direction = gain = projection_error = column_spike = fit_residual = None
+    direction = gain = projection_error = column_spike = fit_residual = base_probe = None
     if len(energy) == 1 or energy[0] > 4 * energy[1]:
         small = vectors[:, -1].copy()
         other = np.empty(dw.shape[0])
@@ -220,8 +270,9 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
         if projected_norm:
             gain = float((np.sqrt(energy[0]) / projected_norm) * (scale / base_scale))
             projected /= projected_norm
+            base_probe = projected
         projection_error, column_spike, fit_residual = _projection_fit(right, projected, gain)
 
     return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),
                       fraction, second_share, direction, gain, projection_error, column_spike, tail_norm_fraction,
-                      fit_residual)
+                      fit_residual, base_probe)

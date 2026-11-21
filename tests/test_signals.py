@@ -111,6 +111,17 @@ class TestProjectionMeasurements(unittest.TestCase):
                 diff = (edited.astype(float) / scale) @ z
                 self.assertGreater(np.linalg.norm(x + 2 * diff), np.linalg.norm(x))
                 self.assertEqual(core.contraction_excess(base, edited, stats, dtype, dtype), 0.)
+                self.assertEqual(core.reciprocity_excess(base, edited, stats, dtype, dtype), 0.)
+
+    def test_reciprocity_holds_for_symmetric_edits_at_extreme_scales(self):
+        base = np.array([[2., 1., 3., 0.5], [1., 0., 2., -1.]])
+        suspect = np.array([[0.25, 0.125], [0.125, 0.75]]) @ base
+        for scale in [1e-200, 1., 1e200]:
+            with self.subTest(scale=scale):
+                b, s = scale * base, scale * suspect
+                stats = core.analyze_delta(b, s, 1)
+                self.assertGreater(stats.projection_error, 0.01)
+                self.assertEqual(core.reciprocity_excess(b, s, stats, "F64", "F64"), 0.)
 
     def test_local_column_error_with_dense_background(self):
         w = np.ones((1, 16384))
@@ -160,7 +171,7 @@ class TestAnomalySignals(unittest.TestCase):
 
     def test_systematic_departure_from_projection_law(self):
         for name in self.stats:
-            self.stats[name] = Measurements(1., 1., 1., 0.7, projection_error=0.6)
+            self.stats[name] = Measurements(1., 1., 1., 0.7, projection_error=0.6, reciprocity_excess=0.5)
         self.assertEqual(self.flagged(), {})
         self.stats[self.last] = self.stats[self.last]._replace(projection_error=0.9)
         self.assertIn("projection law", self.flagged()[self.last])
@@ -236,7 +247,8 @@ class TestAnomalySignals(unittest.TestCase):
                         dict(token_row_spike=float("inf")), dict(token_row_spike=-1.),
                         dict(rank_one_excess=-0.1), dict(rank_one_excess=1.1),
                         dict(tail_norm_fraction=-0.1), dict(tail_norm_fraction=1.1),
-                        dict(contraction_excess=-0.1), dict(contraction_excess=1.1)]:
+                        dict(contraction_excess=-0.1), dict(contraction_excess=1.1),
+                        dict(reciprocity_excess=-0.1), dict(reciprocity_excess=1.1)]:
             with self.subTest(changes=changes):
                 self.stats[self.last] = Measurements(1., 1., **changes)
                 self.assertIn("unusable", self.flagged()[self.last])
@@ -389,6 +401,33 @@ class TestAnomalySignals(unittest.TestCase):
 
 
 class TestControlCheckpoints(unittest.TestCase):
+    def test_two_input_reciprocity_through_cli(self):
+        # The second coordinate has a large base response. A one-input norm
+        # check permits this pair, but swapping the two coordinate probes
+        # must give the same cross response for any symmetric removal.
+        for shape in [(4, 8), (8, 4)]:
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                name = layer_name(0)
+                base = np.zeros(shape, dtype=np.float32)
+                base[0, 0], base[1, 1], base[2, 2] = 1., 64., 128.
+                suspect = base.copy()
+                suspect[0, :2] = [0., 0.5]
+                suspect[3, 2] = 0.25
+                write_safetensors(tmp / "b.safetensors", {name: ("BF16", base)})
+                write_safetensors(tmp / "s.safetensors", {name: ("BF16", suspect)})
+                rc, out, err = run_cli("--base", str(tmp / "b.safetensors"), "--suspect", str(tmp / "s.safetensors"),
+                                       "--out", str(tmp / "out"), "-k", "1")
+                self.assertEqual(rc, 0, out + err)
+                m = rank.read_delta_csv(tmp / "out" / "delta.csv")[name]
+                self.assertEqual(m.contraction_excess, 0.)
+                self.assertEqual(m.rank_one_excess, 0.)
+                self.assertGreater(m.reciprocity_excess, 0.)
+                with (tmp / "out" / "ranking.csv").open() as f:
+                    finding, = csv.DictReader(f)
+                self.assertEqual(finding["tier"], "T3")
+                self.assertIn("reciprocity", finding["reason"])
+
     def test_singleton_contraction_with_coherent_tail_through_cli(self):
         # Large base energy in an untouched coordinate makes the global
         # Frobenius rounding bound loose. Along the second input coordinate

@@ -36,6 +36,7 @@ class Measurements(NamedTuple):
     rank_one_excess: float | None = None
     tail_norm_fraction: float | None = None
     contraction_excess: float | None = None
+    reciprocity_excess: float | None = None
 
     def projection_residual(self) -> ProjectionResidual | None:
         if self.projection_error is None or not self.frobenius or not self.sv_001:
@@ -124,12 +125,15 @@ def _projection_reason(r: InventoryRow, m: Measurements, peers: dict[tuple, Peer
         if large_error and residual.leading > factor * residual.tail:
             return (f"projection law leaves {m.projection_error:.1%} of the leading change unexplained "
                     "after fitting partial removal against the base")
-        if m.contraction_excess is not None and m.contraction_excess > 0:
-            # The directional rounding budget already excludes exact removals.
+        if fits is None or fits.count < 8 or fits.high(m.projection_error, math.sqrt(math.ulp(1.))):
+            # The directional rounding budgets already exclude exact removals.
             # With enough peers, allow for systematic non-projection edits.
-            if fits is None or fits.count < 8 or fits.high(m.projection_error, math.sqrt(math.ulp(1.))):
+            if m.contraction_excess is not None and m.contraction_excess > 0:
                 return (f"partial removal fails the contraction test on the unexplained input direction "
                         f"by {100 * m.contraction_excess:.3g}% of the change norm after allowing for rounding")
+            if m.reciprocity_excess is not None and m.reciprocity_excess > 0:
+                return (f"base and edited responses violate projection reciprocity "
+                        f"({m.reciprocity_excess:.1%} of the discrepancy exceeds rounding)")
     for metric in ("projection_gain", "frobenius", "sv_001"):
         magnitude = getattr(m, metric)
         group_stats = peers.get((kind, r.base_shape, metric))
