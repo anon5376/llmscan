@@ -257,7 +257,11 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      and a strict majority of at least eight layers. Each group's full diameter must be
      within the coherence radius. The smallest angle between any two groups must exceed
      the largest diameter by the configured outlier factor, allowing for numerical precision.
-     These checks use all layer pairs.
+     If slow drift makes a group's diameter too large, the scanner also checks for a
+     gap in the angles needed to connect groups by single linkage. It compares the
+     smallest between-group angle with the largest within-group step in layer order,
+     dividing each step by the layer interval. This allows gradual rotation over many
+     layers while requiring the groups to remain separated throughout the trajectory.
 
      Each minority group can produce a T3 finding when its boundaries are observed at
      consecutive layer IDs. The separately measured leading axes must agree across groups,

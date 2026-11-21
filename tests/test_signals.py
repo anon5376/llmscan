@@ -14,7 +14,7 @@ from llmscan import core, rank
 from llmscan.interval_fit import _box_excess, fit_excess
 from llmscan.names import stack_of
 from llmscan.removal import joint_excess, promising_symmetric_response, skew_excess
-from llmscan.signals import Measurements, subspace_outliers
+from llmscan.signals import Measurements, _trajectory_groups, subspace_outliers
 from test_core import to_bf16
 from test_rank import layer_name, row, run_cli
 
@@ -574,6 +574,49 @@ class TestAnomalySignals(unittest.TestCase):
             spaces[r.name] = np.column_stack((eye[0], secondary))
         ranked = rank.rank_tensors(rows[::-1], stats, subspaces=spaces, directions=axes)
         self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, set.union(*groups))
+
+    def test_trajectory_partition_checks_drift_in_layer_order(self):
+        # The same unordered angles describe either a slow rotation or
+        # repeated abrupt jumps. Only the first provides a reference path.
+        ids = list(range(24))
+        smooth = list(range(0, 60, 3))
+        shuffled = [value for pair in zip(smooth[:10], smooth[10:]) for value in pair]
+        for cover in [smooth, shuffled]:
+            with self.subTest(cover=cover):
+                theta = np.radians(cover[:10] + [90] * 4 + cover[10:])
+                angles = np.abs(theta[:, None] - theta)
+                result = _trajectory_groups(ids, angles, len(ids), 3., 1e-6)
+                if cover == smooth:
+                    labels, step = result
+                    self.assertEqual(set(np.flatnonzero(labels != labels[0])), set(range(10, 14)))
+                    self.assertAlmostEqual(np.degrees(step), 3.)
+                else:
+                    self.assertIsNone(result)
+
+    def test_secondary_switches_against_a_smooth_majority_trajectory(self):
+        rows = [row(layer_name(i)) for i in range(32)]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        eye = np.eye(6)
+        runs = [range(4, 8), range(18, 21)]
+        for switching, primary_jump in [(False, False), (True, False), (True, True)]:
+            with self.subTest(switching=switching, primary_jump=primary_jump):
+                spaces, axes = {}, {}
+                for r in rows:
+                    theta = np.radians(2.6 * r.layer)
+                    secondary = np.cos(theta) * eye[1] + np.sin(theta) * eye[2]
+                    primary = eye[0]
+                    for k, run in enumerate(runs):
+                        if switching and r.layer in run:
+                            turn = np.radians(60. + k * 30.)
+                            secondary = np.cos(turn) * secondary + np.sin(turn) * eye[3 + k]
+                            if primary_jump:
+                                primary = np.cos(.12) * eye[0] + np.sin(.12) * eye[5]
+                    axes[r.name] = (-1) ** r.layer * primary
+                    spaces[r.name] = np.column_stack((primary, secondary))
+                ranked = rank.rank_tensors(rows[::-1], stats, directions=axes, subspaces=spaces)
+                expected = set().union(*runs) if switching and not primary_jump else set()
+                self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
+                self.assertTrue(all("step per layer" in r.reason for r in ranked if r.tier == "T3"))
 
     def test_gradual_transitions_between_three_plateaus(self):
         eye = np.eye(3)

@@ -256,6 +256,40 @@ def _coherent_groups(angles: np.ndarray, layer_count: int, factor: float, floor:
     return best
 
 
+def _trajectory_groups(ids: list[int], angles: np.ndarray, layer_count: int,
+                       factor: float, floor: float) -> tuple[np.ndarray, float] | None:
+    """Find angularly isolated groups whose successive observations follow a slow path."""
+    # Single linkage lets a path accumulate a large total rotation. At each
+    # merge the shortest edge between components is the separation of the
+    # current partition. Visit each pair once, checking only gaps in that scale.
+    left, right = np.triu_indices(len(ids), 1)
+    distances = angles[left, right]
+    labels = np.arange(len(ids))
+    layers = np.asarray(ids)
+    previous = floor
+    for edge in np.argsort(distances, kind="stable"):
+        a, b = labels[left[edge]], labels[right[edge]]
+        if a == b:
+            continue
+        separation = distances[edge]
+        if separation > factor * previous:
+            _, groups, sizes = np.unique(labels, return_inverse=True, return_counts=True)
+            if sizes.min() >= 3 and sizes.max() >= 8 and sizes.max() > layer_count / 2:
+                # A chain of close points in arbitrary order need not be
+                # smooth in layer order. Include the return to a group after
+                # an intervening run, using its angular displacement per layer.
+                step = 0.
+                for group in range(len(sizes)):
+                    members = np.flatnonzero(groups == group)
+                    rates = angles[members[:-1], members[1:]] / np.diff(layers[members])
+                    step = max(step, float(rates.max()))
+                if step <= math.acos(0.9) and separation > factor * max(floor, step):
+                    return groups, step
+        labels[labels == b] = a
+        previous = max(floor, separation)
+    return None
+
+
 def _secondary_switches(ids: list[int], names: list[str], layer_count: int, angles: np.ndarray,
                         secondary_overlap: np.ndarray, directions: dict[str, np.ndarray] | None,
                         width: int, factor: float) -> dict[str, str]:
@@ -266,7 +300,14 @@ def _secondary_switches(ids: list[int], names: list[str], layer_count: int, angl
     factor = max(1., factor)
     labels = _coherent_groups(angles, layer_count, factor, floor)
     if labels is None:
-        return {}
+        trajectory = _trajectory_groups(ids, angles, layer_count, factor, floor)
+        if trajectory is None:
+            return {}
+        labels, within = trajectory
+        spread = "maximum within-group step per layer"
+    else:
+        within = angles[labels[:, None] == labels].max()
+        spread = "maximum within-group angle"
     same = labels[:, None] == labels
     axes = np.stack([directions[name] for name in names])
     primary = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
@@ -276,7 +317,6 @@ def _secondary_switches(ids: list[int], names: list[str], layer_count: int, angl
     adjacent = np.diff(ids) == 1
     primary_steps = primary.diagonal(offset=1)
     usual_step = primary_steps[adjacent & (labels[:-1] == labels[1:])].max(initial=floor)
-    within = angles[same].max()
     sizes = np.bincount(labels)
     findings = {}
     for label in np.flatnonzero(sizes < sizes.max()):
@@ -296,7 +336,7 @@ def _secondary_switches(ids: list[int], names: list[str], layer_count: int, angl
         across = angles[outside].min()
         reason = (f"abrupt secondary subspace switch in {sizes[label]} layers{boundary} "
                   f"(minimum between-group angle {math.degrees(across):.2f} degrees, "
-                  f"maximum within-group angle {math.degrees(within):.2f} degrees, "
+                  f"{spread} {math.degrees(within):.2f} degrees, "
                   f"leading axes within {math.degrees(primary.max()):.2f} degrees)")
         for i in np.flatnonzero(members):
             findings[names[i]] = reason
@@ -332,6 +372,9 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
                 if dim >= 2:
                     secondary_overlap[i, j] = secondary_overlap[j, i] = cosines[1]
         agreement = angles <= math.acos(0.9)
+        if dim >= 2:
+            findings.update(_secondary_switches(ids, names, len(layers), angles, secondary_overlap,
+                                                directions, width, factor))
         supporters = agreement[np.argmax(agreement.sum(axis=1))]
         if supporters.sum() <= len(layers) / 2:
             # A repeated space can itself be exceptional among otherwise
@@ -347,9 +390,6 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
                         findings[names[i]] = (f"recurring {dim}-dimensional output subspace in {len(member_ids)} "
                                               f"layers without a comparable peer group ({shift})")
             continue
-        if dim >= 2:
-            findings.update(_secondary_switches(ids, names, len(layers), angles, secondary_overlap,
-                                                directions, width, factor))
         # Compare each candidate with the coherent population excluding itself.
         np.fill_diagonal(angles, np.nan)
         separation = np.nanmedian(angles[:, supporters], axis=1)
