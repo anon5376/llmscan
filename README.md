@@ -226,8 +226,9 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      cluster. With eight other independent layers and a coherent majority, it tests the candidate's
      median angle against peer dispersion, allowing for local angular drift. An isolated
      second group of at least three mutually aligned layers needs corroboration from effective
-     rank. When the other layers lack a recurring group, the scanner can also flag a recurring minority space
-     across separate layer ranges. In both cases the group's ranks must all fall on the same
+     rank. When the other layers lack a recurring group, the scanner can also flag a recurring
+     minority space. In both cases the group must recur across separate ranges of observed
+     layers, and its effective ranks must all fall on the same
      side of at least eight other layers' ranks, beyond six MAD-based standard deviations
      and one percent of their median. The comparison uses the full measured spectrum even
      when the report saves only one singular value.

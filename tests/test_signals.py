@@ -449,6 +449,8 @@ class TestAnomalySignals(unittest.TestCase):
             ({0, 4, 8}, False, 1.5, set()),   # one concept recurs at typical strength
             ({0, 1, 2}, False, 1.3, set()),   # contiguous editing regime
             ({0, 4, 8}, True, 1.5, set()),    # two recurring concepts
+            ({4, 5, 6}, True, 1.3, set()),    # one block uses a different concept and strength
+            ({0, 4, 8}, True, 1.3, {0, 4, 8}),
         ]:
             with self.subTest(selected=selected, shared=background_shared, rank=group_rank):
                 spaces, stats = {}, {}

@@ -208,8 +208,10 @@ def _orthogonal_fraction(cosine: float) -> float:
     return math.sqrt((1 - c) * (1 + c))
 
 
-def _separate_ranks(names: list[str], members: np.ndarray, stats: dict[str, Measurements]) -> str | None:
-    """Require one coherent group's effective ranks all to depart in the same direction."""
+def _recurring_rank_shift(names: list[str], members: np.ndarray, stats: dict[str, Measurements]) -> str | None:
+    """Corroborate a recurring subspace by a consistent one-sided departure in effective rank."""
+    if not np.any(np.diff(np.flatnonzero(members)) > 1):
+        return None  # A single run among the observed layers can be a local editing regime.
     ranks = np.array([stats[n].effective_rank for n in names], dtype=float)
     background = ranks[~members]
     if len(background) < 8 or not np.isfinite(ranks).all():
@@ -253,10 +255,10 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
             # unrelated spaces. Require an isolated clique, recurrence across
             # separate layer ranges, and an independent spectral departure.
             member_ids = np.flatnonzero(supporters)
-            if (stats is not None and 3 <= len(member_ids) < len(ids) / 2 and np.any(np.diff(member_ids) > 1)
+            if (stats is not None and 3 <= len(member_ids) < len(ids) / 2
                     and np.all(agreement[supporters] == supporters)
                     and np.all(agreement[~supporters].sum(axis=1) < 3)):
-                shift = _separate_ranks(names, supporters, stats)
+                shift = _recurring_rank_shift(names, supporters, stats)
                 if shift:
                     for i in member_ids:
                         findings[names[i]] = (f"recurring {dim}-dimensional output subspace in {len(member_ids)} "
@@ -275,7 +277,7 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
             # concept. Demand spectral corroboration for an isolated cohort.
             members = agreement[i]
             if (stats is not None and members.sum() >= 3 and not np.any(members & supporters)
-                    and np.all(agreement[members] == members) and not _separate_ranks(names, members, stats)):
+                    and np.all(agreement[members] == members) and not _recurring_rank_shift(names, members, stats)):
                 continue
             # Allow smooth drift. The largest principal angle is a metric.
             # A constant-speed path through the adjacent layers covers each
