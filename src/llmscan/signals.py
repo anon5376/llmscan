@@ -224,8 +224,40 @@ def _recurring_rank_shift(names: list[str], members: np.ndarray, stats: dict[str
     return None
 
 
+def _secondary_switch(ids: list[int], names: list[str], majority: np.ndarray, angles: np.ndarray,
+                      agreement: np.ndarray, directions: dict[str, np.ndarray] | None,
+                      width: int, factor: float) -> str | None:
+    """Look for an isolated switch of secondary modes under a stable leading edit."""
+    if majority.sum() < 8 or (~majority).sum() < 3:
+        return None
+    same = majority[:, None] == majority
+    if not np.array_equal(agreement, same):
+        return None  # Need two distinct, internally coherent groups and no transitional layers.
+    adjacent = np.diff(ids) == 1
+    if not (np.any(adjacent & majority[:-1] & ~majority[1:])
+            and np.any(adjacent & ~majority[:-1] & majority[1:])):
+        return None  # A sustained change of regime or an unobserved boundary.
+    if not directions or any(name not in directions or directions[name].shape != (width,) for name in names):
+        return None  # A tied leading space has no independently resolved primary direction.
+    axes = np.stack([directions[name] for name in names])
+    primary = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
+    floor = math.sqrt(2 * axes.shape[1] * math.ulp(1.))
+    factor = max(1., factor)
+    if not (primary.max() <= math.acos(0.9)
+            and primary[~same].max() <= factor * max(floor, primary[same].max())):
+        return None
+    across, within = angles[~same].min(), angles[same].max()
+    if across > factor * max(floor, within):
+        return (f"abrupt secondary subspace switch in {(~majority).sum()} layers "
+                f"(minimum between-group angle {math.degrees(across):.2f} degrees, "
+                f"maximum within-group angle {math.degrees(within):.2f} degrees, "
+                f"leading axes within {math.degrees(primary.max()):.2f} degrees)")
+    return None
+
+
 def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float,
-                      stats: dict[str, Measurements] | None = None) -> dict[str, str]:
+                      stats: dict[str, Measurements] | None = None,
+                      directions: dict[str, np.ndarray] | None = None) -> dict[str, str]:
     """Compare equal-dimensional output spaces, invariant to signs and rotations inside a basis."""
     groups = defaultdict(lambda: defaultdict(list))
     for r in rows:
@@ -264,10 +296,14 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
                         findings[names[i]] = (f"recurring {dim}-dimensional output subspace in {len(member_ids)} "
                                               f"layers without a comparable peer group ({shift})")
             continue
+        switch = _secondary_switch(ids, names, supporters, angles, agreement, directions, width, factor)
         # Compare each candidate with the coherent population excluding itself.
         np.fill_diagonal(angles, np.nan)
         separation = np.nanmedian(angles[:, supporters], axis=1)
         for i, name in enumerate(names):
+            if switch and not supporters[i]:
+                findings[name] = switch
+                continue
             peers = Peers.summarize(np.delete(separation, i).tolist())
             limit = max(max(1., factor) * peers.median, peers.median + 6 * 1.4826 * peers.mad,
                         math.sqrt(2 * width * math.ulp(1.)))

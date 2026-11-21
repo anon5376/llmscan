@@ -232,10 +232,17 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      clusters across layers of the same stack, writer kind, shape and storage precision. It measures
      the largest principal angle, which is invariant to basis rotations and ordering inside a tied
      cluster. With eight other independent layers and a coherent majority, it tests the candidate's
-     median angle against peer dispersion, allowing for local angular drift. An isolated
-     second group of at least three mutually aligned layers needs corroboration from effective
-     rank. When the other layers lack a recurring group, the scanner can also flag a recurring
-     minority space. In both cases the group must recur across separate ranges of observed
+     median angle against peer dispersion, allowing for local angular drift.
+     Two internally coherent groups can share a stable, separately resolved leading direction
+     while differing sharply in their secondary modes. The scanner flags the minority for
+     review if it has at least three layers, the reference has at least eight, and transitions
+     in both directions occur between adjacent layer IDs. The smallest angle across groups
+     must exceed the largest angle within either group by the configured outlier factor.
+     The leading axes must agree across groups within their usual dispersion. A deliberate
+     change of secondary editing concept with the same geometry gives the same finding.
+
+     An isolated minority can also be corroborated by effective rank, including when the
+     other layers lack a recurring group. For this test the group must recur across separate ranges of observed
      layers, and its effective ranks must all fall on the same
      side of at least eight other layers' ranks, beyond six MAD-based standard deviations
      and one percent of their median. The comparison uses the full measured spectrum even

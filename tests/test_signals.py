@@ -12,7 +12,7 @@ from helpers import gguf_float, write_gguf, write_safetensors
 from llmscan import core, rank
 from llmscan.names import stack_of
 from llmscan.removal import joint_excess
-from llmscan.signals import Measurements
+from llmscan.signals import Measurements, subspace_outliers
 from test_core import to_bf16
 from test_rank import layer_name, row, run_cli
 
@@ -454,8 +454,57 @@ class TestAnomalySignals(unittest.TestCase):
                 second = np.cos(angle) * eye[1] + np.sin(angle) * eye[2] if coherent else eye[i + 1]
                 bases[r.name] = np.column_stack((eye[0], second))
             with self.subTest(coherent=coherent):
-                ranked = rank.rank_tensors(rows, stats, subspaces=bases)
+                ranked = rank.rank_tensors(rows, stats, subspaces=bases, directions={r.name: eye[0] for r in rows})
                 self.assertTrue(all(r.tier == "T4" for r in ranked))
+
+    def test_secondary_switch_uses_geometry_under_a_shared_leading_axis(self):
+        eye = np.eye(7)
+        rows = [row(layer_name(i)) for i in range(17)]
+        for minority in ({4, 5, 6, 7}, {1, 4, 10, 15}, {13, 14, 15, 16}):
+            for shifted in (False, True):
+                with self.subTest(minority=minority, shifted=shifted):
+                    axes, spaces, stats = {}, {}, {}
+                    for r in rows:
+                        member = r.layer in minority
+                        axes[r.name] = (-1) ** r.layer * eye[0]
+                        # Third mode changes. Rotate the reported basis order
+                        # independently of the separately measured leading axis.
+                        basis = eye[:, [0, 1, 3 if member else 2]]
+                        spaces[r.name] = np.roll(basis, r.layer % 3, axis=1)
+                        stats[r.name] = Measurements(1.6 if shifted and member else 1.5, 1.)
+                    ranked = rank.rank_tensors(rows, stats, subspaces=spaces, directions=axes)
+                    flagged = {r.layer for r in ranked if r.tier == "T3"}
+                    self.assertEqual(flagged, set() if min(minority) == 13 else minority)
+                    self.assertTrue(all("secondary subspace switch" in r.reason for r in ranked if r.tier == "T3"))
+
+    def test_secondary_switch_abstains_at_missing_boundaries_and_for_several_concepts(self):
+        eye = np.eye(6)
+        for layers, third in [(list(range(17)), True), ([i for i in range(17) if i != 6], False)]:
+            with self.subTest(third=third):
+                rows = [row(layer_name(i)) for i in layers]
+                stats = {r.name: Measurements(1.5, 1.) for r in rows}
+                spaces = {}
+                for r in rows:
+                    axis = 2 if 7 <= r.layer <= 9 else 1
+                    if third and r.layer in (1, 2, 3):
+                        axis = 3
+                    spaces[r.name] = eye[:, [0, axis]]
+                ranked = rank.rank_tensors(rows, stats, subspaces=spaces, directions={r.name: eye[0] for r in rows})
+                self.assertTrue(all(r.tier == "T4" for r in ranked))
+
+    def test_change_of_primary_concept_does_not_corroborate_secondary_switch(self):
+        # These edit spaces intersect in two axes. The dominant direction
+        # changes between groups, even though it lies in their intersection.
+        eye = np.eye(5)
+        rows = [row(layer_name(i)) for i in range(17)]
+        spaces, directions = {}, {}
+        for r in rows:
+            member = 7 <= r.layer <= 10
+            spaces[r.name] = eye[:, [0, 1, 3 if member else 2]]
+            angle = .1 if member else 0.
+            directions[r.name] = np.cos(angle) * eye[0] + np.sin(angle) * eye[1]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        self.assertEqual(subspace_outliers(rows, spaces, 3., stats, directions), {})
 
     def test_recurring_subspace_requires_independent_spectral_corroboration(self):
         rows = [row(layer_name(i)) for i in range(15)]
