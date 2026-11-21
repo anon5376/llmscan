@@ -81,6 +81,9 @@ def compare(base: Checkpoint, suspect: Checkpoint) -> list[InventoryRow]:
                 status = DTYPE_MISMATCH
         else:
             status = IDENTICAL if bytes_equal(base, suspect, name) else CHANGED
+        if b is not None and s is not None:
+            base.release(name)
+            suspect.release(name)
         rows.append(InventoryRow(
             name=name,
             layer=layer_of(name),

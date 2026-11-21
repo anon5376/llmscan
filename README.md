@@ -112,8 +112,9 @@ Output goes to `out/<suspect>-vs-<base>/`:
 
 Safetensors checkpoints (single file or sharded directory) are memory-mapped and read one tensor at
 a time. The inventory compares tensors in chunks, so it needs a few megabytes of RAM
-whatever the model size (4.2 MB of allocations measured on a pair of 160 MB tensors); the ΔW scan loads the two copies of one 2-D tensor at a time as float32, so
-RAM must hold twice the float32 size of the largest 2-D tensor (4 bytes per element each). CPU only; the only
+whatever the model size (4.2 MB of allocations measured on a pair of 160 MB tensors); the ΔW scan reads both copies of one 2-D tensor 4096 rows at a time, so
+its RAM does not grow with the vocabulary. It is set by the eigensolve on the smaller dimension n, which holds about five n × n float64 matrices
+(0.7 GB measured at n = 4096; 0.13 GB for a 151936 × 896 embedding). CPU only; the only
 dependencies are numpy and matplotlib, no torch. GGUF support is next.
 
 `scripts/fetch_hf.sh <org/name> <revision> <dir>` downloads a model's safetensors at a pinned revision.
