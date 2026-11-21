@@ -25,6 +25,11 @@ _ROWS_PER_BLOCK = 4096
 class DeltaStats(NamedTuple):
     singular_values: np.ndarray
     effective_rank: float
+    frobenius: float | None = None
+    column_fraction: float | None = None
+    second_tail_share: float | None = None
+    direction: np.ndarray | None = None
+    projection_gain: float | None = None
 
 
 def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaStats:
@@ -41,6 +46,11 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
             ΔW = w_suspect − w_base, largest first. Fewer than k if min(shape) < k.
         effective_rank: participation ratio (Σσ²)² / Σσ⁴, 0.0 when ΔW is zero. It is NaN
             when ΔW holds a non-finite value; the ranking treats that tensor as unusable.
+        frobenius: norm of the full delta, including modes beyond k.
+        column_fraction: effective number of energized columns divided by the column count.
+        second_tail_share: fraction of non-leading energy in the second singular mode.
+        direction: leading left singular vector when the leading mode is separated.
+        projection_gain: σ₁ / ‖u₁ᵀ W_base‖₂ when the denominator is nonzero.
 
     The pipeline never calls this for bit-identical tensors.
     """
@@ -57,11 +67,49 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
     if scale == 0.0:
         return DeltaStats(np.zeros(min(k, dw.shape[1])), 0.0)
 
+    # Orient the Gram on the small side, but report the direction in the
+    # original output space. The caller puts embeddings in residual x token order.
+    tall = w_suspect.shape[0] >= w_suspect.shape[1]
     gram = np.zeros((dw.shape[1], dw.shape[1]))
+    column_energy = np.empty(w_suspect.shape[1])
     for start in range(0, dw.shape[0], _ROWS_PER_BLOCK):
         block = dw[start:start + _ROWS_PER_BLOCK].astype(np.float64) / scale  # entries in [-1, 1]
         gram += block.T @ block
-    energy = np.clip(np.linalg.eigvalsh(gram)[::-1], 0.0, None)  # (σ/scale)², largest first
+        if not tall:
+            column_energy[start:start + len(block)] = np.einsum("ij,ij->i", block, block)
+    if tall:
+        column_energy = gram.diagonal()
+    values, vectors = np.linalg.eigh(gram)
+    energy = np.maximum(values[::-1], 0.0)
+    total = energy.sum()
+    effective_rank = float(total ** 2 / (energy @ energy))
+    fraction = float(column_energy.sum() ** 2 / (len(column_energy) * (column_energy @ column_energy)))
+    tail = energy[1:].sum()
+    second_share = float(energy[1] / tail) if tail else 0.0
 
-    effective_rank = float(energy.sum()) ** 2 / float(np.square(energy).sum())
-    return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank)
+    # A repeated or nearly repeated leading singular value has no stable axis.
+    direction = gain = None
+    if len(energy) == 1 or energy[0] > 4 * energy[1]:
+        small = vectors[:, -1].copy()
+        direction = np.empty(dw.shape[0]) if tall else small
+        base = w_base if tall else w_base.T
+        base_scale = max(float(w_base.max()), -float(w_base.min()))
+        projected = np.zeros(w_suspect.shape[1])
+        for start in range(0, dw.shape[0], _ROWS_PER_BLOCK):
+            sl = slice(start, start + _ROWS_PER_BLOCK)
+            if tall:
+                direction[sl] = ((dw[sl].astype(np.float64) / scale) @ small) / np.sqrt(energy[0])
+            if base_scale:
+                block = base[sl].astype(np.float64) / base_scale
+                if tall:
+                    projected += block.T @ direction[sl]
+                else:
+                    projected[sl] = block @ direction
+        # For the orthogonal projection W' = W - uuᵀW this gain equals one,
+        # regardless of how much weight this layer has in direction u.
+        projected_norm = np.linalg.norm(projected)
+        if projected_norm:
+            gain = float((np.sqrt(energy[0]) / projected_norm) * (scale / base_scale))
+
+    return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),
+                      fraction, second_share, direction, gain)

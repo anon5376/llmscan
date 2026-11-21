@@ -7,11 +7,15 @@ import time
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
+
 from llmscan import core
 from llmscan.inventory import CHANGED, DTYPE_MISMATCH, IDENTICAL, InventoryRow
+from llmscan.names import EMBEDDINGS, RESIDUAL_WRITERS, canonical_kind
 from llmscan.safetensors_io import FLOAT_DTYPES, Checkpoint
 
 FIELDS = ["name", "layer", "kind", "status", "shape", "effective_rank", "seconds"]
+EXTRA_FIELDS = ["frobenius", "projection_gain", "second_tail_share", "token_row_fraction"]
 
 
 def sv_field(i: int) -> str:
@@ -25,6 +29,7 @@ def scan(
     out_csv: Path,
     k: int = 32,
     log: Callable[[str], None] = print,
+    directions: dict[str, np.ndarray] | None = None,
 ) -> int:
     """Analyse each 2-D float tensor present in both checkpoints with the same shape.
 
@@ -41,14 +46,27 @@ def scan(
     n_core = sum(r.status != IDENTICAL for r in todo)
     done = 0
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS + [sv_field(i + 1) for i in range(k)])
+        w = csv.DictWriter(f, fieldnames=FIELDS + [sv_field(i + 1) for i in range(k)] + EXTRA_FIELDS)
         w.writeheader()
         for r in todo:
             row = {"name": r.name, "layer": r.layer, "kind": r.kind, "status": r.status, "shape": r.base_shape}
             if r.status != IDENTICAL:
                 t0 = time.perf_counter()
                 load = "to_float64" if "F64" in (r.base_dtype, r.suspect_dtype) else "to_float32"
-                stats = core.analyze_delta(getattr(base, load)(r.name), getattr(suspect, load)(r.name), k)
+                a, b = getattr(base, load)(r.name), getattr(suspect, load)(r.name)
+                kind = canonical_kind(r.kind)
+                embedding = kind in EMBEDDINGS
+                if embedding:
+                    a, b = a.T, b.T
+                stats = core.analyze_delta(a, b, k)
+                del a, b
+                if directions is not None and kind in EMBEDDINGS | RESIDUAL_WRITERS and stats.direction is not None:
+                    directions[r.name] = stats.direction
+                values = (stats.frobenius, stats.projection_gain if kind in EMBEDDINGS | RESIDUAL_WRITERS else None,
+                          stats.second_tail_share, stats.column_fraction if embedding else None)
+                for field, value in zip(EXTRA_FIELDS, values):
+                    if value is not None:
+                        row[field] = f"{value:.8g}"
                 row["seconds"] = f"{time.perf_counter() - t0:.2f}"
                 row["effective_rank"] = f"{float(stats.effective_rank):.6g}"
                 for i, s in enumerate(stats.singular_values[:k]):
