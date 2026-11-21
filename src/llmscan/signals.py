@@ -102,18 +102,25 @@ def _projection_reason(r: InventoryRow, m: Measurements, peers: dict[tuple, Peer
         return (f"projection_gain {m.projection_gain:.4g} exceeds a full projection of the base "
                 f"(threshold {max(1., factor):g}x)")
     residual = m.projection_residual()
-    if residual is not None and m.projection_error is not None and m.projection_error > 0.05:
+    if residual is not None and m.projection_error is not None:
         fit_group = (kind, r.base_shape, r.base_dtype, r.suspect_dtype)
         fits = peers.get((*fit_group, "projection_error"))
-        unusual_fit = fits is None or fits.count < 8 or fits.high(m.projection_error, 0.05)
-        # Comparable layers measure how much of a rounding/healing residual
-        # normally lies along the leading axis. Give correlated tests one vote.
+        large_error = (m.projection_error > 0.05
+                       and (fits is None or fits.count < 8 or fits.high(m.projection_error, 0.05)))
         shares = peers.get((*fit_group, "leading_share"))
         share = residual.leading_share()
-        if unusual_fit and shares and share is not None and shares.high(share, 0.05):
-            return (f"projection law leaves {m.projection_error:.1%} of the leading change unexplained, and "
-                    f"its axis carries {share:.1%} of the residual norm (peer median {shares.median:.1%})")
-        if unusual_fit and residual.leading > factor * residual.tail:
+        if fits and shares and share is not None and shares.high(share, 0.05):
+            # Demand a multiple of the upper peer noise level (median plus
+            # dispersion), so a naturally variable cohort gets more latitude.
+            # The float64 Gram spectrum resolves squared norms.
+            above_noise = fits.high(m.projection_error / max(1., factor), math.sqrt(math.ulp(1.)))
+            if large_error or above_noise:
+                return (f"projection law leaves {100 * m.projection_error:.3g}% of the leading change unexplained "
+                        f"(peer median {100 * fits.median:.3g}%), and its axis carries {share:.1%} "
+                        f"of the residual norm (peer median {shares.median:.1%})")
+        # Without corroboration from residual shares, retain the conservative
+        # local test, including for singleton kinds.
+        if large_error and residual.leading > factor * residual.tail:
             return (f"projection law leaves {m.projection_error:.1%} of the leading change unexplained "
                     "after fitting partial removal against the base")
     for metric in ("projection_gain", "frobenius", "sv_001"):

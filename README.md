@@ -148,13 +148,17 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      its peer median. Raw Frobenius or spectral norms require a twofold increase. Both checks also require
      six MAD-based standard deviations. A full scan fits the signed leading change to a partial or full
      removal of the base projection. `projection_error` measures the unexplained fraction of the leading
-     change in norm. A finding requires more than 5% error. With eight or more comparable fits the
-     error must also exceed its peer median by five percentage points and six MAD-based standard deviations.
-     The unexplained leading component has norm `a = σ₁ × projection_error`. All other modes together
-     have norm `b`. A finding requires either `a > --outlier-factor × b` or an unusually large leading
-     share of the residual norm, `a / hypot(a, b)`. The latter comparison requires at least eight fits
-     of the same kind, shape and storage precisions and uses the same median and dispersion thresholds.
-     This accounts for rounding and editing methods that leave diffuse residuals throughout a stack.
+     change in norm. The unexplained leading component has norm `a = σ₁ × projection_error`. All
+     other modes together have norm `b`. With at least eight comparable measurements (same kind,
+     shape and storage precisions), the scanner compares both fit error and leading share of the
+     residual norm, `a / hypot(a, b)`. For small errors, the fit must exceed `max(1, --outlier-factor)`
+     times the upper peer noise level. That level is the median plus six MAD-based standard deviations,
+     with a minimum dispersion allowance of `sqrt(float64 epsilon)`. The leading share must also
+     exceed its median by both five percentage points and six MAD-based standard deviations.
+     Larger errors can qualify under the original rule. The error must exceed 5% and, with at least
+     eight comparable fits, exceed its median by five percentage points and six MAD-based standard
+     deviations. It must also have an unusually high leading share (as above) or satisfy
+     `a > --outlier-factor × b`. The latter check also works on singletons.
      Current reports store `tail_norm_fraction` from the scaled spectrum so this comparison also works
      at subnormal F64 scales. Older reports estimate the tail from their recorded norms.
    - **Residual direction.** Each layer gets one vote in its stack and residual width. Writers within a

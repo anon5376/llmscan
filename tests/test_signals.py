@@ -150,6 +150,41 @@ class TestAnomalySignals(unittest.TestCase):
         self.stats[self.last] = Measurements(1., 1., np.hypot(1., 0.4), projection_error=0.1)
         self.assertEqual(self.flagged(), {})
 
+    def test_small_projection_misfit_scales_with_peer_noise(self):
+        # Representative BF16 fit and spectral tail from Round 6. Reduce both
+        # noise and signal together to exercise a more precise cohort as well.
+        for dtype, scale in (("BF16", 1.), ("F16", 0.1)):
+            with self.subTest(dtype=dtype):
+                tail = 0.047 * scale
+                for i, r in enumerate(self.rows):
+                    r.base_dtype = r.suspect_dtype = dtype
+                    self.stats[r.name] = Measurements(1.0044, 1., np.hypot(1., tail),
+                                                      projection_error=(0.005 + 0.00004 * i) * scale)
+                self.stats[self.last] = self.stats[self.last]._replace(projection_error=0.0481 * scale)
+                flagged = self.flagged()
+                self.assertEqual(set(flagged), {self.last})
+                self.assertIn("residual norm", flagged[self.last])
+                # The same small error has insufficient support on its own.
+                self.rows[-1].suspect_dtype = "F32"
+                self.assertEqual(self.flagged(), {})
+
+    def test_peer_noise_includes_typical_fit_error_and_dispersion(self):
+        # An honest attention layer can exceed three times the median alone.
+        # Its error stays within the same multiple of the upper noise level.
+        for i, r in enumerate(self.rows):
+            self.stats[r.name] = Measurements(1.005, 1., np.hypot(1., 0.05),
+                                              projection_error=0.005 + i * 0.0001)
+        for error in (0.01, 0.0166):
+            with self.subTest(error=error):
+                self.stats[self.last] = self.stats[self.last]._replace(projection_error=error)
+                self.assertEqual(self.flagged(), {})
+
+    def test_peer_share_from_numerical_residuals_is_insufficient(self):
+        self.stats = {r.name: Measurements(1., 1., 1., projection_error=1e-16, tail_norm_fraction=1e-14)
+                      for r in self.rows}
+        self.stats[self.last] = self.stats[self.last]._replace(projection_error=1e-14)
+        self.assertEqual(self.flagged(), {})
+
     def test_residual_share_needs_peers_at_matching_precision(self):
         self.stats = {r.name: Measurements(1., 1., 1.02, projection_error=0.01) for r in self.rows}
         self.stats[self.last] = self.stats[self.last]._replace(projection_error=0.2)
