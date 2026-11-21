@@ -36,7 +36,7 @@ from llmscan.delta import EXTRA_FIELDS, sv_field
 from llmscan.inventory import CHANGED, IDENTICAL, ONLY_BASE, ONLY_SUSPECT, SHAPE_MISMATCH, InventoryRow, natural_key
 from llmscan.names import EMBEDDINGS, RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind
 from llmscan.safetensors_io import FLOAT_DTYPES
-from llmscan.signals import Measurements, direction_cosines, outlier_reasons, peer_groups
+from llmscan.signals import Measurements, direction_cosines, direction_outliers, outlier_reasons, peer_groups
 
 T1, T2, T3, T4 = "T1", "T2", "T3", "T4"
 TIERS = (T1, T2, T3, T4)
@@ -148,6 +148,7 @@ def rank_tensors(
     other_token_kinds = TOKEN_MATRICES - expected
     other_tokens = [r for r in rows if r.status == CHANGED and r.kind in other_token_kinds and not bad[r.name]]
     cosines = direction_cosines(usable + other_tokens, directions or {})
+    direction_flags = direction_outliers(usable, directions or {}, cosines, factor)
 
     ranked: list[tuple[str, InventoryRow, str]] = []
     unusable: set[str] = set()
@@ -165,7 +166,7 @@ def rank_tensors(
                 ranked.append((T3, r, f"stats unusable: {bad[r.name]}; cannot be judged consistent with abliteration"))
                 unusable.add(r.name)
                 continue
-            reasons = outlier_reasons(r, stats[r.name], groups, cosines.get(r.name), factor)
+            reasons = outlier_reasons(r, stats[r.name], groups, direction_flags.get(r.name), factor)
             if reasons:
                 ranked.append((T3, r, "; ".join(reasons)))
                 evidence[r.name] = len(reasons)

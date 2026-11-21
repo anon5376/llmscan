@@ -174,8 +174,16 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      A zero result means the chosen input yielded no evidence of excess growth.
    - **Residual direction.** Each layer gets one vote in its stack and residual width. Writers within a
      voting layer must agree up to sign. When a strict majority agrees (absolute cosine ≥0.9), the scanner
-     compares each writer and embedding to at least three *other* agreeing layers. A median absolute cosine
-     below 0.5 is a finding. An embedding or output head above the blocks can use a unique descendant
+     compares each writer and embedding to at least three *other* agreeing layers. For writers with eight
+     other comparable layers (same stack, kind, shape and storage precision), the scanner converts the
+     median absolute cosine to an orthogonal component, `sqrt(1 − cosine²)`. Each peer layer contributes
+     one median component. A finding must exceed both `max(1, --outlier-factor)` times the peer median
+     and the median plus six MAD-based standard deviations, with a floor for dot-product roundoff.
+     Two nearby, mutually aligned same-kind axes can explain gradual drift. The scanner checks whether
+     their angular trajectory predicts the held-out direction within the same tolerance, interpolating
+     by layer index or extrapolating by at most one observed interval. For smaller cohorts and token
+     matrices, the fallback flags a median absolute cosine below 0.5.
+     An embedding or output head above the blocks can use a unique descendant
      stack of matching width. Output heads retain their location tier. The scanner uses a direction only
      when σ₁ > 2σ₂ or there is a single mode.
    - **Embedding concentration.** For token-row energies `e`, the effective fraction of rows changed is

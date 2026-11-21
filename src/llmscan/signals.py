@@ -144,7 +144,7 @@ def _projection_reason(r: InventoryRow, m: Measurements, peers: dict[tuple, Peer
 
 
 def outlier_reasons(r: InventoryRow, m: Measurements, peers: dict[tuple, Peers],
-                    cosine: float | None, factor: float) -> list[str]:
+                    direction_reason: str | None, factor: float) -> list[str]:
     reasons = []
     kind = canonical_kind(r.kind)
     er = m.effective_rank
@@ -175,9 +175,75 @@ def outlier_reasons(r: InventoryRow, m: Measurements, peers: dict[tuple, Peers],
             reasons.append(f"token-row energy concentrated in {m.token_row_fraction:.2%} effective rows")
         if m.token_row_spike is not None and m.token_row_spike > 1:
             reasons.append(f"token-row residual spike {m.token_row_spike:.2f}x the vocabulary-adjusted bound")
-    if cosine is not None and cosine < 0.5:
-        reasons.append(f"residual direction disagrees with coherent peer layers (absolute cosine {cosine:.3f})")
+    if direction_reason:
+        reasons.append(direction_reason)
     return reasons
+
+
+def _orthogonal_fraction(cosine: float) -> float:
+    c = min(1., abs(cosine))
+    return math.sqrt((1 - c) * (1 + c))
+
+
+def _follows_drift(layer: int, axis: np.ndarray, neighbors: list[int], axes: dict[int, np.ndarray],
+                   tolerance: float) -> bool:
+    """Compare with the local trajectory of two independent same-kind layers."""
+    # Bracket the target where possible. At either end, extrapolate by at most
+    # one observed interval. Missing/sparsely sampled blocks need no special ids.
+    pos = int(np.searchsorted(neighbors, layer))
+    start = max(0, min(pos - 1, len(neighbors) - 2))
+    i, j = neighbors[start:start + 2]
+    t = (layer - i) / (j - i)
+    a, b = axes[i], axes[j]
+    dot = float(a @ b)
+    if t < -1 or t > 2 or abs(dot) < 0.9:
+        return False
+    # Sign-align the neighboring axes and interpolate along their shorter arc.
+    angle = math.acos(min(1., abs(dot)))
+    if angle == 0:
+        prediction = a
+    else:
+        prediction = (math.sin((1 - t) * angle) * a
+                      + math.copysign(1., dot) * math.sin(t * angle) * b) / math.sin(angle)
+    return _orthogonal_fraction(float(axis @ prediction) / np.linalg.norm(prediction)) <= tolerance
+
+
+def direction_outliers(rows: list[InventoryRow], directions: dict[str, np.ndarray],
+                       cosines: dict[str, float], factor: float) -> dict[str, str]:
+    """Calibrate departure from a coherent stack against comparable writer layers."""
+    groups = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        kind = canonical_kind(r.kind)
+        if r.name in cosines and r.layer is not None and kind in RESIDUAL_WRITERS:
+            key = (stack_of(r.name), len(directions[r.name]), kind, r.base_shape, r.base_dtype, r.suspect_dtype)
+            groups[key][r.layer].append(r.name)
+    findings = {name: f"residual direction disagrees with coherent peer layers (absolute cosine {cosine:.3f})"
+                for name, cosine in cosines.items() if cosine < 0.5}
+    for layers in groups.values():
+        if len(layers) < 9:  # eight other layer votes per candidate
+            continue
+        departures = {i: statistics.median(_orthogonal_fraction(cosines[n]) for n in names)
+                      for i, names in layers.items()}
+        # Only unambiguous same-kind axes can define a local trajectory.
+        axes = {i: directions[names[0]] for i, names in layers.items() if len(names) == 1}
+        for layer, names in layers.items():
+            peers = Peers.summarize([v for i, v in departures.items() if i != layer])
+            width = len(directions[names[0]])
+            # Dot-product roundoff is O(width * eps) in cosine, hence its
+            # square root in sine near perfectly aligned directions.
+            limit = max(max(1., factor) * peers.median, peers.median + 6 * 1.4826 * peers.mad,
+                        math.sqrt(2 * width * math.ulp(1.)))
+            for name in names:
+                findings.pop(name, None)  # a calibrated decision replaces the sparse-cohort fallback
+                separation = _orthogonal_fraction(cosines[name])
+                if separation <= limit:
+                    continue
+                neighbors = sorted(i for i in axes if i != layer)
+                if len(neighbors) >= 2 and _follows_drift(layer, directions[name], neighbors, axes, limit):
+                    continue
+                findings[name] = (f"residual direction has {separation:.2%} orthogonal component to coherent layers "
+                                  f"(peer median {peers.median:.2%}, upper bound {limit:.2%})")
+    return findings
 
 
 def direction_cosines(rows: list[InventoryRow], directions: dict[str, np.ndarray]) -> dict[str, float]:
