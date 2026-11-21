@@ -38,6 +38,17 @@ class DeltaStats(NamedTuple):
     base_probe: np.ndarray | None = None
     output_subspace: np.ndarray | None = None
 
+    def tail_excess(self, rounding_budget: float) -> float | None:
+        total = self.frobenius
+        if not total or not math.isfinite(total) or self.tail_norm_fraction is None:
+            return None
+        # Round down at the F64 subnormal floor, where one ULP can be a
+        # large fraction of the reported physical norm.
+        total = math.nextafter(total, 0.)
+        if not total or not self.tail_norm_fraction:
+            return 0.
+        return max(0., self.tail_norm_fraction - rounding_budget / total)
+
 
 # Spacing at one and at zero for the supported checkpoint storage formats.
 _SPACING = {"BF16": (2.0**-7, 2.0**-133), "F16": (2.0**-10, 2.0**-24),
@@ -46,20 +57,18 @@ _SPACING = {"BF16": (2.0**-7, 2.0**-133), "F16": (2.0**-10, 2.0**-24),
 
 def rank_one_excess(base: np.ndarray, stats: DeltaStats, base_dtype: str, suspect_dtype: str) -> float | None:
     """Lower bound on the fraction of ΔW unexplained by one removal and a floating-point re-save."""
-    total = stats.frobenius
-    if not total or not math.isfinite(total) or stats.tail_norm_fraction is None:
-        return None
-    # Round the denominator down when bounding the relative rounding budget.
-    # At the F64 subnormal floor, even one ULP can be a large fraction of ΔW.
-    total = math.nextafter(total, 0.)
-    if not total or not stats.tail_norm_fraction:
-        return 0.
+    return stats.tail_excess(rounding_budget(base, base_dtype, suspect_dtype))
 
+
+def rounding_budget(base: np.ndarray, base_dtype: str, suspect_dtype: str) -> float:
+    """Frobenius allowance for a partial removal and floating-point re-save."""
     # A partial orthogonal removal cannot increase the base Frobenius norm.
     # Allow a full ULP at the coarser precision, including a subnormal floor.
     # Accumulate a scaled norm in blocks to avoid squaring extreme F64 values.
     relative, absolute = map(max, zip(_SPACING[base_dtype], _SPACING[suspect_dtype]))
     scale = max(float(base.max()), -float(base.min()))
+    if not math.isfinite(scale):
+        return math.inf
     budget = absolute * math.sqrt(base.size)
     if scale:
         rows = base if base.shape[0] >= base.shape[1] else base.T
@@ -68,7 +77,7 @@ def rank_one_excess(base: np.ndarray, stats: DeltaStats, base_dtype: str, suspec
             block = rows[start:start + _ROWS_PER_BLOCK].astype(np.float64) / scale
             energy += float(np.einsum("ij,ij->", block, block))
         budget += (relative * math.sqrt(energy)) * scale
-    return max(0., stats.tail_norm_fraction - budget / total)
+    return budget
 
 
 def contraction_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
@@ -290,7 +299,30 @@ def _projection_fit(right: np.ndarray, projected: np.ndarray, gain: float | None
     return error, float(deviations.max() / bound), residual
 
 
-def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaStats:
+def _subspace_dimension(energy: np.ndarray, total: float, shape: tuple[int, int], noise: float | None) -> int:
+    """Choose a resolved prefix of the scaled Gram spectrum for peer comparison."""
+    if noise is None:  # Legacy callers without checkpoint storage metadata.
+        gaps = np.flatnonzero(energy[:-1] > 4 * energy[1:])
+        dim = int(gaps[0] + 1) if gaps.size else len(energy)
+        return dim if energy[dim - 1] >= min(energy[0] / 4, total / len(energy)) else 0
+
+    # Weyl's inequality bounds each singular-value error by the operator
+    # norm of the rounding perturbation, itself bounded by its Frobenius norm.
+    # Also exclude eigenvalues at the scale of error in the Gram product.
+    gram_floor = math.sqrt(math.ulp(1.) * sum(shape) * total)
+    dim = int(np.count_nonzero(np.sqrt(energy) > max(noise, gram_floor)))
+    if dim < 2:
+        return 0
+    if dim < shape[0] and (dim == len(energy) or energy[dim - 1] > 4 * energy[dim]):
+        return dim
+    # The floor cuts a cluster or the resolved modes span the whole output.
+    # Find a distinct prefix above the bulk without splitting a tied space.
+    gaps = np.flatnonzero((energy[:dim - 1] > 4 * energy[1:dim])
+                          & (energy[:dim - 1] >= min(energy[0] / 4, total / len(energy))))
+    return int(gaps[-1] + 1) if gaps.size else 0
+
+
+def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int, subspace_budget: float | None = None) -> DeltaStats:
     """Spectrum of the change from `w_base` to `w_suspect` for one weight matrix.
 
     Inputs
@@ -298,6 +330,8 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
             dtype, as stored in the checkpoint: float32, or float64 when either side is F64.
             Both are fresh copies; modifying them is fine.
         k: how many leading singular values to return, k >= 1.
+        subspace_budget: Frobenius bound on checkpoint rounding in physical units. Without
+            storage metadata, retain the leading-cluster heuristic. Infinity skips extraction.
 
     Returns DeltaStats
         singular_values: 1-D float64 array of the k largest singular values of
@@ -381,23 +415,19 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
             projected /= projected_norm
             base_probe = projected
         projection_error, column_spike, fit_residual = _projection_fit(right, projected, gain)
-    else:
-        # Apply the same twofold singular-value separation to the *boundary*
-        # of the leading cluster. Ignore gaps deep in a diffuse noise floor.
-        # The dimension is independent of the number of CSV columns requested.
-        gaps = np.flatnonzero(energy[:-1] > 4 * energy[1:])
-        dim = int(gaps[0] + 1) if gaps.size else len(energy)
-        prominent = energy[dim - 1] >= min(energy[0] / 4, total / len(energy))
-        if dim < len(w_suspect) and prominent:
-            small = vectors[:, -dim:]
-            if tall:
-                output_subspace = np.empty((len(dw), dim))
-                singular = np.sqrt(energy[:dim][::-1])
-                for start in range(0, len(dw), _ROWS_PER_BLOCK):
-                    sl = slice(start, start + _ROWS_PER_BLOCK)
-                    output_subspace[sl] = ((dw[sl].astype(np.float64) / scale) @ small) / singular
-            else:
-                output_subspace = small.copy()
+
+    noise = None if subspace_budget is None else subspace_budget / scale
+    dim = _subspace_dimension(energy, total, w_suspect.shape, noise)
+    if 2 <= dim < len(w_suspect):
+        small = vectors[:, -dim:]
+        if tall:
+            output_subspace = np.empty((len(dw), dim))
+            singular = np.sqrt(energy[:dim][::-1])
+            for start in range(0, len(dw), _ROWS_PER_BLOCK):
+                sl = slice(start, start + _ROWS_PER_BLOCK)
+                output_subspace[sl] = ((dw[sl].astype(np.float64) / scale) @ small) / singular
+        else:
+            output_subspace = small.copy()
 
     return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),
                       fraction, second_share, direction, gain, projection_error, column_spike, tail_norm_fraction,

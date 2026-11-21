@@ -3,6 +3,7 @@
 import csv
 import tempfile
 import unittest
+from itertools import product
 from pathlib import Path
 
 import numpy as np
@@ -171,6 +172,25 @@ class TestProjectionMeasurements(unittest.TestCase):
         name = layer_name(0)
         finding, = rank.rank_tensors([row(name)], {name: Measurements(6., 1., reciprocity_excess=excess)})
         self.assertIn("multi-mode change violates projection reciprocity", finding.reason)
+
+    def test_rounding_modes_of_a_single_removal_have_no_peer_subspace(self):
+        rng = np.random.default_rng(938)
+        for shape in [(40, 19), (19, 40)]:
+            base = rng.standard_normal(shape)
+            axis = np.linalg.qr(rng.normal(size=(len(base), 1)))[0]
+            edited = to_bf16(base - axis @ (axis.T @ base))
+            stored = to_bf16(base)
+            stats = core.analyze_delta(stored, edited, 2, core.rounding_budget(stored, "BF16", "BF16"))
+            with self.subTest(shape=shape):
+                self.assertGreater(stats.singular_values[1], 0.)
+                self.assertIsNotNone(stats.direction)
+                self.assertIsNone(stats.output_subspace)
+
+    def test_resolved_column_space_can_include_every_input_of_a_tall_matrix(self):
+        b = np.eye(9, 3) * [1., .3, .08]
+        m = core.analyze_delta(b, np.zeros_like(b), 1, core.rounding_budget(b, "F16", "F16"))
+        self.assertEqual(m.output_subspace.shape, (9, 3))
+        np.testing.assert_allclose(m.output_subspace @ m.output_subspace.T, np.diag([1.] * 3 + [0.] * 6))
 
     def test_removal_certificate_allows_independent_rounding_of_both_checkpoints(self):
         rng = np.random.default_rng(412)
@@ -420,6 +440,29 @@ class TestAnomalySignals(unittest.TestCase):
                 ranked = rank.rank_tensors(rows, stats, subspaces=bases)
                 self.assertTrue(all(r.tier == "T4" for r in ranked))
 
+    def test_recurring_subspace_requires_independent_spectral_corroboration(self):
+        rows = [row(layer_name(i)) for i in range(15)]
+        axes = np.eye(17)
+        for selected, background_shared, group_rank, expected in [
+            ({0, 4, 8}, False, 1.3, {0, 4, 8}),
+            ({0, 4, 8}, False, 1.7, {0, 4, 8}),
+            ({0, 4, 8}, False, 1.5, set()),   # one concept recurs at typical strength
+            ({0, 1, 2}, False, 1.3, set()),   # contiguous editing regime
+            ({0, 4, 8}, True, 1.5, set()),    # two recurring concepts
+        ]:
+            with self.subTest(selected=selected, shared=background_shared, rank=group_rank):
+                spaces, stats = {}, {}
+                for i, r in enumerate(rows):
+                    second = 2 if background_shared else 2 + i
+                    if i in selected:
+                        second = 1
+                    elif i == 11 and not background_shared:
+                        second = 2 + 10  # one incidental pair is insufficient to form another cohort
+                    spaces[r.name] = axes[:, [0, second]]
+                    stats[r.name] = Measurements(group_rank if i in selected else 1.5, 1.)
+                ranked = rank.rank_tensors(rows, stats, subspaces=spaces)
+                self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, expected)
+
     def test_sparse_direction_cohort_counts_independent_layers(self):
         # Several experts in one layer do not supply additional layer votes.
         rows = [row(layer_name(i)) for i in range(8)]
@@ -518,11 +561,11 @@ class TestControlCheckpoints(unittest.TestCase):
             self.assertIn("positive inner product", finding["reason"])
 
     def test_rank_three_shared_subspace_through_cli(self):
-        # Every change is a genuine removal with three tied modes. The bases
-        # rotate within the same space except for one different output axis.
+        # Both tied and separated spectra have the same output space except
+        # for one layer's third axis. Keep only one CSV singular value.
         rng = np.random.default_rng(27)
-        for shape in [(8, 12), (12, 8)]:
-            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
+        for shape, strengths in product([(8, 12), (12, 8)], [(1., 1., 1.), (1., .32, .11)]):
+            with self.subTest(shape=shape, strengths=strengths), tempfile.TemporaryDirectory() as tmp:
                 tmp = Path(tmp)
                 base, suspect = {}, {}
                 for i in range(12):
@@ -530,7 +573,7 @@ class TestControlCheckpoints(unittest.TestCase):
                     right = np.linalg.qr(rng.normal(size=(shape[1], 3)))[0]
                     untouched = np.eye(*shape)
                     untouched -= left @ (left.T @ untouched)
-                    base[layer_name(i)] = ("BF16", to_bf16(untouched + left @ right.T))
+                    base[layer_name(i)] = ("BF16", to_bf16(untouched + (left * strengths) @ right.T))
                     suspect[layer_name(i)] = ("BF16", untouched)
                 write_safetensors(tmp / "b.safetensors", base)
                 write_safetensors(tmp / "s.safetensors", suspect)

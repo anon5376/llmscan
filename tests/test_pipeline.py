@@ -17,7 +17,7 @@ from llmscan.names import kind_of, layer_of
 from llmscan.safetensors_io import Checkpoint, CheckpointError
 
 
-def fake_analyze(w_base, w_suspect, k):
+def fake_analyze(w_base, w_suspect, k, subspace_budget):
     """Stand-in for the core: records the call, returns fixed numbers."""
     fake_analyze.calls.append((w_base.shape, w_suspect.shape, k))
     return core.DeltaStats(np.linspace(1.0, 0.1, min(k, *w_base.shape)), 1.0)
