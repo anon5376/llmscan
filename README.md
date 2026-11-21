@@ -127,10 +127,30 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
 2. **T2, unexpected location:** changed, but not an `o_proj`, `down_proj` or `embed_tokens` (GGUF:
    `attn_output`, `ffn_down`, `token_embd`; MoE expert down projections count as `down_proj`). Change the
    set with `--expected-kinds`.
-3. **T3, outlier among the expected kinds:** needs `delta.csv`. Effective rank more than 3x the median of
-   the changed tensors of the same kind in the same model (`--outlier-factor`). The yardstick is the model's
-   own median, not rank 1, because Heretic-style rank-3 edits and norm-preserving variants are honest.
-   Assumes fewer than half of a kind's changed tensors are tampered with.
+3. **T3, unusual change to an expected kind.** A full scan checks four properties.
+
+   - **Spectral shape.** The original `--outlier-factor` rule compares effective rank to its kind's median
+     (default 3×). A smaller increase can also qualify when it exceeds both 1% of the median and six
+     MAD-based standard deviations, and the second mode contains at least a quarter of the non-leading energy.
+     This distinguishes a second coherent mode from diffuse rounding noise.
+   - **Magnitude.** For a residual writer, projection gain is σ₁ divided by the norm of the base weights along
+     the leading output direction. A full orthogonal projection along that direction gives gain one. A gain
+     above `--outlier-factor` (with a minimum bound of one) is a finding even without peers. The adaptive
+     check compares log magnitudes within the same kind and shape. It requires a greater than twofold increase
+     over the median, six MAD-based standard deviations, and for gain, a value above 1.05. When gain is
+     unavailable the scan uses the Frobenius norm or, for older CSVs, the leading singular value.
+   - **Residual direction.** Each layer gets one vote in its stack and residual width. Writers within a
+     voting layer must agree up to sign. When a strict majority agrees (absolute cosine ≥0.9), the scanner
+     compares each writer and embedding to at least three *other* agreeing layers. A median absolute cosine
+     below 0.5 is a finding. The scanner uses a direction only when σ₁ > 2σ₂ or there is a single mode.
+   - **Embedding concentration.** For token-row energies `e`, the effective fraction of rows changed is
+     `sum(e)² / (number_of_rows × sum(e²))`. A fraction below 5% is a finding even for a singleton
+     embedding. Its residual direction is the leading *right* singular vector in token-by-hidden layout.
+
+   MAD-based checks need eight usable samples and estimate standard deviation as 1.4826 × median absolute
+   deviation. Peer checks assume a representative majority. Gain and row concentration also work in
+   isolation. These are indicators for review and can flag legitimate edits that depart from the projection model.
+
    A changed tensor of an expected kind whose `delta.csv` stats are unusable is also T3, ordered after the
    genuine outliers (reason: `stats unusable: <why>`): no row in `delta.csv` (including a tensor the 2-D float
    scanner skips, such as a 3-D MoE tensor or a quantized GGUF one: `not scanned (<why>)`), both cells blank, or an
@@ -139,7 +159,8 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
    if `delta.csv` came out empty; only `--inventory-only` or a stopped scan leaves T4 `(no ΔW stats)`.
 4. **T4, consistent with abliteration:** every other changed tensor.
 
-Inside a tier, higher effective rank first, then larger top singular value, then name (unusable stats sort as missing), so the order never depends on the hash seed. With
+Within T3, findings with more corroborating signals rank first. Ties and other tiers use higher effective
+rank first, then larger top singular value, then name (unusable stats sort as missing). With
 `--inventory-only` only T1, T2 and T4 exist. `scripts/score_blind.py --ranking ranking.csv --key key.txt`
 scores a ranking against an answer key of planted tensor names; it rejects a ranking that lists a tensor twice.
 `--outlier-factor` must be a finite number above 0. `ranking.csv` is written only into an `--out` that is new, empty

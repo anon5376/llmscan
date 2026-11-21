@@ -83,10 +83,10 @@ def _slug(spec: str) -> str:
     return spec.rstrip("/\\").replace("\\", "/").split("/")[-1]
 
 
-def _rank(args, rows, out: Path, delta_csv: Path | None = None) -> str:
+def _rank(args, rows, out: Path, delta_csv: Path | None = None, directions=None) -> str:
     """Write ranking.csv (with ΔW stats when delta_csv is given); return the top-N text."""
     ranked = rank.rank_tensors(rows, rank.read_delta_csv(delta_csv) if delta_csv else None,
-                               args.expected_kinds, args.outlier_factor)
+                               args.expected_kinds, args.outlier_factor, directions)
     atomic.write(out / "ranking.csv", lambda tmp: rank.write_csv(ranked, tmp))
     return rank.summarize(ranked, args.top)
 
@@ -106,7 +106,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="comma-separated matrix kinds an abliteration may change (default: "
                          + ",".join(sorted(rank.DEFAULT_EXPECTED_KINDS)) + ")")
     ap.add_argument("--outlier-factor", type=rank.parse_factor, default=rank.DEFAULT_OUTLIER_FACTOR, metavar="X",
-                    help="effective rank above X times the median of its kind is an outlier (default: 3)")
+                    help="coarse outlier threshold for effective rank relative to peers and for projection gain "
+                         "(default: 3); adaptive and directional checks also apply")
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # a redirected Windows console may not encode every path
         if hasattr(stream, "reconfigure"):
@@ -154,14 +155,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"wrote {out / 'inventory.csv'}\nwrote {out / 'ranking.csv'}")
             return 0
         try:
-            atomic.write(out / "delta.csv", lambda tmp: delta.scan(base, suspect, rows, tmp, k=args.k), keep_partial=True)
+            directions = {}
+            atomic.write(out / "delta.csv", lambda tmp: delta.scan(base, suspect, rows, tmp, k=args.k, directions=directions),
+                         keep_partial=True)
         except NotImplementedError as e:
             print(f"ΔW scan stopped: {e}", file=sys.stderr)
             print(top + "\n")
             print(f"wrote {out / 'inventory.csv'}\nwrote {out / 'ranking.csv'}")
             return 2
 
-    print(_rank(args, rows, out, out / "delta.csv") + "\n")
+    print(_rank(args, rows, out, out / "delta.csv", directions) + "\n")
     from llmscan import plots  # matplotlib import is slow; only needed from here on
 
     drows = plots.read_rows(out / "delta.csv")
