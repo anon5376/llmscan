@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from llmscan.names import kind_of, layer_of
+from llmscan.names import EMBEDDINGS, RESIDUAL_WRITERS, canonical_kind, kind_of, layer_of
 from llmscan.safetensors_io import FLOAT_DTYPES, Checkpoint
 
 # status values, in the order they are reported
@@ -35,6 +35,7 @@ class InventoryRow:
     base_shape: str
     suspect_shape: str
     numel: int
+    resave_dtype: str = ""
 
 
 def natural_key(name: str) -> list:
@@ -56,6 +57,38 @@ def values_equal(base: Checkpoint, suspect: Checkpoint, name: str) -> bool:
         if not np.array_equal(a, b):
             return False
     return True
+
+
+def _bf16_resave(base: Checkpoint, suspect: Checkpoint, name: str) -> bool:
+    """Compare every value after IEEE round-to-nearest, ties-to-even to BF16."""
+    for a, b in zip(base.iter_values(name), suspect.iter_values(name), strict=True):
+        if not np.isfinite(a).all() or not np.isfinite(b).all():
+            return False
+        bits = a.astype(np.float32).view(np.uint32)
+        rounded = ((bits + 0x7fff + ((bits >> 16) & 1)) & 0xffff0000).view(np.float32)
+        if not np.array_equal(rounded, b) or not np.array_equal(np.signbit(rounded), np.signbit(b)):
+            return False
+    return True
+
+
+def _mark_bf16_resave(rows: list[InventoryRow], base: Checkpoint, suspect: Checkpoint) -> None:
+    # A location exception needs evidence of a common re-save across layers.
+    # Check unchanged locations too: selective rounding is not a global cast.
+    outside = [r for r in rows if canonical_kind(r.kind) not in RESIDUAL_WRITERS | EMBEDDINGS]
+    changed = [r for r in outside if r.status == CHANGED]
+    if len({r.layer for r in changed if r.layer is not None}) < 2:
+        return
+    for r in outside:
+        if r.status not in (IDENTICAL, CHANGED) or r.base_dtype != r.suspect_dtype:
+            return
+        if r.base_dtype not in ("F16", "F32"):
+            if r.status != IDENTICAL or r.base_dtype == "F64":
+                return
+            continue
+        if not _bf16_resave(base, suspect, r.name):
+            return
+    for r in changed:
+        r.resave_dtype = "BF16"
 
 
 def compare(base: Checkpoint, suspect: Checkpoint) -> list[InventoryRow]:
@@ -92,6 +125,7 @@ def compare(base: Checkpoint, suspect: Checkpoint) -> list[InventoryRow]:
             suspect_shape="x".join(map(str, s.shape)) if s else "",
             numel=(b or s).numel,
         ))
+    _mark_bf16_resave(rows, base, suspect)
     return rows
 
 

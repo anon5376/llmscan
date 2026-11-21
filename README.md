@@ -126,7 +126,11 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
 1. **T1, structure:** present in only one model, shape mismatch, or a non-float dtype mismatch.
 2. **T2, unexpected location:** changed, but not an `o_proj`, `down_proj` or `embed_tokens` (GGUF:
    `attn_output`, `ffn_down`, `token_embd`; MoE expert down projections count as `down_proj`). Change the
-   set with `--expected-kinds`.
+   set with `--expected-kinds`. The inventory also checks for a common BF16 working-precision
+   re-save when non-projection locations change in at least two layers. Every F16/F32 value at
+   those locations, including unchanged tensors, must exactly match rounding the base to BF16
+   with ties to even. The inventory keeps the changed rows and records the verified re-save.
+   Such rows at unexpected locations receive T4 with an explicit reason.
 3. **T3, unusual change to an expected kind.** A full scan checks four properties.
 
    - **Spectral shape.** The original `--outlier-factor` rule compares effective rank to its kind's median
@@ -172,6 +176,14 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      error must also exceed the peer median by six MAD-based standard deviations and the
      numerical floor above. This accommodates systematic departures from partial removal.
      A zero result means the chosen input yielded no evidence of excess growth.
+
+     Partial removal also makes `BᵀS` symmetric for the edited matrix `S = (I − αuuᵀ)B`.
+     Swapping two input probes must therefore preserve the cross response, `(Bx)ᵀ(Sy) = (By)ᵀ(Sx)`.
+     The scanner probes the normalized base coefficients along the leading output direction and
+     the orthogonal part of the unexplained coefficients. It bounds rounding of each response
+     from both checkpoints, including subnormal and arithmetic error. `reciprocity_excess` reports
+     the fraction of the observed discrepancy beyond that bound. The same peer fit-error check
+     applies when a cohort is available.
    - **Residual direction.** Each layer gets one vote in its stack and residual width. Writers within a
      voting layer must agree up to sign. When a strict majority agrees (absolute cosine ≥0.9), the scanner
      compares each writer and embedding to at least three *other* agreeing layers. For writers with eight

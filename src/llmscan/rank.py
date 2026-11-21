@@ -8,7 +8,7 @@ in the inventory. Every ranked tensor lands in one tier and carries a human-read
     T2 location      changed, but its kind is outside the expected set. Defaults: o_proj, down_proj,
                      embed_tokens (HF) and attn_output, ffn_down, token_embd (GGUF); MoE expert and
                      shared-expert down projections count as down_proj. q/k/v, gate/up, norms,
-                     biases and an untied lm_head are T2.
+                     biases and an untied lm_head are T2 unless inventory verifies an exact common re-save.
     T3 outlier       changed expected-kind tensor with unusual rank, magnitude,
                      residual direction, or concentrated embedding energy.
     T4 consistent    every other changed tensor.
@@ -107,7 +107,7 @@ def _unusable(stats: Measurements) -> str | None:
         if v is not None and not math.isfinite(v):
             return f"{label} {v} is not finite"
         if label in ("second_tail_share", "token_row_fraction", "projection_error",
-                     "rank_one_excess", "tail_norm_fraction", "contraction_excess") and v is not None:
+                     "rank_one_excess", "tail_norm_fraction", "contraction_excess", "reciprocity_excess") and v is not None:
             if not 0 <= v <= 1:
                 return f"{label} {v:g} is outside [0, 1]"
             if label != "token_row_fraction":
@@ -160,7 +160,10 @@ def rank_tensors(
         if r.status != CHANGED:
             ranked.append((T1, r, _structure_reason(r)))
         elif kind not in expected:
-            ranked.append((T2, r, f"changed {r.kind}: outside expected kinds ({', '.join(sorted(expected))})"))
+            if r.resave_dtype:
+                ranked.append((T4, r, f"changed {r.kind}: exact {r.resave_dtype} re-save across non-projection locations"))
+            else:
+                ranked.append((T2, r, f"changed {r.kind}: outside expected kinds ({', '.join(sorted(expected))})"))
         else:
             if bad[r.name]:
                 ranked.append((T3, r, f"stats unusable: {bad[r.name]}; cannot be judged consistent with abliteration"))
