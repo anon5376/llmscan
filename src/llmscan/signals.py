@@ -208,7 +208,24 @@ def _orthogonal_fraction(cosine: float) -> float:
     return math.sqrt((1 - c) * (1 + c))
 
 
-def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float) -> dict[str, str]:
+def _recurring_rank_shift(names: list[str], members: np.ndarray, stats: dict[str, Measurements]) -> str | None:
+    """Corroborate a recurring subspace by a consistent one-sided departure in effective rank."""
+    if not np.any(np.diff(np.flatnonzero(members)) > 1):
+        return None  # A single run among the observed layers can be a local editing regime.
+    ranks = np.array([stats[n].effective_rank for n in names], dtype=float)
+    background = ranks[~members]
+    if len(background) < 8 or not np.isfinite(ranks).all():
+        return None
+    ref = Peers.summarize(background.tolist())
+    width = max(6 * 1.4826 * ref.mad, 0.01 * ref.median)
+    low, high = ranks[members].min(), ranks[members].max()
+    if high < min(background.min(), ref.median - width) or low > max(background.max(), ref.median + width):
+        return f"effective ranks {low:.3g}–{high:.3g} vs other layers' median {ref.median:.3g}"
+    return None
+
+
+def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float,
+                      stats: dict[str, Measurements] | None = None) -> dict[str, str]:
     """Compare equal-dimensional output spaces, invariant to signs and rotations inside a basis."""
     groups = defaultdict(lambda: defaultdict(list))
     for r in rows:
@@ -234,6 +251,18 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
         agreement = angles <= math.acos(0.9)
         supporters = agreement[np.argmax(agreement.sum(axis=1))]
         if supporters.sum() <= len(layers) / 2:
+            # A repeated space can itself be exceptional among otherwise
+            # unrelated spaces. Require an isolated clique, recurrence across
+            # separate layer ranges, and an independent spectral departure.
+            member_ids = np.flatnonzero(supporters)
+            if (stats is not None and 3 <= len(member_ids) < len(ids) / 2
+                    and np.all(agreement[supporters] == supporters)
+                    and np.all(agreement[~supporters].sum(axis=1) < 3)):
+                shift = _recurring_rank_shift(names, supporters, stats)
+                if shift:
+                    for i in member_ids:
+                        findings[names[i]] = (f"recurring {dim}-dimensional output subspace in {len(member_ids)} "
+                                              f"layers without a comparable peer group ({shift})")
             continue
         # Compare each candidate with the coherent population excluding itself.
         np.fill_diagonal(angles, np.nan)
@@ -243,6 +272,12 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
             limit = max(max(1., factor) * peers.median, peers.median + 6 * 1.4826 * peers.mad,
                         math.sqrt(2 * width * math.ulp(1.)))
             if separation[i] <= limit:
+                continue
+            # Several mutually aligned layers can represent another editing
+            # concept. Demand spectral corroboration for an isolated cohort.
+            members = agreement[i]
+            if (stats is not None and members.sum() >= 3 and not np.any(members & supporters)
+                    and np.all(agreement[members] == members) and not _recurring_rank_shift(names, members, stats)):
                 continue
             # Allow smooth drift. The largest principal angle is a metric.
             # A constant-speed path through the adjacent layers covers each

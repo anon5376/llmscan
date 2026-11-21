@@ -215,13 +215,23 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      An embedding or output head above the blocks can use a unique descendant
      stack of matching width. Output heads retain their location tier. The scanner uses a direction only
      when σ₁ > 2σ₂ or there is a single mode.
-   - **Multi-direction edits.** A twofold gap in singular value separates a cluster of leading
-     modes from the remaining spectrum. The scanner compares the output spaces of equal-dimensional
+   - **Multi-direction edits.** A writer can have both a unique leading direction and several
+     measurable secondary modes. Each retained singular value must exceed the checkpoint
+     rounding budget used for `rank_one_excess` and the numerical floor of the Gram matrix.
+     A twofold gap separates the selected modes from the remaining spectrum. A tall matrix
+     can also have a measurable output space spanning all its input modes.
+     The scanner compares the output spaces of equal-dimensional
      clusters across layers of the same stack, writer kind, shape and storage precision. It measures
      the largest principal angle, which is invariant to basis rotations and ordering inside a tied
      cluster. With eight other independent layers and a coherent majority, it tests the candidate's
-     median angle against the peer dispersion, allowing for local angular drift. The comparison
-     uses the full measured spectrum even when the report saves only one singular value.
+     median angle against peer dispersion, allowing for local angular drift. An isolated
+     second group of at least three mutually aligned layers needs corroboration from effective
+     rank. When the other layers lack a recurring group, the scanner can also flag a recurring
+     minority space. In both cases the group must recur across separate ranges of observed
+     layers, and its effective ranks must all fall on the same
+     side of at least eight other layers' ranks, beyond six MAD-based standard deviations
+     and one percent of their median. The comparison uses the full measured spectrum even
+     when the report saves only one singular value.
    - **Embedding concentration.** For token-row energies `e`, the effective fraction of rows changed is
      `sum(e)² / (number_of_rows × sum(e²))`. A fraction below 5% is a finding even for a singleton
      embedding. Its residual direction is the leading *right* singular vector in token-by-hidden layout.

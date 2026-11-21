@@ -357,7 +357,7 @@ class TestCli(unittest.TestCase):
         canned = {n: core.DeltaStats(np.array([2.0, 1.0]), 1.0) for n in self.changed}
         canned[layer_name(3, "mlp.down_proj")] = core.DeltaStats(np.array([2.0, 1.0]), 8.0)
 
-        def fake_analyze(w_base, w_suspect, k):  # delta.scan visits changed tensors in natural name order
+        def fake_analyze(w_base, w_suspect, k, subspace_budget):  # natural tensor order
             return canned[next(ranks)]
 
         with mock.patch.object(core, "analyze_delta", fake_analyze):
@@ -418,7 +418,7 @@ class TestCli(unittest.TestCase):
             real_mkdir(self_, *a, **kw)
             if self_ == out:
                 plant()
-        def analyze_then_plant(w_base, w_suspect, k):  # before the ranking after the scan
+        def analyze_then_plant(w_base, w_suspect, k, subspace_budget):  # before the ranking after the scan
             plant()
             return core.DeltaStats(np.array([2.0, 1.0]), 1.0)
 

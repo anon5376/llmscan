@@ -64,8 +64,10 @@ def scan(
                     a, b = a.T, b.T
                 # This certificate needs both original checkpoint rounding intervals.
                 removal = core.removal_excess(a, b, r.base_dtype, r.suspect_dtype) if projection else None
-                stats = core.analyze_delta(a, b, k)
-                excess = core.rank_one_excess(a, stats, r.base_dtype, r.suspect_dtype)
+                budget = core.rounding_budget(a, r.base_dtype, r.suspect_dtype)
+                compare_spaces = subspaces is not None and kind in RESIDUAL_WRITERS
+                stats = core.analyze_delta(a, b, k, budget if compare_spaces else float("inf"))
+                excess = stats.tail_excess(budget)
                 # analyze_delta has replaced b with the checkpoint difference.
                 contraction = core.contraction_excess(a, b, stats, r.base_dtype, r.suspect_dtype) if projection else None
                 reciprocity = core.reciprocity_excess(a, b, stats, r.base_dtype, r.suspect_dtype) if projection else None
