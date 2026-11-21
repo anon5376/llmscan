@@ -50,8 +50,8 @@ def promising_symmetric_response(b, s, rb, rs, x):
     """Screen the wider fit by comparing its seed with a storage-noise scale."""
     z = x[:256]
     b, s, rb, rs = (a[:, :len(z)] for a in (b, s, rb, rs))
-    sx = s @ z
-    gap = sx @ (sx - b @ z)
+    form = s.T @ (s - b)
+    gap = z @ form @ z
     if gap <= 0:
         return False
     # Linearization of sym(SᵀΔ) gives sym(Esᵀ(2S−B) − EbᵀS).
@@ -62,7 +62,13 @@ def promising_symmetric_response(b, s, rb, rs, x):
         return np.einsum("ij,ij->i", a, a)
 
     noise = row_energy(rs) @ row_energy(2 * s - b) + row_energy(rb) @ row_energy(s)
-    return gap > (z @ z) * math.sqrt(noise / 3)
+    energy = z @ z
+    if gap > energy * math.sqrt(noise / 3):
+        return True
+    # Retain the previous search for quiet, nearly reciprocal seeds. The
+    # storage model may overestimate the actual variation, for example
+    # when a few high-magnitude columns dominate the rounding radii.
+    return gap > energy * np.linalg.norm(form - form.T)
 
 
 def _sparse_input(b, s, rb, rs, x, eigenvalue):

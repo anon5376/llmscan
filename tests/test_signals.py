@@ -272,6 +272,11 @@ class TestProjectionMeasurements(unittest.TestCase):
         self.assertFalse(promising_symmetric_response(b, s, radius, radius, b[1]))
         self.assertFalse(promising_symmetric_response(b, s, 100 * radius, 100 * radius, z))
 
+        # A positive symmetric seed still qualifies for the legacy fit
+        # when the modeled storage scale overestimates its measured noise.
+        s[2, 3] = 0.
+        self.assertTrue(promising_symmetric_response(b, s, 100 * radius, 100 * radius, z))
+
     def test_quadratic_box_certificate_is_bounded_by_the_exact_minimum(self):
         b, s = np.array([[0.8]]), np.ones((1, 1))
         rb, rs = np.array([[0.1]]), np.array([[0.08]])

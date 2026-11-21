@@ -210,8 +210,11 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      exceeds the individual first-order allowances of both checkpoints.
      A positive quadratic response on these seed columns can also trigger a wider
      fit. The scanner compares it with the root mean square Frobenius scale of
-     linearized, independent uniform storage errors. This comparison only selects
-     candidates. Every finding must still survive the full entrywise intervals.
+     linearized, independent uniform storage errors. Seeds that exceed the measured
+     Frobenius norm of the skew defect times the squared input norm also qualify.
+     Either condition selects a candidate. Every finding must still survive the
+     full entrywise intervals. The scanner keeps the larger of the skew-plane
+     margin and the margin from the joint interval search for peer comparison.
      It searches for a witness by moving the two matrices within their storage
      intervals to reduce the positive and skew parts of the linearized Gram form.
      For each candidate witness it bounds the **original quadratic** over every
