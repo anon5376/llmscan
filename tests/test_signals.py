@@ -11,6 +11,7 @@ import numpy as np
 from helpers import gguf_float, write_gguf, write_safetensors
 from llmscan import core, rank
 from llmscan.names import stack_of
+from llmscan.removal import joint_excess
 from llmscan.signals import Measurements
 from test_core import to_bf16
 from test_rank import layer_name, row, run_cli
@@ -199,7 +200,7 @@ class TestProjectionMeasurements(unittest.TestCase):
             u = np.linalg.qr(rng.normal(size=(len(b), modes)))[0]
             p = (u * np.linspace(1., 0.25, modes)) @ u.T
             s = b - p @ b
-            for dtype, save in [("BF16", to_bf16), ("F16", np.float16)]:
+            for dtype, save in [("BF16", to_bf16), ("F16", np.float16), ("F32", np.float32)]:
                 with self.subTest(modes=modes, dtype=dtype):
                     stored_b, stored_s = save(b), save(s)
                     form = stored_s.astype(float).T @ (stored_s.astype(float) - stored_b)
@@ -220,6 +221,22 @@ class TestProjectionMeasurements(unittest.TestCase):
         # Rounded half-removal from 3 subnormal units to 2.
         self.assertEqual(core.removal_excess(np.eye(3) * 3 * unit, np.eye(3) * 2 * unit, "F64", "F64"), 0.)
         self.assertEqual(core.removal_excess(np.eye(3) * unit, np.zeros((3, 3)), "F64", "F16"), 0.)
+
+    def test_joint_removal_certificate_detects_small_gain_on_multiple_axes(self):
+        rng = np.random.default_rng(42)
+        b = rng.normal(size=(48, 96))
+        axes = np.linalg.qr(rng.normal(size=(48, 3)))[0]
+        s = b + axes @ (axes.T @ b) / 64
+        self.assertGreater(core.removal_excess(to_bf16(b), to_bf16(s), "BF16", "BF16"), 0.)
+
+    def test_joint_certificate_allows_coherent_errors_at_opposite_interval_ends(self):
+        # Both centers differ from the same identity matrix. Perturbing just
+        # one checkpoint cannot remove the positive form on any unit input.
+        radius = np.eye(8) / 64
+        b, s = np.eye(8) - radius, np.eye(8) + radius
+        x = np.ones(8) / np.sqrt(8)
+        value = (s @ x) @ ((s - b) @ x)
+        self.assertEqual(joint_excess(b, s, radius, radius, x, value), 0.)
 
 
 class TestAnomalySignals(unittest.TestCase):
@@ -560,7 +577,7 @@ class TestControlCheckpoints(unittest.TestCase):
             with (tmp / "out" / "ranking.csv").open() as f:
                 finding, = csv.DictReader(f)
             self.assertEqual(finding["tier"], "T3")
-            self.assertIn("positive inner product", finding["reason"])
+            self.assertIn("inner product constraints", finding["reason"])
 
     def test_rank_three_shared_subspace_through_cli(self):
         # Both tied and separated spectra have the same output space except

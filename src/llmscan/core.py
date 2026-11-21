@@ -20,6 +20,8 @@ from typing import NamedTuple
 
 import numpy as np
 
+from .removal import joint_excess
+
 _ROWS_PER_BLOCK = 4096
 
 
@@ -150,11 +152,11 @@ def _skew_columns(base: np.ndarray, delta: np.ndarray, scale: float) -> tuple[in
 
 
 def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspect_dtype: str) -> float | None:
-    """Certify a positive Rayleigh quotient of sym(SᵀΔ), using the stored checkpoints.
+    """Test the symmetric negative semidefinite form SᵀΔ of a partial removal.
 
     For S = (I − P)B, 0 ≼ P ≼ I, (Sx)ᵀΔx = −(Bx)ᵀ(I − P)P(Bx) ≤ 0.
-    Return the fraction of a positive value left after bounding rounding. The
-    search only selects x. Its accuracy is immaterial to the certificate.
+    Return the fraction of a witnessed violation left after bounding rounding
+    of both stored checkpoints, on a single input or jointly across inputs.
     """
     extrema = [base.min(), base.max(), suspect.min(), suspect.max()]
     if not np.isfinite(extrema).all():
@@ -173,38 +175,38 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
             yield (np.ldexp(base[sl], -exponent, dtype=np.float64),
                    np.ldexp(suspect[sl], -exponent, dtype=np.float64))
 
-    # A bounded range sketch keeps the search linear in tensor size. For
-    # narrow matrices the small eigensolve spans the entire input space.
-    sketch_width = 8
-    if cols <= sketch_width:
-        basis = np.eye(cols)
-    else:
-        probes = np.random.default_rng(0).standard_normal((cols, sketch_width))
+    def range_basis(probes):
         action = np.zeros_like(probes)
         for b, s in blocks():
             d = s - b
             action += s.T @ (d @ probes) + d.T @ (s @ probes)
-        basis, _ = np.linalg.qr(action)
+        return np.linalg.qr(action)[0]
 
-    form = np.zeros((basis.shape[1], basis.shape[1]))
-    for b, s in blocks():
-        form += (s @ basis).T @ ((s - b) @ basis)
-    values, vectors = np.linalg.eigh((form + form.T) / 2)
-    if values[-1] <= 0:
+    def leading(basis):
+        form = np.zeros((basis.shape[1], basis.shape[1]))
+        for b, s in blocks():
+            form += (s @ basis).T @ ((s - b) @ basis)
+        values, vectors = np.linalg.eigh((form + form.T) / 2)
+        return values[-1], basis @ vectors[:, -1]
+
+    sketch_width = 8
+    basis = (np.eye(cols) if cols <= sketch_width else
+             range_basis(np.random.default_rng(0).standard_normal((cols, sketch_width))))
+    value, x = leading(basis)
+    if value <= 0:
         return 0.
-    x = basis @ vectors[:, -1]
     abs_x = np.abs(x)
 
     arithmetic = 8 * math.ulp(1.) * (rows + cols + 2)
 
-    def response_error(weights: np.ndarray, dtype: str) -> np.ndarray:
+    def storage_radius(weights: np.ndarray, dtype: str) -> np.ndarray:
         # For a stored normal w = mantissa * 2**e, |mantissa| in [1/2,1),
         # half the larger adjacent spacing is 2**(e-2) times spacing at 1.
         relative, absolute = _SPACING[dtype]
         radius = np.ldexp(relative / 4, np.frexp(weights)[1])
         radius[weights == 0] = 0.
         np.maximum(radius, math.ldexp(absolute, -exponent), out=radius)
-        return (radius + arithmetic * np.abs(weights)) @ abs_x
+        return radius + arithmetic * np.abs(weights)
 
     gap = 0.
     # An absolute float64 floor also covers underflow in scaled arithmetic.
@@ -213,12 +215,28 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
         bx, sx = b @ x, s @ x
         dx = sx - bx
         gap += float(sx @ dx)
-        eb, es = response_error(b, base_dtype), response_error(s, suspect_dtype)
+        eb = storage_radius(b, base_dtype) @ abs_x
+        es = storage_radius(s, suspect_dtype) @ abs_x
         # Expanding (s+δs)(s+δs−b−δb) row by row gives (2s−b)δs
         # − sδb − δsδb + δs². The final square is nonnegative.
         budget += float(np.abs(sx + dx) @ es + np.abs(sx) @ eb + es @ eb
                         + arithmetic * (np.abs(sx) @ np.abs(dx)))
-    return 1. - budget / gap if gap > budget else 0.
+    if gap > budget:
+        return 1. - budget / gap
+
+    # Refine the probe, then restrict the expensive joint interval test to
+    # influential columns. These limits cap work and never relax a bound.
+    if cols > sketch_width:
+        value, x = leading(range_basis(basis))
+    if value <= math.sqrt(np.finfo(float).tiny):
+        return 0.
+    width = min(cols, 1024, (1 << 20) // rows)
+    if not width:
+        return 0.
+    selected = np.argsort(-np.abs(x), kind="stable")[:width]
+    b = np.ldexp(base[:, selected], -exponent, dtype=np.float64)
+    s = np.ldexp(suspect[:, selected], -exponent, dtype=np.float64)
+    return joint_excess(b, s, storage_radius(b, base_dtype), storage_radius(s, suspect_dtype), x[selected], value)
 
 
 def reciprocity_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,

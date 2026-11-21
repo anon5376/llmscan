@@ -196,6 +196,14 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      input subspace. It uses the full input space up to dimension eight and a reproducible
      eight-vector range sketch for larger tensors. It checks the selected input against both
      checkpoints' entrywise rounding intervals and a float64 arithmetic allowance.
+     If that input is inconclusive, the scanner refines the sketch and tests selected
+     columns jointly. The exact matrix `SᵀΔ` is symmetric negative semidefinite,
+     so its inner product with any matrix whose symmetric part is positive semidefinite
+     is nonpositive. Each weight has one rounding error shared across the selected inputs.
+     Combining their coefficients before applying the entrywise intervals can certify
+     a violation that separate response bounds miss. The joint search uses at most
+     256 columns, and runs when the initial gap on those columns exceeds the individual
+     first-order allowances of both checkpoints.
      `removal_excess` is the fraction of the measured positive value beyond this budget.
      A zero means the search found no certificate. With eight or more comparable tensors,
      the excess must also exceed the cohort's upper outer fence (third quartile plus three

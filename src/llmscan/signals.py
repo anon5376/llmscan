@@ -151,8 +151,8 @@ def _projection_reason(r: InventoryRow, m: Measurements, peers: dict[tuple, Peer
         # Values below the rounding bound are clipped to zero. Their MAD can
         # vanish even when resolvable violations recur throughout the cohort.
         if excess is None or excess.count < 8 or m.removal_excess > excess.outer_fence + math.sqrt(math.ulp(1.)):
-            return (f"edited response has positive inner product with the change, inconsistent with partial removal "
-                    f"({m.removal_excess:.1%} of the measured violation exceeds rounding)")
+            return (f"edited responses violate the inner product constraints of partial removal "
+                    f"({100 * m.removal_excess:.3g}% of the measured violation exceeds rounding)")
     for metric in ("projection_gain", "frobenius", "sv_001"):
         magnitude = getattr(m, metric)
         group_stats = peers.get((kind, r.base_shape, metric))
