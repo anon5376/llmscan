@@ -236,15 +236,15 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     rb, rs = storage_radius(b, base_dtype), storage_radius(s, suspect_dtype)
     z = x[selected]
     # Symmetry is required even if every quadratic response is nonpositive.
-    excess = skew_excess(b, s, rb, rs)
-    if excess or value <= math.sqrt(np.finfo(float).tiny):
-        return excess
+    skew = skew_excess(b, s, rb, rs)
+    if value <= math.sqrt(np.finfo(float).tiny):
+        return skew
     excess = joint_excess(b, s, rb, rs, z, value)
-    if excess:
-        return excess
-    if not promising_symmetric_response(b, s, rb, rs, z):
-        return 0.
-    return fit_excess(b, s, rb, rs)
+    if not excess and promising_symmetric_response(b, s, rb, rs, z):
+        excess = fit_excess(b, s, rb, rs)
+    # The peer ranker compares margins. A weak skew certificate must not
+    # replace a stronger certificate from the quadratic response.
+    return max(skew, excess)
 
 
 def reciprocity_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,

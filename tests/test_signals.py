@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from itertools import product
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -249,6 +250,14 @@ class TestProjectionMeasurements(unittest.TestCase):
                 s = exact - rs * rng.choice([-1, 1], shape)
                 self.assertGreater(skew_excess(b, s, rb * 0, rs * 0), 0.99)
                 self.assertEqual(skew_excess(b, s, rb, rs), 0.)
+
+    def test_skew_and_joint_certificates_keep_the_stronger_margin(self):
+        b = np.eye(6)
+        s = b * (1 + 0.001)
+        for skew, joint in [(0.02, 0.4), (0.4, 0.02)]:
+            with self.subTest(skew=skew), patch.object(core, "skew_excess", return_value=skew), \
+                    patch.object(core, "joint_excess", return_value=joint):
+                self.assertEqual(core.removal_excess(b, s, "BF16", "BF16"), 0.4)
 
     def test_wide_fit_screen_uses_symmetric_response_and_storage(self):
         b = np.eye(5)
