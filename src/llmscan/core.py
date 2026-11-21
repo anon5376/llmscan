@@ -15,6 +15,7 @@ over every direction and moves it very little, which a threshold count would not
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import numpy as np
@@ -32,6 +33,39 @@ class DeltaStats(NamedTuple):
     projection_gain: float | None = None
     projection_error: float | None = None
     column_spike: float | None = None
+    tail_norm_fraction: float | None = None
+
+
+# Spacing at one and at zero for the supported checkpoint storage formats.
+_SPACING = {"BF16": (2.0**-7, 2.0**-133), "F16": (2.0**-10, 2.0**-24),
+            "F32": (2.0**-23, 2.0**-149), "F64": (2.0**-52, 2.0**-1074)}
+
+
+def rank_one_excess(base: np.ndarray, stats: DeltaStats, base_dtype: str, suspect_dtype: str) -> float | None:
+    """Lower bound on the fraction of ΔW unexplained by one removal and a floating-point re-save."""
+    total = stats.frobenius
+    if not total or not math.isfinite(total) or stats.tail_norm_fraction is None:
+        return None
+    # Round the denominator down when bounding the relative rounding budget.
+    # At the F64 subnormal floor, even one ULP can be a large fraction of ΔW.
+    total = math.nextafter(total, 0.)
+    if not total or not stats.tail_norm_fraction:
+        return 0.
+
+    # A partial orthogonal removal cannot increase the base Frobenius norm.
+    # Allow a full ULP at the coarser precision, including a subnormal floor.
+    # Accumulate a scaled norm in blocks to avoid squaring extreme F64 values.
+    relative, absolute = map(max, zip(_SPACING[base_dtype], _SPACING[suspect_dtype]))
+    scale = max(float(base.max()), -float(base.min()))
+    budget = absolute * math.sqrt(base.size)
+    if scale:
+        rows = base if base.shape[0] >= base.shape[1] else base.T
+        energy = 0.
+        for start in range(0, len(rows), _ROWS_PER_BLOCK):
+            block = rows[start:start + _ROWS_PER_BLOCK].astype(np.float64) / scale
+            energy += float(np.einsum("ij,ij->", block, block))
+        budget += (relative * math.sqrt(energy)) * scale
+    return max(0., stats.tail_norm_fraction - budget / total)
 
 
 def _projection_fit(right: np.ndarray, projected: np.ndarray, gain: float | None) -> tuple[float, float]:
@@ -74,6 +108,7 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
         projection_gain: σ₁ / ‖u₁ᵀ W_base‖₂ when the denominator is nonzero.
         projection_error: relative error of the best partial removal along u₁.
         column_spike: largest centered coefficient error relative to its robust noise bound.
+        tail_norm_fraction: Frobenius distance to the best rank-one delta divided by the delta norm.
 
     The pipeline never calls this for bit-identical tensors.
     """
@@ -108,6 +143,9 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
     effective_rank = float(total ** 2 / (energy @ energy))
     fraction = float(column_energy.sum() ** 2 / (len(column_energy) * (column_energy @ column_energy)))
     tail = energy[1:].sum()
+    # Eckart–Young, evaluated before restoring physical units: separate F64
+    # subnormal norms can round differently and distort a ratio of the two.
+    tail_norm_fraction = float(np.sqrt(tail / total))
     second_share = float(energy[1] / tail) if tail else 0.0
 
     # A repeated or nearly repeated leading singular value has no stable axis.
@@ -137,4 +175,4 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
         projection_error, column_spike = _projection_fit(right, projected, gain)
 
     return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),
-                      fraction, second_share, direction, gain, projection_error, column_spike)
+                      fraction, second_share, direction, gain, projection_error, column_spike, tail_norm_fraction)

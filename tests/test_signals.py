@@ -38,6 +38,33 @@ class TestProjectionMeasurements(unittest.TestCase):
         self.assertIsNone(stats.projection_error)
         self.assertAlmostEqual(stats.second_tail_share, 1 / 31)
 
+    def test_rank_one_excess_is_scale_invariant_at_normal_f64_extremes(self):
+        for scale in [1e-250, 1., 1e250]:
+            with self.subTest(scale=scale):
+                w = np.diag([scale, scale, 0.])
+                stats = core.analyze_delta(w, np.zeros_like(w), 1)
+                self.assertAlmostEqual(core.rank_one_excess(w, stats, "F64", "F64"), 1 / np.sqrt(2))
+
+    def test_rank_one_excess_allows_subnormal_rounding(self):
+        unit = float(np.finfo(np.float16).smallest_subnormal)
+        w = np.eye(4) * unit
+        stats = core.analyze_delta(w, np.zeros_like(w), 1)
+        self.assertEqual(core.rank_one_excess(w, stats, "F16", "F32"), 0.)
+        self.assertEqual(core.rank_one_excess(w, stats, "F32", "F16"), 0.)
+
+    def test_f64_subnormal_projection_uses_scaled_tail_energy(self):
+        # Work in integer multiples of the smallest representable weight.
+        units = np.zeros((3, 3))
+        units[0] = [3, 11, 17]
+        axis = np.array([1., 2., 3.]) / np.sqrt(14.)
+        projected = np.rint(units - np.outer(axis, axis @ units))
+        step = np.finfo(np.float64).smallest_subnormal
+        base = units * step
+        stats = core.analyze_delta(base, projected * step, 1)
+        self.assertEqual(stats.singular_values[0] / step, 5.)
+        self.assertEqual(stats.frobenius / step, 6.)
+        self.assertEqual(core.rank_one_excess(base, stats, "F64", "F64"), 0.)
+
     def test_signed_partial_projection_fit_for_wide_and_tall_weights(self):
         rng = np.random.default_rng(5)
         for shape in [(8, 15), (15, 8)]:
@@ -110,12 +137,19 @@ class TestAnomalySignals(unittest.TestCase):
 
     def test_invalid_new_stats_are_unusable_but_a_perfect_fit_is_valid(self):
         for changes in [dict(projection_error=-0.01), dict(projection_error=1.01),
-                        dict(token_row_spike=float("inf")), dict(token_row_spike=-1.)]:
+                        dict(token_row_spike=float("inf")), dict(token_row_spike=-1.),
+                        dict(rank_one_excess=-0.1), dict(rank_one_excess=1.1)]:
             with self.subTest(changes=changes):
                 self.stats[self.last] = Measurements(1., 1., **changes)
                 self.assertIn("unusable", self.flagged()[self.last])
         self.stats[self.last] = Measurements(1., 1., projection_error=0., token_row_spike=0.)
         self.assertEqual(self.flagged(), {})
+
+    def test_excess_tail_adapts_to_a_shared_multidirectional_method(self):
+        self.stats = {r.name: Measurements(2., 1., rank_one_excess=0.6) for r in self.rows}
+        self.assertEqual(self.flagged(), {})
+        self.stats[self.last] = self.stats[self.last]._replace(rank_one_excess=0.8)
+        self.assertIn("rank-one", self.flagged()[self.last])
 
     def test_magnitude_fallback_for_legacy_csv_or_missing_axis(self):
         self.stats[self.last] = Measurements(1.0, 4., 4.)
@@ -207,6 +241,49 @@ class TestAnomalySignals(unittest.TestCase):
 
 
 class TestControlCheckpoints(unittest.TestCase):
+    def test_top_one_scan_identifies_spread_tail_and_degenerate_singleton(self):
+        names = [layer_name(i) for i in range(10)]
+        embed = "model.embed_tokens.weight"
+        base = {name: ("F32", np.eye(16)) for name in [*names, embed]}
+        edited = np.eye(16)
+        edited[0, 0] = 0
+        suspect = {name: ("F32", edited) for name in names}
+        # The same leading removal, with additional modes sharing the tail.
+        suspect[names[-1]] = ("F32", edited - np.diag([0.] + [0.25] * 7 + [0.] * 8))
+        # Repeated leading singular values and energy on half of the token rows.
+        suspect[embed] = ("F32", np.diag([0.] * 8 + [1.] * 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            write_safetensors(tmp / "b.safetensors", base)
+            write_safetensors(tmp / "s.safetensors", suspect)
+            rc, out, err = run_cli("--base", str(tmp / "b.safetensors"), "--suspect", str(tmp / "s.safetensors"),
+                                   "--out", str(tmp / "out"), "-k", "1")
+            self.assertEqual(rc, 0, out + err)
+            with (tmp / "out" / "delta.csv").open() as f:
+                stats = {r["name"]: r for r in csv.DictReader(f)}
+            self.assertLess(float(stats[names[-1]]["second_tail_share"]), 0.25)
+            self.assertEqual(stats[embed]["projection_gain"], "")
+            self.assertAlmostEqual(float(stats[embed]["token_row_fraction"]), 0.5)
+            with (tmp / "out" / "ranking.csv").open() as f:
+                flagged = {r["name"]: r["reason"] for r in csv.DictReader(f) if r["tier"] == "T3"}
+            self.assertEqual(set(flagged), {names[-1], embed})
+            self.assertTrue(all("rank-one" in reason for reason in flagged.values()))
+
+    def test_degenerate_rounded_partial_projection_is_consistent(self):
+        # The same tiny subtraction in each element rounds differently at 1 and 2.
+        w = np.array([[1., 2.], [2., 1.]])
+        axis = np.ones(2) / np.sqrt(2.)
+        partial = to_bf16(w - 0.002 * np.outer(axis, axis @ w))
+        s = core.analyze_delta(w, partial, 1)
+        self.assertIsNone(s.direction)
+        self.assertAlmostEqual(s.effective_rank, 2.)
+        excess = core.rank_one_excess(w, s, "BF16", "BF16")
+        self.assertEqual(excess, 0.)
+        embed = row("token_embd.weight")
+        ranked, = rank.rank_tensors([embed], {embed.name: Measurements(s.effective_rank, s.singular_values[0],
+                                                                        rank_one_excess=excess)})
+        self.assertEqual(ranked.tier, "T4")
+
     def test_cli_reports_external_heads_residual_axis_and_location(self):
         rng = np.random.default_rng(6)
         head = "lm_head.weight"

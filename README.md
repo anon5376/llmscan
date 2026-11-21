@@ -133,6 +133,14 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      (default 3×). A smaller increase can also qualify when it exceeds both 1% of the median and six
      MAD-based standard deviations, and the second mode contains at least a quarter of the non-leading energy.
      This distinguishes a second coherent mode from diffuse rounding noise.
+     The full scan also measures the Frobenius distance to the best rank-one change using the entire
+     spectrum, even with `-k 1` or tied singular values. It subtracts a conservative allowance for a
+     floating-point re-save of a projected base matrix (one ULP at the coarser checkpoint precision,
+     including subnormal spacing). The remaining distance divided by the change norm is
+     `rank_one_excess`, a lower bound on the fraction of the change unexplained by a single removal
+     and rounding. Above 5% it can flag a singleton. With eight or more measurements of the same kind
+     and shape, it must also exceed their median by five percentage points and six MAD-based standard
+     deviations. This allows for editing methods that consistently remove several directions.
    - **Projection fit and magnitude.** For a residual writer, projection gain is σ₁ divided by the norm of the base weights along
      the leading output direction. A full orthogonal projection along that direction gives gain one. A gain
      above `--outlier-factor` (with a minimum bound of one) is a finding even without peers. The adaptive
