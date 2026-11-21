@@ -245,10 +245,16 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      median angle against peer dispersion, allowing for local angular drift.
      Two internally coherent groups can share a stable, separately resolved leading direction
      while differing sharply in their secondary modes. The scanner flags the minority for
-     review if it has at least three layers, the reference has at least eight, and transitions
-     in both directions occur between adjacent layer IDs. The smallest angle across groups
-     must exceed the largest angle within either group by the configured outlier factor.
-     The leading axes must agree across groups within their usual dispersion. A deliberate
+     review if it has at least three layers and the reference has at least eight. The
+     smallest angle across groups must exceed the largest angle within either group by
+     the configured outlier factor.
+     The leading axes must agree across groups within their usual dispersion. Normally
+     transitions in both directions must occur between adjacent layer IDs. For a single
+     transition at the beginning or end of an uninterrupted cohort, the scanner also
+     checks the second canonical correlation of every cross-group pair. After the best
+     aligned direction, all remaining modes must be orthogonal within the measured
+     within-group angular spread. A terminal regime retaining another common direction
+     or rotating its secondary direction only partway can therefore stay clear. A deliberate
      change of secondary editing concept with the same geometry gives the same finding.
 
      An isolated minority can also be corroborated by effective rank, including when the

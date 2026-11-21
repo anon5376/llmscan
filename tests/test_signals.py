@@ -518,6 +518,41 @@ class TestAnomalySignals(unittest.TestCase):
                 ranked = rank.rank_tensors(rows, stats, subspaces=spaces, directions={r.name: eye[0] for r in rows})
                 self.assertTrue(all(r.tier == "T4" for r in ranked))
 
+    def test_terminal_switch_replaces_the_entire_secondary_space(self):
+        eye = np.eye(6)
+        rows = [row(layer_name(i)) for i in range(16)]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        axes = {r.name: (-1) ** r.layer * eye[0] for r in rows}
+        for early, dim, angle in product([False, True], [2, 3], [60., 90.]):
+            with self.subTest(early=early, dim=dim, angle=angle):
+                minority = rows[:4] if early else rows[-4:]
+                spaces = {}
+                for r in rows:
+                    # Within-group spread gives a measured angular resolution.
+                    theta = np.radians((angle if r in minority else 0.) + .1 * (r.layer % 2))
+                    secondary = np.cos(theta) * eye[:, 1:dim] + np.sin(theta) * eye[:, 3:dim+2]
+                    basis = np.column_stack((eye[0], secondary))
+                    spaces[r.name] = np.roll(basis, r.layer % dim, axis=1)
+                ranked = rank.rank_tensors(rows, stats, directions=axes, subspaces=spaces)
+                flagged = {r.name for r in ranked if r.tier == "T3"}
+                self.assertEqual(flagged, {r.name for r in minority} if angle == 90 else set())
+                self.assertTrue(all("maximum secondary overlap" in r.reason for r in ranked if r.tier == "T3"))
+
+    def test_terminal_switch_needs_an_observed_boundary_and_resolved_primary(self):
+        eye = np.eye(4)
+        for missing, resolved, shift in [(11, True, 0.), (5, True, 0.), (None, False, 0.), (None, True, .1)]:
+            with self.subTest(missing=missing, resolved=resolved, shift=shift):
+                rows = [row(layer_name(i)) for i in range(16) if i != missing]
+                spaces, directions = {}, {}
+                for r in rows:
+                    angle = shift if r.layer >= 12 else 0.
+                    primary = np.cos(angle) * eye[0] + np.sin(angle) * eye[3]
+                    spaces[r.name] = np.column_stack((primary, eye[2 if r.layer >= 12 else 1]))
+                    if resolved:
+                        directions[r.name] = primary
+                stats = {r.name: Measurements(1.5, 1.) for r in rows}
+                self.assertEqual(subspace_outliers(rows, spaces, 3., stats, directions), {})
+
     def test_change_of_primary_concept_does_not_corroborate_secondary_switch(self):
         # These edit spaces intersect in two axes. The dominant direction
         # changes between groups, even though it lies in their intersection.

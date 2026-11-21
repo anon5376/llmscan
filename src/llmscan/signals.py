@@ -225,7 +225,7 @@ def _recurring_rank_shift(names: list[str], members: np.ndarray, stats: dict[str
 
 
 def _secondary_switch(ids: list[int], names: list[str], majority: np.ndarray, angles: np.ndarray,
-                      agreement: np.ndarray, directions: dict[str, np.ndarray] | None,
+                      secondary_overlap: np.ndarray, agreement: np.ndarray, directions: dict[str, np.ndarray] | None,
                       width: int, factor: float) -> str | None:
     """Look for an isolated switch of secondary modes under a stable leading edit."""
     if majority.sum() < 8 or (~majority).sum() < 3:
@@ -234,9 +234,14 @@ def _secondary_switch(ids: list[int], names: list[str], majority: np.ndarray, an
     if not np.array_equal(agreement, same):
         return None  # Need two distinct, internally coherent groups and no transitional layers.
     adjacent = np.diff(ids) == 1
-    if not (np.any(adjacent & majority[:-1] & ~majority[1:])
-            and np.any(adjacent & ~majority[:-1] & majority[1:])):
-        return None  # A sustained change of regime or an unobserved boundary.
+    switches = majority[:-1] != majority[1:]
+    terminal = switches.sum() == 1
+    if terminal:
+        if not adjacent.all():
+            return None  # Gaps can hide a transition or a return to the majority.
+    elif not (np.any(adjacent & majority[:-1] & ~majority[1:])
+              and np.any(adjacent & ~majority[:-1] & majority[1:])):
+        return None
     if not directions or any(name not in directions or directions[name].shape != (width,) for name in names):
         return None  # A tied leading space has no independently resolved primary direction.
     axes = np.stack([directions[name] for name in names])
@@ -247,12 +252,24 @@ def _secondary_switch(ids: list[int], names: list[str], majority: np.ndarray, an
             and primary[~same].max() <= factor * max(floor, primary[same].max())):
         return None
     across, within = angles[~same].min(), angles[same].max()
-    if across > factor * max(floor, within):
-        return (f"abrupt secondary subspace switch in {(~majority).sum()} layers "
-                f"(minimum between-group angle {math.degrees(across):.2f} degrees, "
-                f"maximum within-group angle {math.degrees(within):.2f} degrees, "
-                f"leading axes within {math.degrees(primary.max()):.2f} degrees)")
-    return None
+    if across <= factor * max(floor, within):
+        return None
+    boundary = ""
+    if terminal:
+        # One discontinuity can mark an ordinary change of editing regime.
+        # The second canonical correlation measures the strongest overlap
+        # left after the best aligned pair. Require *every* other mode to
+        # be orthogonal within the measured angular spread of the cohorts.
+        overlap = secondary_overlap[~same].max()
+        if overlap > math.sin(max(floor, within)):
+            return None
+        i = int(np.flatnonzero(switches)[0])
+        boundary = (f" at layers {ids[i]}–{ids[i+1]} "
+                    f"(maximum secondary overlap {overlap:.3g})")
+    return (f"abrupt secondary subspace switch in {(~majority).sum()} layers{boundary} "
+            f"(minimum between-group angle {math.degrees(across):.2f} degrees, "
+            f"maximum within-group angle {math.degrees(within):.2f} degrees, "
+            f"leading axes within {math.degrees(primary.max()):.2f} degrees)")
 
 
 def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float,
@@ -276,10 +293,13 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
         names = [layers[i][0] for i in ids]
         width, dim = subspaces[names[0]].shape
         angles = np.zeros((len(ids), len(ids)))
+        secondary_overlap = np.ones_like(angles)
         for i, name in enumerate(names):
             for j in range(i):
                 cosines = np.linalg.svd(subspaces[name].T @ subspaces[names[j]], compute_uv=False)
                 angles[i, j] = angles[j, i] = math.acos(min(1., float(cosines[-1])))
+                if dim >= 2:
+                    secondary_overlap[i, j] = secondary_overlap[j, i] = cosines[1]
         agreement = angles <= math.acos(0.9)
         supporters = agreement[np.argmax(agreement.sum(axis=1))]
         if supporters.sum() <= len(layers) / 2:
@@ -296,7 +316,8 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
                         findings[names[i]] = (f"recurring {dim}-dimensional output subspace in {len(member_ids)} "
                                               f"layers without a comparable peer group ({shift})")
             continue
-        switch = _secondary_switch(ids, names, supporters, angles, agreement, directions, width, factor)
+        switch = _secondary_switch(ids, names, supporters, angles, secondary_overlap, agreement, directions,
+                                   width, factor)
         # Compare each candidate with the coherent population excluding itself.
         np.fill_diagonal(angles, np.nan)
         separation = np.nanmedian(angles[:, supporters], axis=1)
