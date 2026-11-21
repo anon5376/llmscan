@@ -290,6 +290,59 @@ def _trajectory_groups(ids: list[int], angles: np.ndarray, layer_count: int,
     return None
 
 
+def _secondary_groups(ids: list[int], angles: np.ndarray, layer_count: int,
+                      factor: float, floor: float) -> tuple[np.ndarray, np.ndarray, str] | None:
+    """Return group labels and the angular scale supporting each group's separation."""
+    labels = _coherent_groups(angles, layer_count, factor, floor)
+    if labels is not None:
+        within = angles[labels[:, None] == labels].max()
+        return labels, np.full(labels.max() + 1, within), "maximum within-group angle"
+    trajectory = _trajectory_groups(ids, angles, layer_count, factor, floor)
+    if trajectory is not None:
+        labels, step = trajectory
+        return labels, np.full(labels.max() + 1, step), "maximum within-group step per layer"
+
+    return _isolated_runs(ids, angles, layer_count, factor, floor)
+
+
+def _isolated_runs(ids: list[int], angles: np.ndarray, layer_count: int,
+                   factor: float, floor: float) -> tuple[np.ndarray, np.ndarray, str] | None:
+    """Identify compact contiguous runs against an otherwise wandering background."""
+    radius = math.acos(0.9)
+    adjacent = np.diff(ids) == 1
+    steps = angles.diagonal(offset=1)
+    cuts = np.flatnonzero(~adjacent | (steps > radius)) + 1
+    labels = np.zeros(len(ids), dtype=int)
+    diameters = [0.]  # Label zero collects the background observations.
+    for run in np.split(np.arange(len(ids)), cuts):
+        if not 3 <= len(run) < len(ids) / 2:
+            continue
+        members = np.zeros(len(ids), dtype=bool)
+        members[run] = True
+        diameter = angles[np.ix_(run, run)].max()
+        separation = angles[np.ix_(run, ~members)].min()
+        if diameter > radius or separation <= max(radius, factor * max(floor, diameter)):
+            continue
+        boundaries = members[:-1] != members[1:]
+        if not adjacent[boundaries].all():
+            continue
+        background = steps[adjacent & ~members[:-1] & ~members[1:]]
+        if len(background) < 8:
+            continue
+        # A pause on a smooth path can have zero diameter. Require its entry
+        # and exit to exceed the peer step distribution outside the run too.
+        peers = Peers.summarize(background.tolist())
+        resolution = max(floor, diameter)
+        if peers.median <= factor * resolution or not peers.high(steps[boundaries].min(), resolution):
+            continue
+        labels[run] = len(diameters)
+        diameters.append(diameter)
+    background_count = np.count_nonzero(labels == 0)
+    if len(diameters) == 1 or background_count < 8 or background_count <= layer_count / 2:
+        return None
+    return labels, np.asarray(diameters), "maximum within-run angle"
+
+
 def _secondary_switches(ids: list[int], names: list[str], layer_count: int, angles: np.ndarray,
                         secondary_overlap: np.ndarray, directions: dict[str, np.ndarray] | None,
                         width: int, factor: float) -> dict[str, str]:
@@ -298,16 +351,10 @@ def _secondary_switches(ids: list[int], names: list[str], layer_count: int, angl
         return {}
     floor = math.sqrt(2 * width * math.ulp(1.))
     factor = max(1., factor)
-    labels = _coherent_groups(angles, layer_count, factor, floor)
-    if labels is None:
-        trajectory = _trajectory_groups(ids, angles, layer_count, factor, floor)
-        if trajectory is None:
-            return {}
-        labels, within = trajectory
-        spread = "maximum within-group step per layer"
-    else:
-        within = angles[labels[:, None] == labels].max()
-        spread = "maximum within-group angle"
+    groups = _secondary_groups(ids, angles, layer_count, factor, floor)
+    if groups is None:
+        return {}
+    labels, widths, spread = groups
     same = labels[:, None] == labels
     axes = np.stack([directions[name] for name in names])
     primary = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
@@ -320,6 +367,7 @@ def _secondary_switches(ids: list[int], names: list[str], layer_count: int, angl
     sizes = np.bincount(labels)
     findings = {}
     for label in np.flatnonzero(sizes < sizes.max()):
+        within = widths[label]
         members = labels == label
         switches = members[:-1] != members[1:]
         if not adjacent[switches].all() or primary_steps[switches].max() > factor * usual_step:

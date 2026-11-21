@@ -14,7 +14,7 @@ from llmscan import core, rank
 from llmscan.interval_fit import _box_excess, fit_excess
 from llmscan.names import stack_of
 from llmscan.removal import joint_excess, promising_symmetric_response, skew_excess
-from llmscan.signals import Measurements, _trajectory_groups, subspace_outliers
+from llmscan.signals import Measurements, _isolated_runs, _trajectory_groups, subspace_outliers
 from test_core import to_bf16
 from test_rank import layer_name, row, run_cli
 
@@ -656,6 +656,69 @@ class TestAnomalySignals(unittest.TestCase):
                 expected = set().union(*runs) if switching and not primary_jump else set()
                 self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
                 self.assertTrue(all("step per layer" in r.reason for r in ranked if r.tier == "T3"))
+
+    def test_isolated_run_compares_both_boundary_steps_with_other_layers(self):
+        # An ordinary 40-degree step enters a pause. An exceptional exit
+        # alone does not make the pause an anomalous regime.
+        n = 23
+        ids = list(range(n))
+        run = np.arange(10, 14)
+        for entry, expected in [(40., False), (70., True)]:
+            with self.subTest(entry=entry):
+                steps = np.full(n - 1, 40.)
+                steps[run[:-1]] = 0.
+                steps[run[0] - 1], steps[run[-1]] = entry, 68.
+                # Each step takes a fresh orthogonal direction. Distant
+                # layers don't revisit an earlier point on the walk.
+                axes = np.eye(n)
+                for i, angle in enumerate(np.radians(steps), 1):
+                    axes[i] = np.cos(angle) * axes[i-1] + np.sin(angle) * axes[i]
+                angles = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
+                result = _isolated_runs(ids, angles, n, 3., 1e-6)
+                if expected:
+                    self.assertEqual(set(np.flatnonzero(result[0])), set(run))
+                else:
+                    self.assertIsNone(result)
+
+    def test_no_isolated_run_among_unrelated_directions_with_incidental_pairs(self):
+        rng = np.random.default_rng(204)
+        axes = rng.normal(size=(28, 48))
+        axes /= np.linalg.norm(axes, axis=1, keepdims=True)
+        # There are several copies, but no three consecutive observations.
+        axes[[3, 11, 12]] = axes[2]
+        angles = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
+        self.assertIsNone(_isolated_runs(list(range(len(axes))), angles, len(axes), 3., 1e-6))
+
+    def test_isolated_secondary_runs_under_a_shared_leading_axis(self):
+        n = 30
+        eye = np.eye(n + 4)
+        walk = eye[1:n+1].copy()
+        for i in range(1, n):
+            angle = np.radians(39 + i % 5)
+            walk[i] = np.cos(angle) * walk[i-1] + np.sin(angle) * walk[i]
+        runs = (set(range(3)), set(range(16, 21)))
+        for switching, primary_jump, missing, expected in [
+            (False, False, None, set()), (True, False, None, set.union(*runs)),
+            (True, True, None, set()), (True, False, 15, set()),
+            (True, False, 3, runs[1]),
+        ]:
+            with self.subTest(switching=switching, primary_jump=primary_jump, missing=missing):
+                rows = [row(layer_name(i)) for i in range(n) if i != missing]
+                axes, spaces = {}, {}
+                for r in rows:
+                    primary, secondary = eye[0], walk[r.layer]
+                    for k, run in enumerate(runs):
+                        if switching and r.layer in run:
+                            angle = np.radians(r.layer % 3)
+                            secondary = np.cos(angle) * eye[-k-1] + np.sin(angle) * secondary
+                            if primary_jump:
+                                primary = np.cos(.13) * eye[0] + np.sin(.13) * eye[-3]
+                    axes[r.name] = (-1) ** r.layer * primary
+                    spaces[r.name] = np.column_stack((primary, secondary))
+                stats = {r.name: Measurements(1.5, 1.) for r in rows}
+                ranked = rank.rank_tensors(rows[::-1], stats, directions=axes, subspaces=spaces)
+                self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
+                self.assertTrue(all("within-run angle" in r.reason for r in ranked if r.tier == "T3"))
 
     def test_gradual_transitions_between_three_plateaus(self):
         eye = np.eye(3)

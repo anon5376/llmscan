@@ -267,6 +267,13 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      smallest between-group angle with the largest within-group step in layer order,
      dividing each step by the layer interval. This allows gradual rotation over many
      layers while requiring the groups to remain separated throughout the trajectory.
+     When the other layers wander, the scanner can also identify a contiguous run of at
+     least three mutually close layers. Its diameter must be small compared with both
+     its distance to every outside layer and the usual step between adjacent outside
+     layers. Each observed boundary must exceed that usual step by more than the run's
+     diameter and six robust standard deviations. At least eight outside steps must be
+     available for comparison, and a strict majority of layers must remain outside the
+     isolated runs.
 
      Each minority group can produce a T3 finding when its boundaries are observed at
      consecutive layer IDs. The separately measured leading axes must agree across groups,
