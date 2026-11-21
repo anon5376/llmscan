@@ -211,7 +211,11 @@ class TestMalformedHeaders(unittest.TestCase):
 
     def test_deeply_nested_json_is_a_checkpoint_error(self):
         raw = b'{"x":' + b"[" * 2_000 + b"0" + b"]" * 2_000 + b"}"
-        self.assert_rejected(raw, b"", "invalid safetensors header")
+        self.assert_rejected(raw, b"", "invalid safetensors header|tensor x has no metadata object")
+
+    def test_json_recursion_error_is_a_checkpoint_error(self):
+        with mock.patch.object(safetensors_io.json, "loads", side_effect=RecursionError("too deeply nested")):
+            self.assert_rejected(b"{}", b"", "invalid safetensors header: too deeply nested")
 
     def test_negative_offsets(self):
         self.assert_rejected({"x": entry("F32", [1], -4, 0)}, bytes(4), "data_offsets")
