@@ -101,6 +101,13 @@ class TestAnomalySignals(unittest.TestCase):
         self.stats[self.last] = self.stats[self.last]._replace(frobenius=1.1)
         self.assertEqual(self.flagged(), {})
 
+    def test_systematic_departure_from_projection_law(self):
+        for name in self.stats:
+            self.stats[name] = Measurements(1., 1., 1., 0.7, projection_error=0.6)
+        self.assertEqual(self.flagged(), {})
+        self.stats[self.last] = self.stats[self.last]._replace(projection_error=0.9)
+        self.assertIn("projection law", self.flagged()[self.last])
+
     def test_invalid_new_stats_are_unusable_but_a_perfect_fit_is_valid(self):
         for changes in [dict(projection_error=-0.01), dict(projection_error=1.01),
                         dict(token_row_spike=float("inf")), dict(token_row_spike=-1.)]:

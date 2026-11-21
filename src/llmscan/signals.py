@@ -51,6 +51,8 @@ def peer_groups(rows: list[InventoryRow], stats: dict[str, Measurements]) -> dic
             groups[kind, "rank"].append(m.effective_rank)
         elif m.sv_001 is not None:
             groups[kind, "sv_only"].append(m.sv_001)
+        if m.projection_error is not None:
+            groups[kind, r.base_shape, "projection_error"].append(m.projection_error)
         # A gain measures the leading change relative to the base's weight in
         # that direction. With older CSVs only raw magnitudes are available.
         for metric in ("projection_gain", "frobenius", "sv_001"):
@@ -75,7 +77,11 @@ def _projection_reason(r: InventoryRow, m: Measurements, peers: dict[tuple, Peer
     if m.projection_error is not None and m.frobenius and m.sv_001:
         ratio = m.frobenius / m.sv_001
         tail_ratio = math.sqrt(max(0., (ratio - 1) * (ratio + 1)))
-        if m.projection_error > max(0.05, factor * tail_ratio):
+        # Some editing methods systematically depart from orthogonal removal.
+        # With enough comparable layers, also require an unusual fit for that method.
+        fits = peers.get((kind, r.base_shape, "projection_error"))
+        unusual_fit = fits is None or fits.count < 8 or fits.high(m.projection_error, 0.05)
+        if unusual_fit and m.projection_error > max(0.05, factor * tail_ratio):
             return (f"projection law leaves {m.projection_error:.1%} of the leading change unexplained "
                     "after fitting partial removal against the base")
     for metric in ("projection_gain", "frobenius", "sv_001"):
