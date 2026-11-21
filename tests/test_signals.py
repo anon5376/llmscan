@@ -141,6 +141,37 @@ class TestProjectionMeasurements(unittest.TestCase):
         self.assertEqual(finding.tier, "T3")
         self.assertIn("token-row residual spike", finding.reason)
 
+    def test_tied_modes_preserve_reciprocity_after_rounding(self):
+        rng = np.random.default_rng(101)
+        for shape, dim in [((12, 32), 2), ((32, 12), 3)]:
+            left = np.linalg.qr(rng.normal(size=(shape[0], dim)))[0]
+            right = np.linalg.qr(rng.normal(size=(shape[1], dim)))[0]
+            base = rng.normal(size=shape)
+            unchanged = base - left @ (left.T @ base)
+            base = unchanged + left @ right.T
+            for dtype, scale in [("BF16", 1.), ("F64", 1e-220), ("F64", 1e220)]:
+                with self.subTest(shape=shape, dtype=dtype, scale=scale):
+                    b, s = base * scale, unchanged * scale
+                    if dtype == "BF16":
+                        b, s = to_bf16(b), to_bf16(s)
+                    stats = core.analyze_delta(b, s, 1)
+                    self.assertIsNone(stats.direction)
+                    self.assertEqual(stats.output_subspace.shape, left.shape)
+                    self.assertEqual(core.reciprocity_excess(b, s, stats, dtype, dtype), 0.)
+
+    def test_reciprocity_detects_skew_with_no_separated_axis(self):
+        b = np.eye(6)
+        # A cyclic permutation has tied singular values and nonzero skew.
+        s = b + np.roll(b, 1, axis=0)
+        m = core.analyze_delta(b, s, 1)
+        self.assertIsNone(m.direction)
+        self.assertIsNone(m.output_subspace)  # spans the entire output
+        excess = core.reciprocity_excess(b, s, m, "F64", "F64")
+        self.assertGreater(excess, 0.99)
+        name = layer_name(0)
+        finding, = rank.rank_tensors([row(name)], {name: Measurements(6., 1., reciprocity_excess=excess)})
+        self.assertIn("multi-mode change violates projection reciprocity", finding.reason)
+
 
 class TestAnomalySignals(unittest.TestCase):
     def setUp(self):
@@ -175,6 +206,13 @@ class TestAnomalySignals(unittest.TestCase):
         self.assertEqual(self.flagged(), {})
         self.stats[self.last] = self.stats[self.last]._replace(projection_error=0.9)
         self.assertIn("projection law", self.flagged()[self.last])
+
+    def test_multimode_reciprocity_against_a_reference_population(self):
+        self.stats = {r.name: Measurements(3., 1., reciprocity_excess=0.4) for r in self.rows}
+        self.assertEqual(self.flagged(), {})
+        self.stats[self.last] = self.stats[self.last]._replace(reciprocity_excess=0.8)
+        self.assertEqual(set(self.flagged()), {self.last})
+        self.assertIn("projection reciprocity", self.flagged()[self.last])
 
     def test_contraction_witness_with_and_without_a_reference_population(self):
         # Some published editing methods systematically depart from partial
@@ -326,6 +364,20 @@ class TestAnomalySignals(unittest.TestCase):
         self.assertLess(next(r.direction_cosine for r in ranked if r.name == rows[-1].name), 0.5)
         self.assertTrue(all(r.tier == "T4" for r in ranked))
 
+    def test_subspace_comparison_allows_drift_and_abstains_without_consensus(self):
+        rows = [row(layer_name(i)) for i in range(24)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        eye = np.eye(25)
+        for coherent in [True, False]:
+            bases = {}
+            for i, r in enumerate(rows):
+                angle = max(0, i - 17) * 0.2
+                second = np.cos(angle) * eye[1] + np.sin(angle) * eye[2] if coherent else eye[i + 1]
+                bases[r.name] = np.column_stack((eye[0], second))
+            with self.subTest(coherent=coherent):
+                ranked = rank.rank_tensors(rows, stats, subspaces=bases)
+                self.assertTrue(all(r.tier == "T4" for r in ranked))
+
     def test_sparse_direction_cohort_counts_independent_layers(self):
         # Several experts in one layer do not supply additional layer votes.
         rows = [row(layer_name(i)) for i in range(8)]
@@ -401,6 +453,31 @@ class TestAnomalySignals(unittest.TestCase):
 
 
 class TestControlCheckpoints(unittest.TestCase):
+    def test_rank_three_shared_subspace_through_cli(self):
+        # Every change is a genuine removal with three tied modes. The bases
+        # rotate within the same space except for one different output axis.
+        rng = np.random.default_rng(27)
+        for shape in [(8, 12), (12, 8)]:
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                base, suspect = {}, {}
+                for i in range(12):
+                    left = np.eye(shape[0])[:, [0, 1, 3 if i == 6 else 2]]
+                    right = np.linalg.qr(rng.normal(size=(shape[1], 3)))[0]
+                    untouched = np.eye(*shape)
+                    untouched -= left @ (left.T @ untouched)
+                    base[layer_name(i)] = ("BF16", to_bf16(untouched + left @ right.T))
+                    suspect[layer_name(i)] = ("BF16", untouched)
+                write_safetensors(tmp / "b.safetensors", base)
+                write_safetensors(tmp / "s.safetensors", suspect)
+                rc, out, err = run_cli("--base", str(tmp / "b.safetensors"), "--suspect", str(tmp / "s.safetensors"),
+                                       "--out", str(tmp / "out"), "-k", "1")
+                self.assertEqual(rc, 0, out + err)
+                with (tmp / "out" / "ranking.csv").open() as f:
+                    flagged = {r["name"]: r["reason"] for r in csv.DictReader(f) if r["tier"] != "T4"}
+                self.assertEqual(set(flagged), {layer_name(6)})
+                self.assertIn("3-dimensional output subspace", flagged[layer_name(6)])
+
     def test_two_input_reciprocity_through_cli(self):
         # The second coordinate has a large base response. A one-input norm
         # check permits this pair, but swapping the two coordinate probes

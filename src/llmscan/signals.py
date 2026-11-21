@@ -79,6 +79,8 @@ def peer_groups(rows: list[InventoryRow], stats: dict[str, Measurements]) -> dic
         fit_group = (kind, r.base_shape, r.base_dtype, r.suspect_dtype)
         if m.projection_error is not None:
             groups[*fit_group, "projection_error"].append(m.projection_error)
+        elif m.reciprocity_excess is not None:
+            groups[*fit_group, "multimode_reciprocity"].append(m.reciprocity_excess)
         residual = m.projection_residual()
         share = residual.leading_share() if residual is not None else None
         if share is not None:
@@ -104,6 +106,11 @@ def _projection_reason(r: InventoryRow, m: Measurements, peers: dict[tuple, Peer
         return (f"projection_gain {m.projection_gain:.4g} exceeds a full projection of the base "
                 f"(threshold {max(1., factor):g}x)")
     residual = m.projection_residual()
+    if m.projection_error is None and m.reciprocity_excess is not None and m.reciprocity_excess > 0:
+        group = peers.get((kind, r.base_shape, r.base_dtype, r.suspect_dtype, "multimode_reciprocity"))
+        if group is None or group.count < 8 or group.high(m.reciprocity_excess, math.sqrt(math.ulp(1.))):
+            return (f"multi-mode change violates projection reciprocity "
+                    f"({m.reciprocity_excess:.1%} of the discrepancy exceeds rounding)")
     if residual is not None and m.projection_error is not None:
         fit_group = (kind, r.base_shape, r.base_dtype, r.suspect_dtype)
         fits = peers.get((*fit_group, "projection_error"))
@@ -187,6 +194,58 @@ def outlier_reasons(r: InventoryRow, m: Measurements, peers: dict[tuple, Peers],
 def _orthogonal_fraction(cosine: float) -> float:
     c = min(1., abs(cosine))
     return math.sqrt((1 - c) * (1 + c))
+
+
+def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float) -> dict[str, str]:
+    """Compare equal-dimensional output spaces, invariant to signs and rotations inside a basis."""
+    groups = defaultdict(lambda: defaultdict(list))
+    for r in rows:
+        kind = canonical_kind(r.kind)
+        if r.name in subspaces and r.layer is not None and kind in RESIDUAL_WRITERS:
+            key = (stack_of(r.name), kind, r.base_shape, r.base_dtype, r.suspect_dtype, subspaces[r.name].shape)
+            groups[key][r.layer].append(r.name)
+
+    findings = {}
+    for layers in groups.values():
+        # One independent vote per layer. Ambiguous layers (e.g. several
+        # same-kind experts in one block) do not define a reference trajectory.
+        ids = sorted(i for i in layers if len(layers[i]) == 1)
+        if len(ids) < 9:
+            continue
+        names = [layers[i][0] for i in ids]
+        width, dim = subspaces[names[0]].shape
+        angles = np.zeros((len(ids), len(ids)))
+        for i, name in enumerate(names):
+            for j in range(i):
+                cosines = np.linalg.svd(subspaces[name].T @ subspaces[names[j]], compute_uv=False)
+                angles[i, j] = angles[j, i] = math.acos(min(1., float(cosines[-1])))
+        agreement = angles <= math.acos(0.9)
+        supporters = agreement[np.argmax(agreement.sum(axis=1))]
+        if supporters.sum() <= len(layers) / 2:
+            continue
+        # Compare each candidate with the coherent population excluding itself.
+        np.fill_diagonal(angles, np.nan)
+        separation = np.nanmedian(angles[:, supporters], axis=1)
+        for i, name in enumerate(names):
+            peers = Peers.summarize(np.delete(separation, i).tolist())
+            limit = max(max(1., factor) * peers.median, peers.median + 6 * 1.4826 * peers.mad,
+                        math.sqrt(2 * width * math.ulp(1.)))
+            if separation[i] <= limit:
+                continue
+            # Allow smooth drift. The largest principal angle is a metric.
+            # A constant-speed path through the adjacent layers covers each
+            # interval in proportion to its length, also at either endpoint.
+            other = [j for j in range(len(ids)) if j != i]
+            start = max(0, min(i - 1, len(other) - 2))
+            a, b = other[start:start + 2]
+            t = (ids[i] - ids[a]) / (ids[b] - ids[a])
+            if (-1 <= t <= 2 and agreement[a, b] and angles[i, a] <= abs(t) * angles[a, b] + limit
+                    and angles[i, b] <= abs(1 - t) * angles[a, b] + limit):
+                continue
+            findings[name] = (f"{dim}-dimensional output subspace differs from coherent layers "
+                              f"(largest principal angle, median {math.degrees(separation[i]):.2f} degrees "
+                              f"vs peer upper bound {math.degrees(limit):.2f})")
+    return findings
 
 
 def _follows_drift(layer: int, axis: np.ndarray, neighbors: list[int], axes: dict[int, np.ndarray],

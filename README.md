@@ -184,6 +184,11 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      from both checkpoints, including subnormal and arithmetic error. `reciprocity_excess` reports
      the fraction of the observed discrepancy beyond that bound. The same peer fit-error check
      applies when a cohort is available.
+     The symmetry identity also holds for removals along several axes. With no unique leading
+     direction, the scanner uses a reproducible dense probe of `BᵀΔ − ΔᵀB` to select a pair
+     of input coordinates. It checks their cross response against entrywise rounding bounds.
+     With eight or more comparable multi-mode measurements, the excess must also exceed the
+     peer median by six MAD-based standard deviations and the numerical floor.
    - **Residual direction.** Each layer gets one vote in its stack and residual width. Writers within a
      voting layer must agree up to sign. When a strict majority agrees (absolute cosine ≥0.9), the scanner
      compares each writer and embedding to at least three *other* agreeing layers. For writers with eight
@@ -198,6 +203,13 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      An embedding or output head above the blocks can use a unique descendant
      stack of matching width. Output heads retain their location tier. The scanner uses a direction only
      when σ₁ > 2σ₂ or there is a single mode.
+   - **Multi-direction edits.** A twofold gap in singular value separates a cluster of leading
+     modes from the remaining spectrum. The scanner compares the output spaces of equal-dimensional
+     clusters across layers of the same stack, writer kind, shape and storage precision. It measures
+     the largest principal angle, which is invariant to basis rotations and ordering inside a tied
+     cluster. With eight other independent layers and a coherent majority, it tests the candidate's
+     median angle against the peer dispersion, allowing for local angular drift. The comparison
+     uses the full measured spectrum even when the report saves only one singular value.
    - **Embedding concentration.** For token-row energies `e`, the effective fraction of rows changed is
      `sum(e)² / (number_of_rows × sum(e²))`. A fraction below 5% is a finding even for a singleton
      embedding. Its residual direction is the leading *right* singular vector in token-by-hidden layout.

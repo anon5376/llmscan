@@ -32,6 +32,7 @@ def scan(
     k: int = 32,
     log: Callable[[str], None] = print,
     directions: dict[str, np.ndarray] | None = None,
+    subspaces: dict[str, np.ndarray] | None = None,
 ) -> int:
     """Analyse each 2-D float tensor present in both checkpoints with the same shape.
 
@@ -69,6 +70,8 @@ def scan(
                 del a, b
                 if directions is not None and projection and stats.direction is not None:
                     directions[r.name] = stats.direction
+                if subspaces is not None and kind in RESIDUAL_WRITERS and stats.output_subspace is not None:
+                    subspaces[r.name] = stats.output_subspace
                 values = (stats.frobenius, stats.projection_gain if projection else None, stats.second_tail_share,
                           stats.column_fraction if token_matrix else None, stats.projection_error if projection else None,
                           stats.column_spike if token_matrix else None, excess, stats.tail_norm_fraction, contraction,

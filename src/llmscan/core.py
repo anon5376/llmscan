@@ -36,6 +36,7 @@ class DeltaStats(NamedTuple):
     tail_norm_fraction: float | None = None
     fit_residual: np.ndarray | None = None
     base_probe: np.ndarray | None = None
+    output_subspace: np.ndarray | None = None
 
 
 # Spacing at one and at zero for the supported checkpoint storage formats.
@@ -116,24 +117,58 @@ def contraction_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
     return min(1., (growth - budget) / denominator) if denominator else None
 
 
+def _skew_columns(base: np.ndarray, delta: np.ndarray, scale: float) -> tuple[int, int]:
+    """Select two coordinates of the skew matrix K = BᵀΔ − ΔᵀB without forming K."""
+    # A dense witness samples all modes, including ties. Select a coordinate
+    # from Kz, then its strongest partner from that row of K. Only the final
+    # two-coordinate discrepancy enters the test and its rounding allowance.
+    z = np.random.default_rng(0).standard_normal(base.shape[1])
+    z /= np.linalg.norm(z)
+    block_rows = max(1, _ROWS_PER_BLOCK * min(base.shape) // base.shape[1])
+
+    def action(column: int | None) -> np.ndarray:
+        result = np.zeros(base.shape[1])
+        for start in range(0, len(base), block_rows):
+            sl = slice(start, start + block_rows)
+            b = base[sl].astype(np.float64) / scale
+            d = delta[sl].astype(np.float64) / scale
+            bx, dx = (b @ z, d @ z) if column is None else (b[:, column], d[:, column])
+            result += b.T @ dx - d.T @ bx
+        return result
+
+    i = int(np.argmax(np.abs(action(None))))
+    return i, int(np.argmax(np.abs(action(i))))
+
+
 def reciprocity_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
                        base_dtype: str, suspect_dtype: str) -> float | None:
     """Fraction of a two-input reciprocity discrepancy left after bounding rounding.
 
-    If S = (I − αuuᵀ)B, then BᵀS is symmetric. For *any* probes x and y,
+    If S = (I − P)B for any symmetric P, then BᵀS is symmetric. For any probes,
     (Bx)ᵀ(Sy) = (By)ᵀ(Sx), even when neither probe recovers the true axis.
     """
     x, residual = stats.base_probe, stats.fit_residual
     scale = stats.frobenius
-    if x is None or residual is None or not scale or not math.isfinite(scale):
+    if not scale or not math.isfinite(scale):
         return None
-    y = residual - (x @ residual) * x
-    length = np.linalg.norm(y)
-    if length <= math.sqrt(math.ulp(1.)):
-        return 0.
-    probes = np.column_stack((x, y / length))
-    magnitudes = np.abs(probes)
     scale = max(scale, float(base.max()), -float(base.min()))
+    if stats.direction is None:
+        if stats.tail_norm_fraction is None:
+            return None
+        i, j = _skew_columns(base, delta, scale)
+        if i == j:
+            return 0.
+        base, delta = base[:, [i, j]], delta[:, [i, j]]
+        probes = np.eye(2)
+    else:
+        if x is None or residual is None:
+            return None
+        y = residual - (x @ residual) * x
+        length = np.linalg.norm(y)
+        if length <= math.sqrt(math.ulp(1.)):
+            return 0.
+        probes = np.column_stack((x, y / length))
+    magnitudes = np.abs(probes)
     # Half a storage ULP on each side, plus conservative error in the
     # subtraction, scaled matvecs, inner products and their accumulation.
     arithmetic = 2 * float(np.finfo(delta.dtype).eps) + 8 * math.ulp(1.) * (sum(base.shape) + 2)
@@ -207,6 +242,7 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
         tail_norm_fraction: Frobenius distance to the best rank-one delta divided by the delta norm.
         fit_residual: unexplained leading coefficients in input space, used as a contraction probe.
         base_probe: normalized base coefficients along the leading output direction.
+        output_subspace: left basis for a separated cluster of leading modes.
 
     The pipeline never calls this for bit-identical tensors.
     """
@@ -248,6 +284,7 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
 
     # A repeated or nearly repeated leading singular value has no stable axis.
     direction = gain = projection_error = column_spike = fit_residual = base_probe = None
+    output_subspace = None
     if len(energy) == 1 or energy[0] > 4 * energy[1]:
         small = vectors[:, -1].copy()
         other = np.empty(dw.shape[0])
@@ -272,7 +309,24 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
             projected /= projected_norm
             base_probe = projected
         projection_error, column_spike, fit_residual = _projection_fit(right, projected, gain)
+    else:
+        # Apply the same twofold singular-value separation to the *boundary*
+        # of the leading cluster. Ignore gaps deep in a diffuse noise floor.
+        # The dimension is independent of the number of CSV columns requested.
+        gaps = np.flatnonzero(energy[:-1] > 4 * energy[1:])
+        dim = int(gaps[0] + 1) if gaps.size else len(energy)
+        prominent = energy[dim - 1] >= min(energy[0] / 4, total / len(energy))
+        if dim < len(w_suspect) and prominent:
+            small = vectors[:, -dim:]
+            if tall:
+                output_subspace = np.empty((len(dw), dim))
+                singular = np.sqrt(energy[:dim][::-1])
+                for start in range(0, len(dw), _ROWS_PER_BLOCK):
+                    sl = slice(start, start + _ROWS_PER_BLOCK)
+                    output_subspace[sl] = ((dw[sl].astype(np.float64) / scale) @ small) / singular
+            else:
+                output_subspace = small.copy()
 
     return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),
                       fraction, second_share, direction, gain, projection_error, column_spike, tail_norm_fraction,
-                      fit_residual, base_probe)
+                      fit_residual, base_probe, output_subspace)
