@@ -23,6 +23,7 @@ class Measurements(NamedTuple):
     token_row_fraction: float | None = None
     projection_error: float | None = None
     token_row_spike: float | None = None
+    rank_one_excess: float | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,8 @@ def peer_groups(rows: list[InventoryRow], stats: dict[str, Measurements]) -> dic
             groups[kind, "sv_only"].append(m.sv_001)
         if m.projection_error is not None:
             groups[kind, r.base_shape, "projection_error"].append(m.projection_error)
+        if m.rank_one_excess is not None:
+            groups[kind, r.base_shape, "rank_one_excess"].append(m.rank_one_excess)
         # A gain measures the leading change relative to the base's weight in
         # that direction. With older CSVs only raw magnitudes are available.
         for metric in ("projection_gain", "frobenius", "sv_001"):
@@ -113,6 +116,13 @@ def outlier_reasons(r: InventoryRow, m: Measurements, peers: dict[tuple, Peers],
               and group_stats.high(er, 0.01 * median)):
             reasons.append(f"effective_rank {er:.4g} above peer dispersion (median {median:.4g}); "
                            f"second mode carries {m.second_tail_share:.0%} of non-leading energy")
+
+    # Give spectral shape one vote even when more than one test explains it.
+    if not reasons and m.rank_one_excess is not None and m.rank_one_excess > 0.05:
+        tails = peers.get((kind, r.base_shape, "rank_one_excess"))
+        if tails is None or tails.count < 8 or tails.high(m.rank_one_excess, 0.05):
+            reasons.append(f"at least {m.rank_one_excess:.1%} of the change norm lies outside a rank-one "
+                           "removal after allowing for checkpoint rounding")
 
     projection = _projection_reason(r, m, peers, factor)
     if projection:

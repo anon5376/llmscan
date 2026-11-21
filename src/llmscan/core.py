@@ -15,6 +15,7 @@ over every direction and moves it very little, which a threshold count would not
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import numpy as np
@@ -32,6 +33,39 @@ class DeltaStats(NamedTuple):
     projection_gain: float | None = None
     projection_error: float | None = None
     column_spike: float | None = None
+
+
+# Spacing at one and at zero for the supported checkpoint storage formats.
+_SPACING = {"BF16": (2.0**-7, 2.0**-133), "F16": (2.0**-10, 2.0**-24),
+            "F32": (2.0**-23, 2.0**-149), "F64": (2.0**-52, 2.0**-1074)}
+
+
+def rank_one_excess(base: np.ndarray, stats: DeltaStats, base_dtype: str, suspect_dtype: str) -> float | None:
+    """Lower bound on the fraction of ΔW unexplained by one removal and a floating-point re-save."""
+    total = stats.frobenius
+    if not total or not math.isfinite(total):
+        return None
+    # Eckart–Young: the best possible rank-one error is the norm of all the
+    # remaining singular modes, even for a tied spectrum or a top-1 CSV.
+    leading = min(1., float(stats.singular_values[0]) / total)
+    tail = math.sqrt((1 - leading) * (1 + leading))
+    if not tail:
+        return 0.
+
+    # A partial orthogonal removal cannot increase the base Frobenius norm.
+    # Allow a full ULP at the coarser precision, including a subnormal floor.
+    # Accumulate a scaled norm in blocks to avoid squaring extreme F64 values.
+    relative, absolute = map(max, zip(_SPACING[base_dtype], _SPACING[suspect_dtype]))
+    scale = max(float(base.max()), -float(base.min()))
+    budget = absolute * math.sqrt(base.size)
+    if scale:
+        rows = base if base.shape[0] >= base.shape[1] else base.T
+        energy = 0.
+        for start in range(0, len(rows), _ROWS_PER_BLOCK):
+            block = rows[start:start + _ROWS_PER_BLOCK].astype(np.float64) / scale
+            energy += float(np.einsum("ij,ij->", block, block))
+        budget += (relative * math.sqrt(energy)) * scale
+    return max(0., tail - budget / total)
 
 
 def _projection_fit(right: np.ndarray, projected: np.ndarray, gain: float | None) -> tuple[float, float]:
