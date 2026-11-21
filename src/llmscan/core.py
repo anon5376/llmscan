@@ -29,6 +29,9 @@ _ROWS_PER_BLOCK = 4096
 # The values-only eigensolve is used when it reproduces the full solve to this relative accuracy.
 _AGREEMENT = 1e-9
 _EPS = float(np.finfo(np.float64).eps)
+# A reported singular value under 1e-3 of the first is an eigenvalue under 1e-6 of the largest,
+# where a few ulp of the largest approach _AGREEMENT of it.
+_REPORTED = 1e-6
 
 
 class DeltaStats(NamedTuple):
@@ -149,23 +152,45 @@ def _leading_vector(gram: np.ndarray, lead: float) -> np.ndarray | None:
     return None
 
 
-def _spectrum(gram: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
-    """Eigenvalues of the Gram matrix, largest first and clipped at zero, and the leading
-    eigenvector when the leading value is separated."""
+def _weakest_reported(gram: np.ndarray, reported: int) -> float:
+    """The `reported`-th largest eigenvalue as a share of the largest, estimated from below by
+    the Ritz values of two steps of subspace iteration. 1.0 if a solve would cost no more."""
     n = len(gram)
-    values = vectors = None
+    if 4 * (reported + 8) > n:
+        return 1.0
+    q = np.random.default_rng(0).standard_normal((n, reported + 8))
+    for _ in range(2):
+        q = np.linalg.qr(gram @ q)[0]
+    ritz = np.linalg.eigvalsh(q.T @ gram @ q)
+    return float(ritz[-reported] / ritz[-1])
+
+
+def _eigenvalues(gram: np.ndarray, reported: int) -> tuple[np.ndarray, np.ndarray | None]:
+    """Ascending eigenvalues of the Gram matrix, and its eigenvectors if the full solver ran.
+
+    The values-only solver is several times cheaper but rounds differently, by a few ulp of the
+    largest eigenvalue. It runs only where that cannot show in any reported number.
+    """
+    n = len(gram)
     # 1 − Σλ²/(Σλ)² is at most twice the share of energy beyond the leading mode. The second
     # eigenvalue is at least that share / n, and solver rounding is a few ulp of the first.
     trace = float(gram.trace())
     beyond = 1.0 - float(np.einsum("ij,ij->", gram, gram)) / trace ** 2
-    if n > 1 and beyond * _AGREEMENT >= 4 * n * _EPS:
+    # Estimating the weakest reported value first avoids a values-only solve that is then discarded.
+    if n > 1 and beyond * _AGREEMENT >= 4 * n * _EPS and _weakest_reported(gram, reported) >= _REPORTED:
         values = np.linalg.eigvalsh(gram)
-        if abs(values[-1] - 4 * values[-2]) <= 1e-6 * values[-1]:
-            values = None  # the separation test below must not depend on which solver ran
-    if values is None:
-        values, vectors = np.linalg.eigh(gram)
+        # Neither the separation test nor a reported singular value may depend on which solver ran.
+        if abs(values[-1] - 4 * values[-2]) > 1e-6 * values[-1] and values[-reported] >= _REPORTED * values[-1]:
+            return values, None
+    return np.linalg.eigh(gram)
+
+
+def _spectrum(gram: np.ndarray, reported: int) -> tuple[np.ndarray, np.ndarray | None]:
+    """Eigenvalues of the Gram matrix, largest first and clipped at zero, and the leading
+    eigenvector when the leading value is separated. The caller reports the first `reported` values."""
+    values, vectors = _eigenvalues(gram, reported)
     energy = np.maximum(values[::-1], 0.0)
-    if n > 1 and not energy[0] > 4 * energy[1]:
+    if len(gram) > 1 and not energy[0] > 4 * energy[1]:
         return energy, None
     if vectors is None:
         leading = _leading_vector(gram, float(energy[0]))
@@ -261,7 +286,7 @@ def analyze_delta(w_base, w_suspect, k: int) -> DeltaStats:
     fraction = float(column_energy.sum() ** 2 / (len(column_energy) * (column_energy @ column_energy)))
     del block, product, column_energy  # the eigensolve is the memory peak
 
-    energy, small = _spectrum(gram)
+    energy, small = _spectrum(gram, min(k, width))
     del gram
     total = energy.sum()
     effective_rank = float(total ** 2 / (energy @ energy))

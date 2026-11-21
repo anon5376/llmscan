@@ -1,8 +1,8 @@
 """The ΔW core after the runtime and memory work, against the one it replaced (legacy_core.py).
 
 Wherever the eigensolver is the one the old core used, every number must be the same to the last
-bit. Where the values-only solver runs instead, the two differ by solver rounding and must agree
-far more closely than any signal is reported.
+bit. Where the values-only solver runs instead, the two differ by solver rounding and every
+reported number, each singular value included, must agree far more closely than it is printed.
 """
 
 import csv
@@ -67,6 +67,28 @@ def changed(rng, base: np.ndarray, kind: str) -> np.ndarray:
     return base + (left * values) @ right.T
 
 
+def analyze(base, suspect, k: int) -> tuple[core.DeltaStats, bool]:
+    """The new core's answer, and whether its eigenvalues came from the solver the old core used."""
+    solved = []
+
+    def solve(gram, reported, original=core._eigenvalues):
+        solved.append(original(gram, reported))
+        return solved[-1]
+
+    with mock.patch.object(core, "_eigenvalues", solve):
+        stats = core.analyze_delta(base, suspect, k)
+    return stats, not solved or solved[-1][1] is not None
+
+
+def weak_tail(rng, shape, strong, weak) -> tuple[np.ndarray, np.ndarray]:
+    """An F64 pair whose change has the singular values `strong` followed by `weak`."""
+    values = np.array(list(strong) + list(weak))
+    left, _ = np.linalg.qr(rng.standard_normal((shape[0], len(values))))
+    right, _ = np.linalg.qr(rng.standard_normal((shape[1], len(values))))
+    base = rng.standard_normal(shape)
+    return base, base + (left * values) @ right.T
+
+
 class Equivalence(unittest.TestCase):
     def compare(self, old: core.DeltaStats, new: core.DeltaStats, exact: bool) -> None:
         self.assertEqual(len(old.singular_values), len(new.singular_values))
@@ -80,9 +102,7 @@ class Equivalence(unittest.TestCase):
             if old.direction is not None:
                 np.testing.assert_array_equal(old.direction, new.direction)
             return
-        # Squared singular values are eigenvalues: both solvers are accurate to rounding of the largest.
-        leading = old.singular_values[0]
-        np.testing.assert_allclose((new.singular_values / leading) ** 2, (old.singular_values / leading) ** 2, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(new.singular_values, old.singular_values, rtol=RELATIVE, atol=0)
         for name in SCALARS:
             if getattr(old, name) is not None:
                 self.assertLessEqual(abs(getattr(old, name) - getattr(new, name)), RELATIVE * abs(getattr(old, name)), name)
@@ -96,9 +116,7 @@ class Equivalence(unittest.TestCase):
         old = legacy_core.analyze_delta(base.copy(), suspect.copy(), k)
         old_excess = legacy_core.rank_one_excess(base, old, *dtypes)
         untouched, delta_w = base.copy(), suspect.copy()
-        with mock.patch.object(np.linalg, "eigvalsh", wraps=np.linalg.eigvalsh) as values_only:
-            new = core.analyze_delta(base, delta_w, k)
-        exact = not values_only.called
+        new, exact = analyze(base, delta_w, k)
         np.testing.assert_array_equal(base, untouched)
         np.testing.assert_array_equal(delta_w, suspect - base)  # as before, the suspect copy becomes ΔW
         self.compare(old, new, exact)
@@ -198,9 +216,30 @@ class TestCoreMatchesLegacy(Equivalence):
                 suspect = changed(rng, wide, kind).astype(np.float32)
                 with self.subTest(view=name, kind=kind):
                     old = legacy_core.analyze_delta(view(wide), view(suspect.copy()), 4)
+                    self.compare(old, *analyze(view(wide), view(suspect.copy()), 4))
+
+    def test_a_weak_reported_mode_keeps_the_old_solver(self):
+        # Two strong modes pass the test on the energy beyond the first, but values this far below
+        # the first are where the two solvers stop agreeing to the printed digits.
+        rng = np.random.default_rng(15)
+        for shape, k in (((64, 64), 4), ((90, 70), 6), ((30, 24), 6), ((200, 12), 32)):
+            for weak in (1e-4, 1e-5, 1e-6, 1e-7):
+                base, suspect = weak_tail(rng, shape, (3.0, 2.0), (3 * weak, 2 * weak, weak, weak / 2))
+                with self.subTest(shape=shape, k=k, weak=weak):
                     with mock.patch.object(np.linalg, "eigvalsh", wraps=np.linalg.eigvalsh) as values_only:
-                        new = core.analyze_delta(view(wide), view(suspect.copy()), 4)
-                    self.compare(old, new, exact=not values_only.called)
+                        self.assertFalse(self.against_legacy(base, suspect, k, "F64"))
+                    if 4 * (k + 8) <= min(shape):  # predicted, not found out after a wasted solve
+                        self.assertNotIn(min(shape), [call.args[0].shape[0] for call in values_only.call_args_list])
+
+    def test_weak_modes_beyond_those_reported_do_not_matter(self):
+        rng = np.random.default_rng(16)
+        used = 0
+        for shape in ((64, 64), (90, 70), (30, 24)):
+            for weak in (1e-2, 1e-5, 1e-7):
+                base, suspect = weak_tail(rng, shape, (3.0, 2.0, 1.0, 0.5), (weak, weak / 2, weak / 4))
+                with self.subTest(shape=shape, weak=weak):
+                    used += self.against_legacy(base, suspect, 4, "F64")
+        self.assertEqual(used, 9)
 
 
 class TestStoredMatrices(Equivalence):
