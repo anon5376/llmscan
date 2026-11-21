@@ -52,6 +52,19 @@ class TestProjectionMeasurements(unittest.TestCase):
         self.assertEqual(core.rank_one_excess(w, stats, "F16", "F32"), 0.)
         self.assertEqual(core.rank_one_excess(w, stats, "F32", "F16"), 0.)
 
+    def test_f64_subnormal_projection_uses_scaled_tail_energy(self):
+        # Work in integer multiples of the smallest representable weight.
+        units = np.zeros((3, 3))
+        units[0] = [3, 11, 17]
+        axis = np.array([1., 2., 3.]) / np.sqrt(14.)
+        projected = np.rint(units - np.outer(axis, axis @ units))
+        step = np.finfo(np.float64).smallest_subnormal
+        base = units * step
+        stats = core.analyze_delta(base, projected * step, 1)
+        self.assertEqual(stats.singular_values[0] / step, 5.)
+        self.assertEqual(stats.frobenius / step, 6.)
+        self.assertEqual(core.rank_one_excess(base, stats, "F64", "F64"), 0.)
+
     def test_signed_partial_projection_fit_for_wide_and_tall_weights(self):
         rng = np.random.default_rng(5)
         for shape in [(8, 15), (15, 8)]:
