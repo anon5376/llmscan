@@ -919,6 +919,23 @@ class TestAnomalySignals(unittest.TestCase):
                 expected = {layer_name(i) for i in range(14, 20)} if jump == 0 else set()
                 self.assertEqual(set(findings), expected)
 
+    def test_leading_axes_without_a_drift_sample_use_switched_angle(self):
+        rows = [row(layer_name(i)) for i in range(20)]
+        eye = np.eye(4)
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        for switch, jump, detected in [(15, 2, True), (15, 7, False),
+                                       (15, 20, False), (45, 7, True)]:
+            with self.subTest(switch=switch, jump=jump):
+                angle = np.radians(switch)
+                changed = np.cos(angle) * eye[2] + np.sin(angle) * eye[3]
+                spaces = {r.name: np.column_stack((eye[0], eye[1], changed if r.layer >= 14 else eye[2]))
+                          for r in rows}
+                theta = np.radians(jump)
+                axes = {layer_name(13): eye[0], layer_name(14): np.cos(theta) * eye[0] + np.sin(theta) * eye[1]}
+                findings = subspace_outliers(rows, spaces, 3., stats, axes)
+                expected = {layer_name(i) for i in range(14, 20)} if detected else set()
+                self.assertEqual(set(findings), expected)
+
     def test_recurring_clique_with_matched_rank_among_wandering_peers(self):
         rows = [row(layer_name(i)) for i in range(30)]
         stats = {r.name: Measurements(2., 1.) for r in rows}

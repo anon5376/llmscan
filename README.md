@@ -291,7 +291,9 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      by the outlier factor. The shared space must also stay stable at each observed
      boundary. Independently resolved leading axes must agree with that space. Where
      measurements are sparse, the scanner estimates leading-axis drift per layer from
-     successive observations inside an uninterrupted regime.
+     successive observations inside an uninterrupted regime. Even without a drift
+     estimate, a directly observed leading-axis step at the boundary must be smaller
+     than the switched angle by the configured outlier factor.
      A separately resolved and stable leading edit can corroborate a secondary switch on
      its own. At a single terminal boundary this requires separation even in the second
      principal angle, or evidence of a higher-dimensional shared space. A terminal switch

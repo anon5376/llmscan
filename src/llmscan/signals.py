@@ -349,7 +349,7 @@ def _isolated_cliques(ids: list[int], angles: np.ndarray, layer_count: int,
 
 def _stable_angles(angles: np.ndarray, members: np.ndarray, background: np.ndarray,
                    adjacent: np.ndarray, factor: float, floor: float,
-                   sampled: np.ndarray | None = None) -> float | None:
+                   sampled: np.ndarray | None = None, max_boundary_step: float = math.inf) -> float | None:
     """Check this candidate against the majority and its observed boundary neighbors."""
     within = (members[:, None] & members) | (background[:, None] & background)
     cross = members[:, None] & background
@@ -372,7 +372,7 @@ def _stable_angles(angles: np.ndarray, members: np.ndarray, background: np.ndarr
     a, b = ids[:-1], ids[1:]
     same_run = runs[a] == runs[b]
     boundary = (b == a + 1) & (members[a] != members[b])
-    boundary_limit = math.acos(0.9)
+    boundary_limit = min(math.acos(0.9), max_boundary_step)
     if sampled is None or same_run.any():
         rates = angles[a[same_run], b[same_run]] / (b - a)[same_run]
         boundary_limit = min(boundary_limit, factor * rates.max(initial=floor))
@@ -441,7 +441,7 @@ def _shared_space_switch(geometry: _OutputGeometry, members: np.ndarray,
         alignment = min(np.linalg.norm(common[i].T @ geometry.leading_axes[i]) for i in np.flatnonzero(known))
         if (math.acos(min(1., alignment)) > tolerance
                 or _stable_angles(geometry.leading_angles, members, background, adjacent,
-                                  factor, floor, sampled=known) is None):
+                                  factor, floor, sampled=known, max_boundary_step=separation / factor) is None):
             return None
     return (f"shared output dimension {k}, maximum shared-space angle {math.degrees(width):.2f} degrees, "
             f"minimum switched angle {math.degrees(separation):.2f} degrees")
