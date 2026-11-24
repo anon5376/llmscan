@@ -92,6 +92,12 @@ class TestCrossDtypeComparison(unittest.TestCase):
                 tracemalloc.stop()
         self.assertLess(peak, 4 * n)  # less than ONE float32 copy of the tensor; whole-tensor decoding needs ~9n
 
+    def test_same_dtype_detects_signed_zero_in_partial_final_chunk(self):
+        a = np.zeros(32_769, dtype=np.float32)  # two 64 KiB chunks plus one value
+        b = a.copy()
+        b[-1] = -0.0
+        self.assertEqual(compare_one(self.tmp, ("F32", a), ("F32", b)), inventory.CHANGED)
+
     def test_same_dtype_byte_comparison_memory_is_bounded_by_the_chunk_not_the_tensor(self):
         n = 8_000_000  # 32 MB per side; reading each tensor whole would allocate at least 32 MB
         a = np.zeros(n, dtype=np.float32)
@@ -104,7 +110,7 @@ class TestCrossDtypeComparison(unittest.TestCase):
                 peak = tracemalloc.get_traced_memory()[1]
             finally:
                 tracemalloc.stop()
-        self.assertLess(peak, 8 << 20)
+        self.assertLess(peak, 1 << 20)
 
 
 class TestBoundedOpenMaps(unittest.TestCase):
