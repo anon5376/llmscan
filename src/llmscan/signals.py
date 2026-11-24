@@ -540,9 +540,13 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
         switch = "secondary subspace"
         primary = _stable_angles(geometry.leading_angles, members, background, adjacent, factor, floor)
         terminal = switches.sum() == 1
-        second = geometry.cosines[1][outside]
-        secondary = np.arccos(np.clip(second.max(), 0., 1.))
-        if finest and primary is not None and np.isfinite(secondary) and (not terminal or secondary > limit):
+        second = geometry.cosines[1]
+        secondary = None
+        if np.isfinite(second.diagonal(1)[switches]).all():
+            # Every boundary measured a second mode. Other pairs can bound
+            # its separation only where both writers resolved that mode.
+            secondary = math.acos(min(1., np.nanmax(second[outside])))
+        if finest and primary is not None and secondary is not None and (not terminal or secondary > limit):
             across = angles[outside].min()
             evidence = (f"minimum between-group angle {math.degrees(across):.2f} degrees, "
                         f"leading axes within {math.degrees(primary):.2f} degrees")

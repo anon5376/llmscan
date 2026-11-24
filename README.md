@@ -256,6 +256,9 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      For ranks `p` and `q`, the overlap between orthonormal bases yields `min(p, q)` principal
      angles. The largest measures departure from containment and is invariant to basis rotation.
      If the smaller space lies inside the larger, all paired angles are zero.
+     For each resolved rank, layers reaching that rank can also compare their additional
+     modes directly. A line shared by two planes supplies no evidence about how their
+     secondary modes compare. A secondary switch requires observations at the boundary.
      With eight other independent layers and a coherent majority, it tests the candidate's
      median angle against peer dispersion, allowing for local angular drift.
      When several groups share a leading edit, the scanner compares their secondary modes.

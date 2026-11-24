@@ -818,6 +818,24 @@ class TestAnomalySignals(unittest.TestCase):
                 ranked = rank.rank_tensors(rows, stats, subspaces=spaces)
                 self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, target)
 
+    def test_secondary_measurement_needed_at_the_boundary_but_not_at_every_outside_layer(self):
+        rows = [row(layer_name(i)) for i in range(23)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        eye = np.eye(6)
+        terminal = set(range(18, 23))
+        for lines, measured in [(range(5, 8), True), (range(15, 18), False)]:
+            with self.subTest(lines=lines):
+                spaces, axes = {}, {}
+                for r in rows:
+                    modes = [0, 2] if r.layer in terminal else [0, 1]
+                    q = eye[:, [3] if r.layer in lines else modes]
+                    spaces[r.name] = q
+                    theta = np.radians(3 * (-1)**r.layer)
+                    axes[r.name] = q[:, 0] if r.layer in lines else q @ [np.cos(theta), np.sin(theta)]
+                ranked = rank.rank_tensors(rows, stats, directions=axes, subspaces=spaces)
+                flagged = {r.layer for r in ranked if r.tier == "T3" and r.layer in terminal}
+                self.assertEqual(flagged, terminal if measured else set())
+
     def test_two_moving_modes_with_an_intermittently_resolved_shared_mode(self):
         rows = [row(layer_name(i)) for i in range(19)]
         run = set(range(6, 11))
