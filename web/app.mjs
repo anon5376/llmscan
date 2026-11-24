@@ -246,7 +246,7 @@ const COLUMNS = {
   tier: { key: 'tier', label: 'Tier', cell: (t) => tierBadge(t.tier) },
   reason: { key: 'name', label: 'Tensor and reason', class: 'grow', cell: (t) => [tensorButton(t), h('p', { class: 'reason' }, t.reason)] },
   name: { key: 'name', label: 'Tensor', class: 'grow', cell: tensorButton },
-  layer: { key: 'layer', label: 'Layer', class: 'num roomy', cell: (t) => (t.layer == null ? '–' : String(t.layer)) },
+  layer: { key: 'layer', label: 'Layer', class: 'num optional', cell: (t) => (t.layer == null ? '–' : String(t.layer)) },
   kind: { key: 'kind', label: 'Kind', class: 'optional', cell: (t) => h('code', null, t.kind || '–') },
   status: { key: 'status', label: 'Status', cell: (t) => statusBadge(t.status) },
   shape: {
