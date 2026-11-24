@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -229,9 +230,8 @@ def _recurring_rank_shift(names: list[str], members: np.ndarray, stats: dict[str
     return None
 
 
-def _coherent_groups(angles: np.ndarray, layer_count: int, factor: float, floor: float) -> np.ndarray | None:
-    """Find the finest supported partition with a gap between all within- and between-group angles."""
-    best = None
+def _coherent_groups(angles: np.ndarray, layer_count: int, factor: float, floor: float) -> Iterator[np.ndarray]:
+    """Yield partitions with a gap between all within- and between-group angles."""
     labels = np.zeros(len(angles), dtype=int)
     nearest = angles[0].copy()
     # If every inter-group distance exceeds every group diameter, farthest-first
@@ -252,12 +252,11 @@ def _coherent_groups(angles: np.ndarray, layer_count: int, factor: float, floor:
         same = labels[:, None] == labels
         within = angles[same].max()
         if within <= math.acos(0.9) and angles[~same].min() > factor * max(floor, within):
-            best = labels.copy()
-    return best
+            yield labels.copy()
 
 
 def _trajectory_groups(ids: list[int], angles: np.ndarray, layer_count: int,
-                       factor: float, floor: float) -> tuple[np.ndarray, float] | None:
+                       factor: float, floor: float) -> Iterator[tuple[np.ndarray, float]]:
     """Find angularly isolated groups whose successive observations follow a slow path."""
     # Single linkage lets a path accumulate a large total rotation. At each
     # merge the shortest edge between components is the separation of the
@@ -284,25 +283,28 @@ def _trajectory_groups(ids: list[int], angles: np.ndarray, layer_count: int,
                     rates = angles[members[:-1], members[1:]] / np.diff(layers[members])
                     step = max(step, float(rates.max()))
                 if step <= math.acos(0.9) and separation > factor * max(floor, step):
-                    return groups, step
+                    yield groups, step
         labels[labels == b] = a
         previous = max(floor, separation)
-    return None
 
 
 def _subspace_groups(ids: list[int], angles: np.ndarray, layer_count: int,
-                     factor: float, floor: float) -> tuple[np.ndarray, np.ndarray, str] | None:
-    """Return group labels and the angular scale supporting each group's separation."""
-    labels = _coherent_groups(angles, layer_count, factor, floor)
-    if labels is not None:
+                     factor: float, floor: float) -> Iterator[tuple[np.ndarray, np.ndarray, str]]:
+    """Visit supported partitions from fine to coarse, with their angular resolution."""
+    coherent = list(_coherent_groups(angles, layer_count, factor, floor))
+    for labels in reversed(coherent):
         within = angles[labels[:, None] == labels].max()
-        return labels, np.full(labels.max() + 1, within), "maximum within-group angle"
-    trajectory = _trajectory_groups(ids, angles, layer_count, factor, floor)
-    if trajectory is not None:
-        labels, step = trajectory
-        return labels, np.full(labels.max() + 1, step), "maximum within-group step per layer"
-
-    return _isolated_cliques(ids, angles, layer_count, factor, floor)
+        yield labels, np.full(labels.max() + 1, within), "maximum within-group angle"
+    if coherent:
+        return
+    found = False
+    for labels, step in _trajectory_groups(ids, angles, layer_count, factor, floor):
+        found = True
+        yield labels, np.full(labels.max() + 1, step), "maximum within-group step per layer"
+    if not found:
+        cliques = _isolated_cliques(ids, angles, layer_count, factor, floor)
+        if cliques is not None:
+            yield cliques
 
 
 def _isolated_cliques(ids: list[int], angles: np.ndarray, layer_count: int,
@@ -368,12 +370,23 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
     """Locate isolated changes in all modes, or in secondary modes under a shared leading edit."""
     floor = math.sqrt(2 * width * math.ulp(1.))
     factor = max(1., factor)
-    groups = _subspace_groups(ids, angles, layer_count, factor, floor)
-    if groups is None:
-        return {}
-    labels, widths, spread = groups
     adjacent = np.diff(ids) == 1
-    primary = _shared_primary(names, directions, width, labels, adjacent, factor, floor)
+    findings = {}
+    for i, (labels, widths, spread) in enumerate(_subspace_groups(ids, angles, layer_count, factor, floor)):
+        # Secondary modes use the finest supported partition. A whole-space
+        # switch can encompass several nearby subgroups within that partition.
+        primary = _shared_primary(names, directions, width, labels, adjacent, factor, floor) if i == 0 else None
+        found = _partition_switches(ids, names, angles, overlap, factor, floor, adjacent, primary,
+                                    labels, widths, spread)
+        for name, reason in found.items():
+            findings.setdefault(name, reason)
+    return findings
+
+
+def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, overlap: np.ndarray,
+                        factor: float, floor: float, adjacent: np.ndarray,
+                        primary: tuple[float, np.ndarray, float] | None,
+                        labels: np.ndarray, widths: np.ndarray, spread: str) -> dict[str, str]:
     sizes = np.bincount(labels)
     findings = {}
     for label in np.flatnonzero(sizes < sizes.max()):

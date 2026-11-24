@@ -624,7 +624,7 @@ class TestAnomalySignals(unittest.TestCase):
             with self.subTest(cover=cover):
                 theta = np.radians(cover[:10] + [90] * 4 + cover[10:])
                 angles = np.abs(theta[:, None] - theta)
-                result = _trajectory_groups(ids, angles, len(ids), 3., 1e-6)
+                result = next(_trajectory_groups(ids, angles, len(ids), 3., 1e-6), None)
                 if cover == smooth:
                     labels, step = result
                     self.assertEqual(set(np.flatnonzero(labels != labels[0])), set(range(10, 14)))
@@ -741,6 +741,22 @@ class TestAnomalySignals(unittest.TestCase):
                 self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
                 self.assertTrue(all("smallest cross-group principal angle" in r.reason
                                     for r in ranked if r.tier == "T3"))
+
+    def test_whole_space_switch_with_two_nearby_minor_regimes(self):
+        rows = [row(layer_name(i)) for i in range(24)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        eye = np.eye(6)
+        spaces = {}
+        for r in rows:
+            if 9 <= r.layer < 15:
+                angle = np.radians(12 if r.layer >= 12 else 0)
+                spaces[r.name] = np.cos(angle) * eye[:, 2:4] + np.sin(angle) * eye[:, 4:]
+            else:
+                spaces[r.name] = eye[:, :2]
+        findings = subspace_outliers(rows, spaces, 3., stats)
+        self.assertEqual(set(findings), {layer_name(i) for i in range(9, 15)})
+        self.assertTrue(all("whole output subspace switch in 6 layers" in why
+                            for why in findings.values()))
 
     def test_whole_space_switch_needs_each_mode_to_leave_and_an_abrupt_boundary(self):
         eye = np.eye(4)
