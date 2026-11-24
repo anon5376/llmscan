@@ -565,12 +565,9 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
     return findings
 
 
-def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float,
-                      stats: dict[str, Measurements] | None = None,
-                      directions: dict[str, np.ndarray] | None = None,
-                      direction_flags: dict[str, str] | None = None) -> dict[str, str]:
-    """Refine leading-axis findings using the resolved spaces in the same output coordinates."""
-    leading = dict(direction_flags or {})
+def _subspace_cohorts(rows: list[InventoryRow], subspaces: dict[str, np.ndarray],
+                      directions: dict[str, np.ndarray] | None):
+    """Compare each measured rank with all layers that resolve at least that many modes."""
     groups = defaultdict(lambda: defaultdict(list))
     for r in rows:
         kind = canonical_kind(r.kind)
@@ -578,7 +575,6 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
             key = (stack_of(r.name), kind, r.base_shape, r.base_dtype, r.suspect_dtype, subspaces[r.name].shape[0])
             groups[key][r.layer].append(r.name)
 
-    findings = {}
     for layers in groups.values():
         # One independent vote per layer. Ambiguous layers (e.g. several
         # same-kind experts in one block) do not define a reference trajectory.
@@ -587,20 +583,41 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
             continue
         names = [layers[i][0] for i in ids]
         bases = [subspaces[name] for name in names]
-        width = bases[0].shape[0]
         ranks = np.array([q.shape[1] for q in bases])
-        multi_mode = ranks.max() > 1
-        if not multi_mode and directions and all(n in directions for n in names):
+        if ranks.max() == 1 and directions and all(n in directions for n in names):
             continue  # The direction signal already calibrates this pure leading-axis cohort.
         overlap = _principal_cosines(bases)
+        yield ids, names, bases, overlap, len(layers), True
+        # Containment agrees only on the paired modes. A line inside two
+        # distinct planes supplies no vote about their secondary directions.
+        # Retain physical layer IDs so missing modes cannot invent a boundary.
+        for rank in np.unique(ranks)[1:]:
+            keep = np.flatnonzero(ranks >= rank)
+            if len(keep) < 9:
+                break
+            count = sum(any(subspaces[n].shape[1] >= rank for n in group) for group in layers.values())
+            yield ([ids[i] for i in keep], [names[i] for i in keep], [bases[i] for i in keep],
+                   overlap[:, keep[:, None], keep], count, False)
+
+
+def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float,
+                      stats: dict[str, Measurements] | None = None,
+                      directions: dict[str, np.ndarray] | None = None,
+                      direction_flags: dict[str, str] | None = None) -> dict[str, str]:
+    """Refine leading-axis findings using the resolved spaces in the same output coordinates."""
+    leading = dict(direction_flags or {})
+    findings = {}
+    for ids, names, bases, overlap, layer_count, full in _subspace_cohorts(rows, subspaces, directions):
+        width = bases[0].shape[0]
+        ranks = np.array([q.shape[1] for q in bases])
         angles = np.arccos(np.clip(np.nanmin(overlap, axis=0), 0., 1.))
         np.fill_diagonal(angles, 0.)
         agreement = angles <= math.acos(0.9)
-        if multi_mode:
-            findings.update(_subspace_switches(ids, names, len(layers), angles, overlap,
+        if len(overlap) > 1:
+            findings.update(_subspace_switches(ids, names, layer_count, angles, overlap,
                                                directions, bases, factor))
         supporters = agreement[np.argmax(agreement.sum(axis=1))]
-        if supporters.sum() <= len(layers) / 2:
+        if supporters.sum() <= layer_count / 2:
             # A repeated space can itself be exceptional among otherwise
             # unrelated spaces. Require an isolated clique, recurrence across
             # separate layer ranges, and an independent spectral departure.
@@ -621,12 +638,12 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
             peers = Peers.summarize(np.delete(separation, i).tolist())
             limit = max(max(1., factor) * peers.median, peers.median + 6 * 1.4826 * peers.mad,
                         math.sqrt(2 * width * math.ulp(1.)))
-            if name in leading:
+            if full and name in leading:
                 # A change of resolved rank can change which axis leads. Count
                 # containment votes from measured spaces even if their leading
                 # axes were tied or unavailable.
                 contained = supporters & (ranks != ranks[i]) & agreement[i] & (angles[i] <= limit)
-                if contained.sum() > (len(layers) - 1) / 2:
+                if contained.sum() > (layer_count - 1) / 2:
                     del leading[name]
             if name in findings or separation[i] <= limit:
                 continue

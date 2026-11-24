@@ -805,6 +805,19 @@ class TestAnomalySignals(unittest.TestCase):
                 expected = {layer_name(i) for i in run} if moving == 2 else set()
                 self.assertEqual(set(findings), expected)
 
+    def test_contained_lines_supply_no_evidence_about_a_planes_second_mode(self):
+        rows = [row(layer_name(i)) for i in range(23)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        eye = np.eye(6)
+        for target, lines in [({7}, {5, 6, 8, 9}), (set(range(6, 11)), {3})]:
+            with self.subTest(target=target, lines=lines):
+                spaces = {}
+                for r in rows:
+                    modes = [0, 2] if r.layer in target else [0, 1]
+                    spaces[r.name] = eye[:, [0] if r.layer in lines else modes]
+                ranked = rank.rank_tensors(rows, stats, subspaces=spaces)
+                self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, target)
+
     def test_two_moving_modes_with_an_intermittently_resolved_shared_mode(self):
         rows = [row(layer_name(i)) for i in range(19)]
         run = set(range(6, 11))
