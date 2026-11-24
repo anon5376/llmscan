@@ -1082,6 +1082,24 @@ class TestAnomalySignals(unittest.TestCase):
         findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
         self.assertFalse(any("subspace expansion" in why for why in findings.values()))
 
+    def test_steady_tilt_inside_a_turning_expansion_is_not_a_strength_step(self):
+        rows = [row(layer_name(i)) for i in range(31)]
+        eye = np.eye(5)
+        run = range(11, 17)
+        for ramp in [False, True]:
+            with self.subTest(ramp=ramp):
+                spaces, spectra = {}, {}
+                for r, axis in zip(rows, self.wandering_axes(eye, len(rows), False)):
+                    directions, strengths = [axis], [100.]
+                    if r.layer in run:
+                        directions = [np.cos(.2) * axis + np.sin(.2) * eye[2], eye[3]]
+                        strengths.append(4. + 2. * run.index(r.layer) if ramp else 8.)
+                    spaces[r.name] = np.column_stack(directions)
+                    spectra[r.name] = core.OutputSpectrum(np.array(strengths), 0., .5, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual({n for n, why in findings.items() if "subspace expansion" in why},
+                                 set() if ramp else {layer_name(i) for i in run})
+
     def test_tracking_completes_a_run_that_leaves_the_majority_envelope(self):
         rows = [row(layer_name(i)) for i in range(31)]
         eye = np.eye(6)

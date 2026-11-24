@@ -952,22 +952,23 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
     if not measured[background].all():
         return {}
     scale = max(spectra[names[i]].scale for i in np.flatnonzero(measured))
-    lower, upper, extra, noise = np.full((4, len(names)), np.nan)
+    lower, upper, mode_lower, mode_upper, extra, noise = np.full((6, len(names)), np.nan)
     for i in np.flatnonzero(measured):
         spectrum = spectra[names[i]]
         ratio = spectrum.scale / scale
         reference = references[i]
         lo, hi, unpaired = spectrum.outside_bounds(reference.basis, bases[i], reference.paired_rank)
+        # For a turning reference, track both the full complement and the
+        # eligible extra modes. A steady tilt can separate their levels
+        # without producing any motion in either one.
+        mode_lo, mode_hi = lo, hi
         if math.isfinite(reference.supported_strength):
-            # A turning plane can contribute to the total residual as the
-            # span gains or loses coverage. The same interval must certify
-            # the boundary and bound ordinary steps: only the measured
-            # extra modes supply a lower bound, while hi covers all motion.
-            lo = unpaired
+            mode_lo, mode_hi = unpaired, math.hypot(unpaired, spectrum.omitted)
         unpaired = min(unpaired, reference.supported_strength)
         margin = reference.uncertainty * spectrum.retained.max()
         lower[i], upper[i], extra[i], noise[i] = ratio * np.array(
             [max(0., lo - margin), hi + margin, max(0., unpaired - margin), spectrum.noise])
+        mode_lower[i], mode_upper[i] = ratio * max(0., mode_lo - margin), ratio * (mode_hi + margin)
     bounds = np.sort(upper[background] + noise[background])
     # A shoulder can overlap wider intervals, but must clear a strict majority
     # of the entire cohort and connect to a core above every reference interval.
@@ -977,7 +978,8 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
         return {}
     elevated = (ranks > p) & (resolved > bounds[layer_count // 2])
     adjacent = (np.diff(ids) == 1) & measured[:-1] & measured[1:]
-    steps = np.maximum(upper[1:] - lower[:-1], upper[:-1] - lower[1:])
+    steps = np.maximum.reduce((upper[1:] - lower[:-1], upper[:-1] - lower[1:],
+                               mode_upper[1:] - mode_lower[:-1], mode_upper[:-1] - mode_lower[1:]))
     outside_step = _ordinary_step(steps[adjacent & background[:-1] & background[1:]])
     unit = noise[measured].max()
     confirmed = []
@@ -990,7 +992,7 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
         breaks = np.flatnonzero((np.diff(np.asarray(ids)[outer]) != 1) | np.diff(elevated[outer])) + 1
         for segment in np.split(outer, breaks):
             if len(segment) > 1:
-                outer_motion[segment] = _expansion_step(segment[:-1], steps, lower, upper, factor)
+                outer_motion[segment] = _expansion_step(segment[:-1], steps, mode_lower, upper, factor)
         for start, end in _bounded_runs(ids, members, adjacent, extent):
             run = np.arange(start, end + 1)
             if not strong[run].any():
@@ -998,11 +1000,11 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
             # Estimate motion in each uninterrupted segment. A long, flat
             # core supplies no evidence about step variation in a shoulder.
             segments = np.split(run, np.flatnonzero(np.diff(strong[run])) + 1)
-            inside_step = max(_expansion_step(segment[:-1], steps, lower, upper, factor)
+            inside_step = max(_expansion_step(segment[:-1], steps, mode_lower, upper, factor)
                               for segment in segments)
             limit = factor * max(outside_step, inside_step)
             boundaries = [(run[0], run[0]-1), (run[-1], run[-1]+1)]
-            if any(lower[i] - upper[j] <= max(limit, factor * outer_motion[j], noise[i] + noise[j])
+            if any(mode_lower[i] - upper[j] <= max(limit, factor * outer_motion[j], noise[i] + noise[j])
                    for i, j in boundaries if 0 <= j < len(names)):
                 continue
             confirmed.append((start, end))
