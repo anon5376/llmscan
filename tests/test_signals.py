@@ -960,6 +960,28 @@ class TestAnomalySignals(unittest.TestCase):
                 self.assertEqual(set(found), expected)
                 self.assertTrue(all("local majority trajectory" in reason for reason in found.values()))
 
+    def test_spaced_endpoint_anchors_use_equally_spaced_majority_observations(self):
+        eye = np.eye(5)
+        rows = [row(layer_name(i)) for i in range(27)]
+        for reverse, drops in product([False, True], [{19}, {17, 19}]):
+            with self.subTest(reverse=reverse, drops=drops):
+                spaces, spectra, expected = {}, {}, set()
+                for r in rows:
+                    depth = 26 - r.layer if reverse else r.layer
+                    angle = np.radians(2. * depth)
+                    axes = [np.cos(angle) * eye[0] + np.sin(angle) * eye[1]]
+                    values = [12.]
+                    if depth not in drops:
+                        axes.append(eye[2])
+                        values.append(9.)
+                    if depth > 20:
+                        axes.append(eye[3])
+                        values.append(8.)
+                        expected.add(r.name)
+                    spaces[r.name] = np.column_stack(axes)
+                    spectra[r.name] = core.OutputSpectrum(np.array(values), 0., 1., 1.)
+                self.assertEqual(set(subspace_outliers(rows, spaces, 3., spectra=spectra)), expected)
+
     def test_endpoint_forecast_error_at_the_same_physical_horizon(self):
         ids = [*range(11), 11, 14, 22]
         eye = np.eye(3)

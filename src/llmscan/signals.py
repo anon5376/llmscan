@@ -721,7 +721,7 @@ def _endpoint_references(ids: list[int], bases: list[np.ndarray], peers: np.ndar
     stop = len(ids) if direction == 1 else -1
     spacing = ids[b] - ids[a]
     observed = {ids[j]: j for j in peers}
-    pairs = [(j, k) for j, k in zip(peers[:-1], peers[1:]) if ids[k] - ids[j] == spacing]
+    pairs = [(observed[depth - spacing], k) for depth, k in observed.items() if depth - spacing in observed]
     for i in range(b + direction, stop, direction):
         horizon = ids[i] - ids[b]
         t = 1 + horizon / spacing
@@ -760,7 +760,8 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
 
     # Directly observed steps may accelerate. Only an unobserved span needs
     # its average speed checked against ordinary motion.
-    gaps = np.diff(np.asarray(ids)[peers])
+    depths = np.asarray(ids)
+    gaps = np.diff(depths[peers])
     rates = within.diagonal(1) / gaps
     consecutive = rates[gaps == 1]
     floor = math.sqrt(2 * bases[0].shape[0] * math.ulp(1.))
@@ -776,16 +777,21 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
         before, after = peers[peers < i], peers[peers > i]
         if len(before) and len(after):
             a, b = before[-1], after[0]
-        elif i == peers[0]:
-            a, b = after[:2]
-        elif i == peers[-1]:
-            a, b = before[-2:]
+        elif i == peers[0] or i == peers[-1]:
+            # Back the nearest majority neighbor with an observed interval
+            # at least as long as its distance to this held-out endpoint.
+            neighbors = after if i == peers[0] else before[::-1]
+            b = neighbors[0]
+            anchors = neighbors[np.abs(depths[neighbors] - ids[b]) >= abs(ids[b] - ids[i])]
+            if not len(anchors):
+                references.append(None)
+                continue
+            a = anchors[0]
         else:
             references.append(None)
             continue
         t = (ids[i] - ids[a]) / (ids[b] - ids[a])
-        # Extend at most one observed interval to validate a held-out endpoint.
-        reference = _geodesic(bases[a], bases[b], t, floor) if -1 <= t <= 2 else None
+        reference = _geodesic(bases[a], bases[b], t, floor)
         if reference is not None:
             cosine = np.linalg.svd(reference.T @ basis, compute_uv=False).min()
             error = math.acos(min(1., cosine))

@@ -269,8 +269,8 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      If the majority space drifts with depth, the scanner also estimates a reference
      along the shortest Grassmann geodesic between flanking majority layers.
      Each majority layer is held out when measuring its prediction error and
-     complement strength. At a majority endpoint, the nearest two remaining
-     majority layers predict at most one interval beyond their observations.
+     complement strength. At a majority endpoint, two remaining majority
+     layers predict at most one anchor interval beyond their observations.
      The local reference must reduce the worst angular error
      relative to the best fixed representative by the outlier factor. Average
      drift across gaps must agree with rates measured on adjacent majority layers.
