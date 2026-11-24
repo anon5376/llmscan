@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Local-first: same-origin only, so a report can be read but never sent anywhere. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>llmscan workbench</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="workbench.css">
+  <script type="module" src="app.mjs"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to the report</a>
+  <header class="topbar">
+    <p class="brand"><strong>llmscan</strong> workbench</p>
+    <div class="topbar-actions">
+      <button type="button" class="button quiet" data-action="demo">Open demo</button>
+      <button type="button" class="button quiet" data-action="files">Pick files</button>
+      <button type="button" class="button primary" data-action="folder">Import report folder</button>
+      <input id="folder-input" type="file" webkitdirectory multiple hidden aria-label="Report folder">
+      <input id="files-input" type="file" multiple accept=".csv,.txt" hidden aria-label="Report files">
+    </div>
+  </header>
+  <div id="notice" class="notice" role="alert" hidden></div>
+  <p id="status" class="sr-only" role="status" aria-live="polite"></p>
+  <main id="main" tabindex="-1">
+    <noscript><p class="loading">The workbench needs JavaScript to read a report in your browser.</p></noscript>
+  </main>
+  <footer class="footer">
+    <p>Reports are read inside this browser tab and never uploaded. Drop a report folder anywhere on the page to import it.</p>
+  </footer>
+  <dialog id="detail-dialog" class="detail" aria-labelledby="detail-dialog-title"></dialog>
+  <div class="drop-hint" aria-hidden="true"><p>Drop the llmscan report folder to open it</p></div>
+</body>
+</html>

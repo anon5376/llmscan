@@ -1,0 +1,179 @@
+// The workbench's view-model and chart maths (web/model.mjs, web/charts.mjs): node --test tests/web/workbench.test.mjs
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+
+import { kindColors, kindOrder, layerColor, linearTicks, logTicks, scale } from "../../web/charts.mjs";
+import {
+  buildWorkbench, filterTensors, formatNumber, formatPercent, median, naturalCompare, pageOf, parseNumber,
+  shortName, sortTensors, tierInfo,
+} from "../../web/model.mjs";
+
+const WEB = new URL("../../web/", import.meta.url);
+
+// What readReport resolves to: records keyed by the CLI's CSV headers, every cell a string.
+const inventoryRow = (name, layer, kind, status, shape = "8x8", suspectShape = shape) => ({
+  name, layer, kind, status, base_dtype: "BF16", suspect_dtype: "BF16",
+  base_shape: status === "only_suspect" ? "" : shape, suspect_shape: status === "only_base" ? "" : suspectShape, numel: "64",
+});
+const deltaRow = (name, layer, kind, status, rank, values = []) => ({
+  name, layer, kind, status, shape: "8x8", effective_rank: rank, seconds: rank ? "0.01" : "",
+  sv_001: values[0] ?? "", sv_002: values[1] ?? "", sv_003: values[2] ?? "",
+});
+const REPORT = {
+  base: "/models/Tiny", suspect: "C:\\models\\Tiny-abliterated\\",
+  inventory: [
+    inventoryRow("lm_head.weight", "", "lm_head", "shape_mismatch", "32x8", "34x8"),
+    inventoryRow("model.layers.0.mlp.down_proj.weight", "0", "down_proj", "changed"),
+    inventoryRow("model.layers.1.mlp.down_proj.weight", "1", "down_proj", "changed"),
+    inventoryRow("model.layers.2.mlp.down_proj.weight", "2", "down_proj", "changed"),
+    inventoryRow("model.layers.10.mlp.down_proj.weight", "10", "down_proj", "changed"),
+    inventoryRow("model.layers.2.self_attn.q_proj.weight", "2", "q_proj", "changed"),
+    inventoryRow("model.layers.2.self_attn.k_proj.weight", "2", "k_proj", "identical"),
+    inventoryRow("model.norm.weight", "", "norm", "identical", "8"),
+  ],
+  ranking: [
+    { rank: "1", tier: "T1", name: "lm_head.weight", layer: "", kind: "lm_head", status: "shape_mismatch", effective_rank: "", sv_001: "", reason: "shape differs: base 32x8 vs suspect 34x8" },
+    { rank: "2", tier: "T2", name: "model.layers.2.self_attn.q_proj.weight", layer: "2", kind: "q_proj", status: "changed", effective_rank: "2.5", sv_001: "0.4", reason: "changed q_proj: outside expected kinds (down_proj, o_proj)" },
+    { rank: "3", tier: "T3", name: "model.layers.10.mlp.down_proj.weight", layer: "10", kind: "down_proj", status: "changed", effective_rank: "6", sv_001: "0.9", reason: "effective_rank 6 is 6.0x the median 1 of changed down_proj tensors (threshold 3x)" },
+    { rank: "4", tier: "T4", name: "model.layers.0.mlp.down_proj.weight", layer: "0", kind: "down_proj", status: "changed", effective_rank: "1.01", sv_001: "0.5", reason: "changed down_proj, consistent with abliteration" },
+    { rank: "5", tier: "T4", name: "model.layers.1.mlp.down_proj.weight", layer: "1", kind: "down_proj", status: "changed", effective_rank: "1", sv_001: "0.4", reason: "changed down_proj, consistent with abliteration" },
+    { rank: "6", tier: "T4", name: "model.layers.2.mlp.down_proj.weight", layer: "2", kind: "down_proj", status: "changed", effective_rank: "1", sv_001: "0.3", reason: "changed down_proj, consistent with abliteration" },
+  ],
+  delta: [
+    deltaRow("model.layers.0.mlp.down_proj.weight", "0", "down_proj", "changed", "1.01", ["0.5", "0.005", "0.004"]),
+    deltaRow("model.layers.1.mlp.down_proj.weight", "1", "down_proj", "changed", "1", ["0.4", "0.004", "0.003"]),
+    deltaRow("model.layers.2.mlp.down_proj.weight", "2", "down_proj", "changed", "1", ["0.3", "0.003"]),
+    deltaRow("model.layers.10.mlp.down_proj.weight", "10", "down_proj", "changed", "6", ["0.9", "0.8", "0.7"]),
+    deltaRow("model.layers.2.self_attn.q_proj.weight", "2", "q_proj", "changed", "2.5", ["0.4", "0.3", "0.01"]),
+    deltaRow("model.layers.2.self_attn.k_proj.weight", "2", "k_proj", "identical", ""),
+  ],
+};
+
+test("joins inventory, ranking and delta into one record per tensor", () => {
+  const model = buildWorkbench(REPORT);
+  assert.equal(model.tensors.size, 8);
+  assert.deepEqual(model.ranking.map((t) => t.rank), [1, 2, 3, 4, 5, 6]);
+  const outlier = model.tensors.get("model.layers.10.mlp.down_proj.weight");
+  assert.equal(model.ranking[2], outlier);
+  assert.deepEqual(
+    { tier: outlier.tier, layer: outlier.layer, status: outlier.status, numel: outlier.numel, effectiveRank: outlier.effectiveRank, spectrum: outlier.spectrum },
+    { tier: "T3", layer: 10, status: "changed", numel: 64, effectiveRank: 6, spectrum: [0.9, 0.8, 0.7] },
+  );
+  assert.match(outlier.reason, /6\.0x the median/);
+  assert.ok(Math.abs(model.tensors.get("model.layers.0.mlp.down_proj.weight").gap - 100) < 1e-9);
+  const unranked = model.tensors.get("model.layers.2.self_attn.k_proj.weight");
+  assert.deepEqual([unranked.tier, unranked.rank, unranked.scanned, unranked.effectiveRank], [null, null, true, null]);
+  assert.equal(model.tensors.get("model.norm.weight").scanned, false);
+});
+
+test("summarises tiers, statuses, kinds and the per-kind yardstick", () => {
+  const model = buildWorkbench(REPORT);
+  assert.deepEqual([...model.tierCounts], [["T1", 1], ["T2", 1], ["T3", 1], ["T4", 3]]);
+  assert.deepEqual(model.statuses, ["identical", "changed", "shape_mismatch"]);
+  assert.deepEqual([...model.statusCounts].sort(), [["changed", 5], ["identical", 2], ["shape_mismatch", 1]]);
+  assert.deepEqual(model.kinds.map((k) => [k.kind, k.total, k.counts.get("changed") ?? 0]),
+    [["down_proj", 4, 4], ["q_proj", 1, 1], ["k_proj", 1, 0], ["lm_head", 1, 0], ["norm", 1, 0]]);
+  assert.equal(formatPercent(model.identicalParams, model.totalParams), "25.00%");
+  assert.deepEqual(model.kindStats.get("down_proj"), { count: 4, median: 1.005 });
+  assert.equal(model.deltaSummary.top.name, "model.layers.10.mlp.down_proj.weight");
+  assert.deepEqual([model.deltaSummary.scanned, model.deltaSummary.measured], [6, 5]);
+  assert.deepEqual([model.baseName, model.suspectName], ["Tiny", "Tiny-abliterated"]);
+});
+
+test("an inventory-only report keeps its ranking and has no ΔW stats", () => {
+  const ranking = REPORT.ranking.map((r) => ({ ...r, effective_rank: "", sv_001: "" }));
+  const model = buildWorkbench({ ...REPORT, ranking, delta: [] });
+  assert.equal(model.hasDelta, false);
+  assert.equal(model.ranking.length, 6);
+  assert.deepEqual(model.measured, []);
+  assert.deepEqual([model.ranking[2].effectiveRank, model.ranking[2].sv1, model.ranking[2].scanned], [null, null, false]);
+  assert.deepEqual([model.deltaSummary.medianRank, model.deltaSummary.top], [null, null]);
+});
+
+test("an empty report and an unknown tier or status are shown, not dropped", () => {
+  const empty = buildWorkbench({ base: "a", suspect: "b", inventory: [], ranking: [], delta: [] });
+  assert.deepEqual([empty.inventory.length, empty.ranking.length, empty.totalParams, empty.hasDelta], [0, 0, 0, false]);
+  assert.equal(formatPercent(empty.identicalParams, empty.totalParams), "–");
+
+  const odd = buildWorkbench({
+    base: "a", suspect: "b",
+    inventory: [{ ...inventoryRow("x.weight", "", "x", "quantized") }],
+    ranking: [{ rank: "1", tier: "T9", name: "x.weight", layer: "", kind: "x", status: "quantized", effective_rank: "nan", sv_001: "inf", reason: "new tier" }],
+    delta: [],
+  });
+  assert.equal(odd.tierCounts.get("T9"), 1);
+  assert.deepEqual(odd.statuses, ["quantized"]);
+  assert.deepEqual(tierInfo("T9"), { id: "T9", label: "T9", meaning: "" });
+  assert.ok(Number.isNaN(odd.ranking[0].effectiveRank));
+  assert.equal(odd.ranking[0].sv1, Infinity);
+});
+
+test("filters by tier, status, kind and every search term", () => {
+  const model = buildWorkbench(REPORT);
+  const names = (rows) => rows.map((t) => t.name);
+  assert.equal(filterTensors(model.ranking, { tiers: new Set(["T4"]) }).length, 3);
+  assert.deepEqual(names(filterTensors(model.ranking, { tiers: new Set(["T1", "T3"]) })), ["lm_head.weight", "model.layers.10.mlp.down_proj.weight"]);
+  assert.deepEqual(names(filterTensors(model.ranking, { query: "  MEDIAN layers.10 " })), ["model.layers.10.mlp.down_proj.weight"]);
+  assert.deepEqual(names(filterTensors(model.inventory, { statuses: new Set(["identical"]), kind: "norm" })), ["model.norm.weight"]);
+  assert.deepEqual(names(filterTensors(model.inventory, { query: "shape mismatch" })), ["lm_head.weight"]);
+  assert.equal(filterTensors(model.inventory, { tiers: new Set(), statuses: new Set(), kind: "", query: "" }).length, 8);
+});
+
+test("sorts naturally and keeps blank cells at the bottom in both directions", () => {
+  const model = buildWorkbench(REPORT);
+  const layers = (rows) => rows.map((t) => t.layer);
+  assert.deepEqual(layers(sortTensors(model.inventory, "layer", "asc")), [0, 1, 2, 2, 2, 10, null, null]);
+  assert.deepEqual(layers(sortTensors(model.inventory, "layer", "desc")), [10, 2, 2, 2, 1, 0, null, null]);
+  assert.deepEqual(sortTensors(model.ranking, "effectiveRank", "desc").map((t) => t.effectiveRank), [6, 2.5, 1.01, 1, 1, null]);
+  assert.deepEqual(["layers.10.w", "layers.2.w", "layers.2.b", "embed"].sort(naturalCompare), ["embed", "layers.2.b", "layers.2.w", "layers.10.w"]);
+  const nan = sortTensors([{ v: NaN }, { v: 2 }, { v: null }, { v: 1 }], "v", "desc").map((t) => t.v);
+  assert.deepEqual(nan.slice(0, 2), [2, 1]);
+});
+
+test("pages clamp to the available rows", () => {
+  const rows = Array.from({ length: 250 }, (_, i) => i);
+  assert.deepEqual(pageOf(rows, 2, 100), { rows: rows.slice(200), page: 2, pages: 3, start: 200, end: 250 });
+  assert.equal(pageOf(rows, 9, 100).page, 2);
+  assert.deepEqual(pageOf([], 0, 100), { rows: [], page: 0, pages: 1, start: 0, end: 0 });
+});
+
+test("parses and prints the numbers the CLI writes", () => {
+  assert.deepEqual(["", " ", "abc", "1.00002", "5e-07", "nan", "inf", "-inf"].map(parseNumber).map(String),
+    ["null", "null", "null", "1.00002", "5e-7", "NaN", "Infinity", "-Infinity"]);
+  assert.deepEqual([null, NaN, Infinity, 0, 1.00002, 4.97312, 0.458873, 1427.3, 7.55e6, 0.000334269].map(formatNumber),
+    ["–", "NaN", "∞", "0", "1", "4.973", "0.4589", "1427", "7.55e6", "3.34e−4"]);
+  assert.equal(median([3, 1, 2, 10]), 2.5);
+  assert.equal(median([]), null);
+  assert.deepEqual(["org/Model-v2", "/a/b/", "C:\\x\\y", ""].map(shortName), ["Model-v2", "b", "y", ""]);
+});
+
+test("chart colours follow the CLI figures and scales stay inside the plot", () => {
+  const colors = kindColors(["down_proj", "o_proj", "attn_output", "zeta"]);
+  assert.deepEqual([colors.get("o_proj"), colors.get("down_proj")], ["#eda100", "#6250d6"]); // the PNG slots
+  assert.equal(new Set(colors.values()).size, 4);
+  assert.deepEqual(kindOrder(["zeta", "down_proj", "q_proj", "attn_output", "q_proj"]), ["q_proj", "down_proj", "attn_output", "zeta"]);
+  assert.equal(kindColors(Array.from({ length: 12 }, (_, i) => `kind${i}`)).get("kind9"), "#898781");
+  assert.deepEqual([layerColor(0), layerColor(1), layerColor(-3)], ["rgb(134, 182, 239)", "rgb(13, 54, 107)", "rgb(134, 182, 239)"]);
+  assert.deepEqual(linearTicks(0.92, 5.3), [1, 2, 3, 4, 5]);
+  assert.deepEqual(linearTicks(0, 27, 12), [0, 5, 10, 15, 20, 25]);
+  assert.deepEqual(linearTicks(3, 3), [3]);
+  assert.deepEqual(logTicks(2e-5, 0.7), [1e-4, 1e-3, 1e-2, 1e-1]);
+  const y = scale([1e-4, 1], [200, 0], true);
+  assert.deepEqual([y(1e-4), y(1e-2), y(1), y(0)].map(Math.round), [200, 100, 0, 200]);
+});
+
+test("the page is local-first: same-origin only, and report text never becomes markup", () => {
+  const sources = Object.fromEntries(["index.html", "workbench.css", "app.mjs", "charts.mjs", "dom.mjs", "model.mjs"]
+    .map((name) => [name, readFileSync(new URL(name, WEB), "utf-8")]));
+  for (const [name, text] of Object.entries(sources)) {
+    const remote = text.match(/(?:https?:)?\/\/[\w.-]+\.[a-z]{2,}[^\s"'`)]*/g) ?? [];
+    assert.deepEqual(remote.filter((url) => url !== "http://www.w3.org/2000/svg"), [], `${name} points off this origin`);
+    assert.doesNotMatch(text, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function/, name);
+  }
+  const csp = /http-equiv="Content-Security-Policy" content="([^"]+)"/.exec(sources["index.html"])[1];
+  for (const rule of ["default-src 'none'", "script-src 'self'", "style-src 'self'", "connect-src 'self'", "form-action 'none'"]) {
+    assert.ok(csp.split("; ").includes(rule), `CSP lacks ${rule}`);
+  }
+  assert.doesNotMatch(csp, /unsafe|\*|https?:/);
+});
