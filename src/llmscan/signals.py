@@ -698,24 +698,80 @@ def _secondary_departures(angles: np.ndarray, names: list[str], bases: list[np.n
     return np.minimum(angles, np.arccos(np.clip(cosines, 0., 1.)))
 
 
-def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarray], ranks: np.ndarray,
-                         angles: np.ndarray, layer_count: int, extent: tuple[int, int],
-                         spectra: dict[str, OutputSpectrum], factor: float) -> dict[str, str]:
-    """Test each unpaired mode against strength outside a common majority space."""
-    p = np.bincount(ranks).argmax()
-    background = ranks == p
-    if background.sum() < 8 or background.sum() <= layer_count / 2 or not np.any(ranks > p):
-        return {}
+def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.ndarray,
+                          peers: np.ndarray, factor: float) -> Iterator[tuple[list[np.ndarray | None], str]]:
+    """Compare a common plane and a locally predicted trajectory of the majority rank."""
     radius = math.acos(0.9)
-    peers = np.flatnonzero(background)
     within = angles[np.ix_(peers, peers)]
-    if within.max() > radius:
-        return {}
-    reference = bases[peers[within.max(axis=1).argmin()]]
-    # All layers use the same observable for the trajectory: the operator
-    # norm in the orthogonal complement of the reference. The maximizing
-    # direction can differ at every layer, even within a contiguous run.
-    measured = np.array([n in spectra for n in names]) & (angles[:, peers].max(axis=1) <= radius)
+    widths = within.max(axis=1)
+    if widths.max() <= radius:
+        reference = bases[peers[widths.argmin()]]
+        yield [reference if a <= radius else None for a in angles[:, peers].max(axis=1)], "majority space"
+
+    # A gap between two minority runs does not supply an ordinary one-layer
+    # rate. Compare the average rate across each gap to the observed rates.
+    gaps = np.diff(np.asarray(ids)[peers])
+    rates = within.diagonal(1) / gaps
+    consecutive = rates[gaps == 1]
+    floor = math.sqrt(2 * bases[0].shape[0] * math.ulp(1.))
+    if (not len(consecutive) or widths.min() <= floor
+            or rates.max() > min(radius, factor * max(floor, _ordinary_step(consecutive)))):
+        return
+
+    references = []
+    errors = []
+    for i, basis in enumerate(bases):
+        # Leave the target out, including when measuring background strength.
+        before, after = peers[peers < i], peers[peers > i]
+        reference = None
+        if len(before) and len(after):
+            a, b = before[-1], after[0]
+            left, cosines, right = np.linalg.svd(bases[a].T @ bases[b], full_matrices=False)
+            if cosines.min() > floor:  # A right angle has no unique shortest arc.
+                # Interpolate aligned principal vectors on the Grassmann geodesic.
+                theta = np.arccos(np.clip(cosines, 0., 1.)) / np.pi
+                t = (ids[i] - ids[a]) / (ids[b] - ids[a])
+                reference = ((bases[a] @ left) * ((1-t) * np.sinc((1-t) * theta))
+                             + (bases[b] @ right.T) * (t * np.sinc(t * theta))) / np.sinc(theta)
+        elif i == peers[0] or i == peers[-1]:
+            # Score endpoint peers against a real neighbor. Do not extrapolate
+            # the path to a candidate beyond the measured reference range.
+            reference = bases[after[0] if len(after) else before[-1]]
+        if reference is not None:
+            cosine = np.linalg.svd(reference.T @ basis, compute_uv=False).min()
+            error = math.acos(min(1., cosine))
+            if i in peers:
+                errors.append(error)
+            if error > radius:
+                reference = None
+        references.append(reference)
+    # Require a material improvement in worst held-out angular error over
+    # the best fixed reference. Jitter alone does not justify a moving frame.
+    if len(errors) == len(peers) and factor * max(floor, max(errors)) < widths.min():
+        yield references, "local majority trajectory"
+
+
+def _expansion_step(links: np.ndarray, steps: np.ndarray, lower: np.ndarray, upper: np.ndarray,
+                    factor: float) -> float:
+    """Separate one exceptional internal step from motion within the two levels."""
+    local = steps[links]
+    if 3 <= len(local) < 8:
+        # Removing one link must leave a strict majority. Compare its minimum
+        # jump with the maximum possible step on every remaining link.
+        k = int(local.argmax())
+        i = links[k]
+        rest = float(np.delete(local, k).max())
+        jump = max(lower[i+1] - upper[i], lower[i] - upper[i+1])
+        if jump > factor * rest:
+            return rest
+    return _ordinary_step(local)
+
+
+def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray], ranks: np.ndarray,
+                        p: int, references: list[np.ndarray | None], description: str, layer_count: int,
+                        extent: tuple[int, int], spectra: dict[str, OutputSpectrum], factor: float) -> dict[str, str]:
+    background = ranks == p
+    measured = np.array([n in spectra and q is not None for n, q in zip(names, references)])
     if not measured[background].all():
         return {}
     scale = max(spectra[names[i]].scale for i in np.flatnonzero(measured))
@@ -723,7 +779,7 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
     for i in np.flatnonzero(measured):
         spectrum = spectra[names[i]]
         ratio = spectrum.scale / scale
-        lo, hi, unpaired = spectrum.outside_bounds(reference, bases[i])
+        lo, hi, unpaired = spectrum.outside_bounds(references[i], bases[i])
         lower[i], upper[i], extra[i], noise[i] = ratio * np.array([lo, hi, unpaired, spectrum.noise])
     bounds = np.sort(upper[background] + noise[background])
     # A shoulder can overlap wider intervals, but must clear a strict majority
@@ -746,8 +802,9 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
             # Estimate motion in each uninterrupted segment. A long, flat
             # core supplies no evidence about step variation in a shoulder.
             segments = np.split(run, np.flatnonzero(np.diff(strong[run])) + 1)
-            inside_step = max(_ordinary_step(steps[segment[:-1]]) for segment in segments)
-            limit = max(1., factor) * max(outside_step, inside_step)
+            inside_step = max(_expansion_step(segment[:-1], steps, lower, upper, factor)
+                              for segment in segments)
+            limit = factor * max(outside_step, inside_step)
             boundaries = [(run[0], run[0]-1), (run[-1], run[-1]+1)]
             if any(lower[i] - upper[j] <= max(limit, noise[i] + noise[j])
                    for i, j in boundaries if 0 <= j < len(names)):
@@ -768,8 +825,24 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
         votes = np.searchsorted(bounds, resolved[i])
         findings[names[i]] = (f"abrupt output subspace expansion beyond rank {p} "
                               f"(unpaired strength at least {resolved[i]/unit:.2f} exceeds "
-                              f"the upper bounds of {votes}/{len(peers)} reference layers, "
+                              f"the upper bounds of {votes}/{len(bounds)} reference layers against the {description}, "
                               "in units of the largest measurement allowance)")
+    return findings
+
+
+def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarray], ranks: np.ndarray,
+                         angles: np.ndarray, layer_count: int, extent: tuple[int, int],
+                         spectra: dict[str, OutputSpectrum], factor: float) -> dict[str, str]:
+    """Test unpaired modes against the measured complement of the majority."""
+    p = np.bincount(ranks).argmax()
+    peers = np.flatnonzero(ranks == p)
+    if len(peers) < 8 or len(peers) <= layer_count / 2 or not np.any(ranks > p):
+        return {}
+    factor = max(1., factor)
+    findings = {}
+    for references, description in _expansion_references(ids, bases, angles, peers, factor):
+        findings.update(_expansions_against(ids, names, bases, ranks, p, references, description,
+                                             layer_count, extent, spectra, factor))
     return findings
 
 

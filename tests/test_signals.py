@@ -916,6 +916,95 @@ class TestAnomalySignals(unittest.TestCase):
                 findings = subspace_outliers(rows[::-1], spaces, 3., spectra=spectra)
                 self.assertEqual(set(findings), {layer_name(i) for i in layout})
 
+    def test_expansion_relative_to_a_drifting_majority_space(self):
+        rows = [row(layer_name(i)) for i in range(28)]
+        eye = np.eye(12)
+        target = range(11, 17)
+        for rank, rate, stepped in product([1, 2, 3], [1., 3.], [False, True]):
+            with self.subTest(rank=rank, rate=rate, stepped=stepped):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    angle = np.radians(rate * r.layer)
+                    line = np.cos(angle) * eye[0] + np.sin(angle) * eye[3]
+                    axes, values = [line, *eye[1:rank]], [10.] * rank
+                    if r.layer in target:
+                        axes.append(eye[4 + target.index(r.layer)])
+                        values.append(2.7 if stepped and r.layer == target.start else 7.)
+                    # Neither basis order nor singular-vector sign defines a trajectory.
+                    spaces[r.name] = (-1)**r.layer * np.column_stack(axes[::-1])
+                    noise = 2.5 if r.layer == 2 else 1.
+                    spectra[r.name] = core.OutputSpectrum(np.array(values[::-1]), 0., noise, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), {layer_name(i) for i in target})
+                self.assertTrue(all("local majority trajectory" in why for why in findings.values()))
+
+    def test_drifting_ramp_and_changes_of_rank_resolution_stay_clear(self):
+        rows = [row(layer_name(i)) for i in range(32)]
+        eye = np.eye(5)
+        for ramp, reverse in product([False, True], [False, True]):
+            with self.subTest(ramp=ramp, reverse=reverse):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    depth = 31 - r.layer if reverse else r.layer
+                    angle = np.radians(2.5 * depth)
+                    line = np.cos(angle) * eye[0] + np.sin(angle) * eye[1]
+                    strength = 0.15 * (depth + 1) if ramp else 4.
+                    noise = 5. if depth < 12 or depth >= 22 else .3
+                    edit = 12 * np.outer(line, line) + strength * np.outer(eye[2], eye[2])
+                    m = core.analyze_delta(0. * eye, edit, 1, noise)
+                    spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+                self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
+
+    def test_drifting_ramp_reaches_resolved_strength_without_an_abrupt_boundary(self):
+        eye = np.eye(5)
+        rows = [row(layer_name(i)) for i in range(32)]
+        for abrupt in [False, True]:
+            with self.subTest(abrupt=abrupt):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    theta = np.radians(2.5 * r.layer)
+                    axis = np.cos(theta) * eye[0] + np.sin(theta) * eye[1]
+                    depth = 1 + min(r.layer, 31 - r.layer)
+                    if abrupt and depth >= 10:
+                        depth = 16
+                    strength = 2. * (depth / 10)**4
+                    edit = 20. * np.outer(axis, axis) + strength * np.outer(eye[3], eye[3])
+                    m = core.analyze_delta(0. * eye, edit, 1, 1.9)
+                    spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), {layer_name(i) for i in range(9, 23)} if abrupt else set())
+
+    def test_an_abrupt_change_between_majority_regimes_is_not_a_drifting_reference(self):
+        eye = np.eye(5)
+        rows = [row(layer_name(i)) for i in range(30)]
+        spaces, spectra = {}, {}
+        for r in rows:
+            angle = np.radians(r.layer + (40 if r.layer >= 12 else 0))
+            axis = np.cos(angle) * eye[0] + np.sin(angle) * eye[1]
+            expanded = 8 <= r.layer < 14
+            spaces[r.name] = np.column_stack((axis, eye[2])) if expanded else axis[:, None]
+            values = [8., 6.] if expanded else [8.]
+            spectra[r.name] = core.OutputSpectrum(np.array(values), 0., 1., 1.)
+        findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+        self.assertFalse(any("subspace expansion" in why for why in findings.values()))
+
+    def test_short_expansion_can_have_one_resolved_internal_change_of_level(self):
+        rows = [row(layer_name(i)) for i in range(24)]
+        for strengths, expected in [([4., 8., 8., 8.], True), ([8., 8., 4., 4., 4., 4.], True),
+                                    ([2.4, 3.6, 3.5, 3.55, 3.45, 3.4], True),
+                                    ([4., 6., 8., 10., 12., 14.], False)]:
+            for reverse in [False, True]:
+                with self.subTest(strengths=strengths, reverse=reverse):
+                    spaces, spectra = {}, {}
+                    target = range(5, 5 + len(strengths))
+                    levels = strengths[::-1] if reverse else strengths
+                    for r in rows:
+                        values = [20., levels[target.index(r.layer)]] if r.layer in target else [20.]
+                        spaces[r.name] = np.eye(4)[:, :len(values)]
+                        spectra[r.name] = core.OutputSpectrum(np.array(values), 0., 1., 1.)
+                    findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                    self.assertEqual(set(findings), {layer_name(i) for i in target} if expected else set())
+
     def test_strength_trajectory_rejects_a_ramp_even_as_extra_axes_rotate(self):
         rows = [row(layer_name(i)) for i in range(19)]
         for strengths, expected in [([1.1] * 5, []), ([1.1, 3., 5., 3., 1.1], []),

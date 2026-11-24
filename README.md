@@ -266,6 +266,16 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      Both outer boundaries must show a resolved jump relative to ordinary steps in
      the reference and within the run at the same confidence level. A terminal run
      with one boundary requires a continuous measured trajectory.
+     If the majority space drifts with depth, the scanner also estimates a reference
+     along the shortest Grassmann geodesic between flanking majority layers.
+     Each majority layer is held out when measuring its prediction error and
+     complement strength. The local reference must reduce the worst angular error
+     relative to the best fixed representative by the outlier factor. Average
+     drift across gaps must agree with rates measured on adjacent majority layers.
+     This comparison requires majority observations on both sides of a candidate.
+     In a short segment a single resolved amplitude jump can separate two levels
+     when every remaining step is smaller by the outlier factor and those steps
+     form a strict majority. Repeated amplitude changes still set the step scale.
      A minority rank drop adds no direction.
      For each resolved rank, layers reaching that rank can also compare their additional
      modes directly. A line shared by two planes supplies no evidence about how their
