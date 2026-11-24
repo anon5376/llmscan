@@ -1101,6 +1101,28 @@ class TestAnomalySignals(unittest.TestCase):
         self.assertEqual(expanded, {layer_name(i) for i in run})
         self.assertTrue(all("against the majority space" in findings[n] for n in expanded))
 
+    def test_coherent_leading_turn_cannot_certify_a_newly_resolved_weak_mode(self):
+        rows = [row(layer_name(i)) for i in range(30)]
+        eye = np.eye(5)
+        run = range(12, 18)
+        for extra in [1., 60.]:
+            with self.subTest(extra=extra):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    resolved = r.layer in run
+                    angle = np.radians(20. if resolved else 0.)
+                    leading = np.cos(angle) * eye[0] + np.sin(angle) * eye[2]
+                    secondary = -np.sin(angle) * eye[0] + np.cos(angle) * eye[2]
+                    edit = (100. * np.outer(leading, leading) + 3. * np.outer(eye[1], eye[1])
+                            + (extra if resolved else 1.) * np.outer(secondary, secondary))
+                    budget = .25 if resolved else (2. if r.layer % 2 else 4.)
+                    m = core.analyze_delta(0. * eye, edit, 1, budget)
+                    spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+                self.assertEqual({q.shape[1] for q in spaces.values()}, {1, 2, 3})
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                expanded = {n for n, why in findings.items() if "subspace expansion" in why}
+                self.assertEqual(expanded, {layer_name(i) for i in run} if extra > 1. else set())
+
     def test_honest_mixed_rank_planes_and_gradual_rank_ramps(self):
         rows = [row(layer_name(i)) for i in range(36)]
         eye = np.eye(5)

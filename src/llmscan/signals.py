@@ -698,6 +698,9 @@ def _secondary_departures(angles: np.ndarray, names: list[str], bases: list[np.n
     return np.minimum(angles, np.arccos(np.clip(cosines, 0., 1.)))
 
 
+_EXPANSION_RADIUS = math.acos(0.9)
+
+
 class _ExpansionReference(NamedTuple):
     basis: np.ndarray
     # Relative operator-norm allowance from the held-out endpoint forecasts.
@@ -835,7 +838,7 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
                           peers: np.ndarray, factor: float, spectra: list[OutputSpectrum | None]
                           ) -> Iterator[tuple[list[_ExpansionReference | None], str]]:
     """Estimate the ceiling-rank plane from full anchors and test partial-layer containment."""
-    radius = math.acos(0.9)
+    radius = _EXPANSION_RADIUS
     p = ranks[peers[0]]
     background = np.flatnonzero(ranks <= p)
     within = angles[np.ix_(peers, peers)]
@@ -999,7 +1002,12 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
         mode_lo, mode_hi = lo, hi
         if math.isfinite(reference.supported_strength):
             mode_lo, mode_hi = unpaired, math.hypot(unpaired, spectrum.omitted)
-        unpaired = min(unpaired, reference.supported_strength)
+            unpaired = min(unpaired, reference.supported_strength)
+        elif ranks[i] > p:
+            # The resolved superset can hide a rotation of the continuing
+            # modes inside it. A fixed or forecast plane admits coherent
+            # continuations within the same radius used to match it.
+            unpaired = min(unpaired, spectrum.outside_continuation(reference.basis, bases[i], _EXPANSION_RADIUS))
         margin = reference.uncertainty * spectrum.retained.max()
         lower[i], upper[i], extra[i], noise[i] = ratio * np.array(
             [max(0., lo - margin), hi + margin, max(0., unpaired - margin), spectrum.noise])

@@ -263,7 +263,10 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      contribute their own containment measurements and strength bounds, even when
      their resolved directions differ within the reference plane.
      The scanner compares the strength of each layer's unpaired modes with an
-     upper bound on the majority edits in the entire orthogonal complement. It tracks
+     upper bound on the majority edits in the entire orthogonal complement.
+     For a fixed or forecast plane, it also bounds the strength that must remain
+     outside any plane within the angular matching tolerance. This accounts for
+     rotation of a strong mode when a weak mode becomes measurable. It tracks
      strength in that same complement across depth, so adjacent expansions can point
      in different directions. At least one layer in a run must clear every reference
      interval after both measurement allowances. A contiguous transition layer must
