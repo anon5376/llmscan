@@ -1019,6 +1019,85 @@ class TestAnomalySignals(unittest.TestCase):
                 method = "tracked majority space" if wandering else "majority ambient span"
                 self.assertTrue(all(method in why for why in findings.values()), findings)
 
+    def test_expansions_against_mixed_rank_backgrounds(self):
+        rows = [row(layer_name(i)) for i in range(31)]
+        eye = np.eye(42)
+        methods = {"static": "majority space", "drifting": "local majority trajectory",
+                   "turning": "majority ambient span", "wandering": "tracked majority space"}
+        for path, start in product(methods, [0, 12, 25]):
+            with self.subTest(path=path, start=start):
+                spaces, spectra = {}, {}
+                run = range(start, start + 6)
+                depths = [30 - r.layer if start == 0 else r.layer for r in rows]
+                reference_depths = sorted(d for r, d in zip(rows, depths) if r.layer not in run)
+                axes = self.wandering_axes(eye, len(rows), path == "wandering")
+                for r, d in zip(rows, depths):
+                    axis = axes[d]
+                    if path == "static":
+                        axis = eye[0]
+                    elif path == "drifting":
+                        a = np.radians(2.5 * d)
+                        axis = np.cos(a) * eye[0] + np.sin(a) * eye[1]
+                    directions, values = [axis, eye[31]], [6., 5.]
+                    if r.layer in run:
+                        shoulder = run[-1] if start == 0 else run[0]
+                        directions.extend([eye[32], eye[33 + run.index(r.layer)]])
+                        values.extend([14. if r.layer == shoulder else 22., 4.])
+                    else:
+                        index = reference_depths.index(d)
+                        # The geodesic case also has a history of full-plane
+                        # observations for held-out multi-step forecasts.
+                        complete = (index < 9 or index in (10, 15, 19, 23, 24)
+                                    if path == "drifting" else index % 2 == 1)
+                        if not complete:
+                            k = index // 2 % 2
+                            directions, values = [directions[k]], [values[k]]
+                    spaces[r.name] = np.column_stack(directions)
+                    spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .5, 1.)
+                ranks = np.array([q.shape[1] for q in spaces.values()])
+                self.assertLess(np.bincount(ranks).max(), len(rows) / 2)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), {layer_name(i) for i in run})
+                self.assertTrue(all(methods[path] in why and "/25 reference layers" in why
+                                    for why in findings.values()), findings)
+
+    def test_mixed_rank_references_require_containment_and_measured_strength(self):
+        rows = [row(layer_name(i)) for i in range(25)]
+        eye = np.eye(5)
+        for incompatible, omitted in [(True, 0.), (False, 12.)]:
+            with self.subTest(incompatible=incompatible):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    axes = [0, 1]
+                    if 9 <= r.layer < 14:
+                        axes.append(2)
+                    elif r.layer % 2 == 0:
+                        axes = [3 if incompatible and r.layer == 0 else 0]
+                    spaces[r.name] = eye[:, axes]
+                    spectra[r.name] = core.OutputSpectrum(np.full(len(axes), 10.),
+                                                          omitted if r.layer == 0 else 0., .5, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertFalse(any("subspace expansion" in why for why in findings.values()))
+
+    def test_honest_mixed_rank_planes_and_gradual_rank_ramps(self):
+        rows = [row(layer_name(i)) for i in range(36)]
+        eye = np.eye(5)
+        for ramp, reverse in product([False, True], repeat=2):
+            with self.subTest(ramp=ramp, reverse=reverse):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    d = 35 - r.layer if reverse else r.layer
+                    angle = np.radians(1.8 * d)
+                    axis = np.cos(angle) * eye[0] + np.sin(angle) * eye[1]
+                    second = .2 * (d + 1) if ramp else (4. if d % 2 else 0.)
+                    third = .34 * max(0, d - 18) if ramp else 0.
+                    edit = (20. * np.outer(axis, axis) + second * np.outer(eye[2], eye[2])
+                            + third * np.outer(eye[3], eye[3]))
+                    m = core.analyze_delta(0. * eye, edit, 1, 2.)
+                    spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+                self.assertEqual({q.shape[1] for q in spaces.values()}, {1, 2, 3} if ramp else {1, 2})
+                self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
+
     def test_honest_wandering_with_constant_and_gradually_resolving_rank(self):
         rows = [row(layer_name(i)) for i in range(31)]
         eye = np.eye(33)

@@ -706,15 +706,17 @@ class _ExpansionReference(NamedTuple):
     paired_rank: int | None = None
 
 
-def _majority_envelope(bases: list[np.ndarray], peers: np.ndarray, tolerance: float,
+def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, tolerance: float,
                        radius: float) -> list[_ExpansionReference | None] | None:
     """Estimate reproducible ambient directions on two interleaved samples of the trajectory."""
-    folds = (peers[::2], peers[1::2])
-    p = bases[peers[0]].shape[1]
+    # Interleave within rank so alternating measurement resolutions cannot
+    # assign every observation of a secondary direction to the same fold.
+    groups = [np.flatnonzero(ranks == r) for r in np.unique(ranks[ranks <= p])]
+    folds = [np.concatenate([g[offset::2] for g in groups]) for offset in (0, 1)]
     hulls = []
     for fold in folds:
         axes, values, _ = np.linalg.svd(np.column_stack([bases[i] for i in fold]), full_matrices=False)
-        # RMS projection on each component across independent rank-p writers.
+        # RMS projection on each component across independent writers.
         rank = np.count_nonzero(values > math.sqrt(len(fold)) * math.sin(tolerance))
         if not p < rank < axes.shape[0]:
             return None
@@ -735,7 +737,7 @@ def _majority_envelope(bases: list[np.ndarray], peers: np.ndarray, tolerance: fl
     for i, (frame, basis) in enumerate(zip(frames, bases)):
         cosines = np.linalg.svd(frame.T @ basis, compute_uv=False)
         paired = min(p, basis.shape[1])
-        if i in peers and cosines[paired-1] < math.cos(tolerance):
+        if ranks[i] <= p and cosines[paired-1] < math.cos(tolerance):
             return None
         if cosines[paired-1] < math.cos(radius):
             references.append(None)
@@ -750,7 +752,7 @@ def _majority_envelope(bases: list[np.ndarray], peers: np.ndarray, tolerance: fl
 
 def _tracked_references(ids: list[int], bases: list[np.ndarray], peers: np.ndarray,
                         angles: np.ndarray, limit: float) -> list[_ExpansionReference | None]:
-    """Carry the nearest majority plane through consecutive measured supersets in either direction."""
+    """Transport a ceiling-rank plane through consecutive observations from either side."""
     references = [None] * len(ids)
     distances = np.full(len(ids), np.inf)
     for j in peers:
@@ -762,8 +764,11 @@ def _tracked_references(ids: list[int], bases: list[np.ndarray], peers: np.ndarr
             frame = bases[j]
             i = j + direction
             while (0 <= i < len(ids) and abs(ids[i] - ids[i-direction]) == 1
-                   and bases[i].shape[1] > frame.shape[1]):
-                left, cosines, _ = np.linalg.svd(bases[i].T @ frame, full_matrices=False)
+                   and bases[i].shape[1] != frame.shape[1]):
+                partial = bases[i].shape[1] < frame.shape[1]
+                if partial and bases[i-direction].shape[1] > frame.shape[1]:
+                    break  # Do not fit a background vote through a candidate.
+                left, cosines, right = np.linalg.svd(bases[i].T @ frame, full_matrices=False)
                 if cosines.min() < math.cos(limit):
                     break
                 distance = abs(ids[i] - ids[j])
@@ -772,7 +777,12 @@ def _tracked_references(ids: list[int], bases: list[np.ndarray], peers: np.ndarr
                     distances[i] = distance
                 # Compare with the incoming plane before projecting it into
                 # the measured space to predict the next physical layer.
-                frame = bases[i] @ left
+                projected = bases[i] @ left
+                if partial:
+                    # Transport the measured directions and retain the part of
+                    # the incoming plane orthogonal to this partial observation.
+                    projected = frame + (projected - frame @ right.T) @ right
+                frame = projected
                 i += direction
     return references
 
@@ -821,13 +831,16 @@ def _endpoint_references(ids: list[int], bases: list[np.ndarray], peers: np.ndar
             yield i, _ExpansionReference(forecast, math.sin(max(errors)) / cosine)
 
 
-def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.ndarray,
+def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.ndarray, ranks: np.ndarray,
                           peers: np.ndarray, factor: float, spectra: list[OutputSpectrum | None]
                           ) -> Iterator[tuple[list[_ExpansionReference | None], str]]:
-    """Compare a common plane and a locally predicted trajectory of the majority rank."""
+    """Estimate the ceiling-rank plane from full anchors and test partial-layer containment."""
     radius = math.acos(0.9)
+    p = ranks[peers[0]]
+    background = np.flatnonzero(ranks <= p)
     within = angles[np.ix_(peers, peers)]
-    widths = within.max(axis=1)
+    containment = angles[np.ix_(peers, background)]
+    widths = containment.max(axis=1)
     if widths.max() <= radius:
         reference = _ExpansionReference(bases[peers[widths.argmin()]])
         yield [reference if a <= radius else None for a in angles[:, peers].max(axis=1)], "majority space"
@@ -837,12 +850,24 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     depths = np.asarray(ids)
     gaps = np.diff(depths[peers])
     rates = within.diagonal(1) / gaps
-    consecutive = rates[gaps == 1]
+    # A ceiling-rank plane may be observed only every other layer. Estimate
+    # its speed over fully observed background intervals at physical depths.
+    outside = np.cumsum(ranks > p)
+    observed = (np.diff(peers) == gaps) & (np.diff(outside[peers]) == 0)
+    # An intervening partial layer can resolve a turn that disappears between
+    # two full anchors. Its departure from either endpoint is a lower bound
+    # on the plane's motion over that physical distance.
+    for k in np.flatnonzero(observed & (gaps > 1)):
+        a, b = peers[k:k+2]
+        inner = np.arange(a + 1, b)
+        rates[k] = max(rates[k], np.max(angles[a, inner] / (depths[inner] - depths[a])),
+                       np.max(angles[b, inner] / (depths[b] - depths[inner])))
+    consecutive = rates[observed]
     floor = math.sqrt(2 * bases[0].shape[0] * math.ulp(1.))
     if not len(consecutive) or widths.min() <= floor or rates.max() > radius:
         return
     ordinary = max(floor, _ordinary_step(consecutive))
-    if np.any(rates[gaps > 1] > factor * ordinary):
+    if np.any(rates[~observed] > factor * ordinary):
         return
 
     # Motion through distinct neighborhoods can turn without improving a
@@ -850,20 +875,19 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     # supplies no independent evidence for tracking rather than jitter.
     if widths.min() > np.median(consecutive) + floor:
         limit = min(radius, factor * ordinary)
-        envelope = _majority_envelope(bases, peers, max(floor, min(radius, ordinary) / factor), radius)
+        envelope = _majority_envelope(bases, ranks, p, max(floor, min(radius, ordinary) / factor), radius)
         # A measured superset can hide ordinary rotation *inside* it. Bound
         # the evidence against continuations from an independent majority
         # observation, even if the projected path itself appears stationary.
-        p = bases[peers[0]].shape[1]
-        horizons = np.abs(depths[peers, None] - depths[peers])
-        expanded = np.flatnonzero([basis.shape[1] > p for basis in bases])
+        horizons = np.abs(depths[peers, None] - depths[background])
+        expanded = np.flatnonzero(ranks > p)
         caps = np.zeros(len(ids))
         for i in expanded:
             if spectra[i] is None:
                 continue
             distances = abs(depths[peers] - ids[i])
             depth = distances.min()
-            motion = max(depth * ordinary, within[horizons == depth].max(initial=0.))
+            motion = max(depth * ordinary, containment[horizons == depth].max(initial=0.))
             caps[i] = min(spectra[i].outside_continuation(bases[j], bases[i], motion)
                           for j in peers[distances == depth])
             if envelope is not None and envelope[i] is not None:
@@ -925,6 +949,13 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
         for ordered in (peers, peers[::-1]):
             for i, prediction in _endpoint_references(ids, bases, ordered, floor, radius):
                 references[i] = prediction
+        # Test the observed directions of partial layers against the same
+        # improvement criterion, including any held-out endpoint forecasts.
+        required = math.cos(widths.min() / factor)
+        for i in np.flatnonzero(ranks < p):
+            ref = references[i]
+            if ref is None or np.linalg.svd(ref.basis.T @ bases[i], compute_uv=False).min() <= required:
+                return
         yield references, "local majority trajectory"
 
 
@@ -947,7 +978,7 @@ def _expansion_step(links: np.ndarray, steps: np.ndarray, lower: np.ndarray, upp
 def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray], ranks: np.ndarray,
                         p: int, references: list[_ExpansionReference | None], description: str, layer_count: int,
                         extent: tuple[int, int], spectra: dict[str, OutputSpectrum], factor: float) -> dict[str, str]:
-    background = ranks == p
+    background = ranks <= p
     measured = np.array([n in spectra and q is not None for n, q in zip(names, references)])
     if not measured[background].all():
         return {}
@@ -1032,16 +1063,19 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
                          angles: np.ndarray, layer_count: int, extent: tuple[int, int],
                          spectra: dict[str, OutputSpectrum], factor: float) -> dict[str, str]:
     """Test unpaired modes against the measured complement of the majority."""
-    p = np.bincount(ranks).argmax()
-    peers = np.flatnonzero(ranks == p)
-    if len(peers) < 8 or len(peers) <= layer_count / 2 or not np.any(ranks > p):
-        return {}
     factor = max(1., factor)
     findings = {}
-    for references, description in _expansion_references(ids, bases, angles, peers, factor,
-                                                         [spectra.get(n) for n in names]):
-        findings.update(_expansions_against(ids, names, bases, ranks, p, references, description,
-                                             layer_count, extent, spectra, factor))
+    observations = [spectra.get(n) for n in names]
+    # Partial layers vote on measured strength and containment. A direction
+    # missing from a layer cannot anchor the orientation of a full plane.
+    for p in np.unique(ranks)[:-1]:
+        count = np.count_nonzero(ranks <= p)
+        peers = np.flatnonzero(ranks == p)
+        if count < 8 or count <= layer_count / 2 or len(peers) < 2:
+            continue
+        for references, description in _expansion_references(ids, bases, angles, ranks, peers, factor, observations):
+            findings.update(_expansions_against(ids, names, bases, ranks, p, references, description,
+                                                 layer_count, extent, spectra, factor))
     return findings
 
 

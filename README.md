@@ -257,7 +257,12 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      angles. The largest measures departure from containment and is invariant to basis rotation.
      If the smaller space lies inside the larger, all paired angles are zero.
      A higher-rank layer can introduce an extra direction outside a coherent majority
-     space. The scanner compares the strength of each layer's unpaired modes with an
+     space. For each candidate rank ceiling, the scanner tests whether the layers at
+     or below it form a strict majority with at least eight measured writers.
+     At least two layers must resolve the full reference rank. Lower-rank layers
+     contribute their own containment measurements and strength bounds, even when
+     their resolved directions differ within the reference plane.
+     The scanner compares the strength of each layer's unpaired modes with an
      upper bound on the majority edits in the entire orthogonal complement. It tracks
      strength in that same complement across depth, so adjacent expansions can point
      in different directions. At least one layer in a run must clear every reference
@@ -267,13 +272,15 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      the reference and within the run at the same confidence level. A terminal run
      with one boundary requires a continuous measured trajectory.
      If the majority space drifts with depth, the scanner also estimates a reference
-     along the shortest Grassmann geodesic between flanking majority layers.
-     Each majority layer is held out when measuring its prediction error and
+     along the shortest Grassmann geodesic between flanking full-rank anchors.
+     Each anchor is held out when measuring its prediction error and
      complement strength. At a majority endpoint, two remaining majority
      layers predict at most one anchor interval beyond their observations.
      The local reference must reduce the worst angular error
      relative to the best fixed representative by the outlier factor. Average
-     drift across gaps must agree with rates measured on adjacent majority layers.
+     drift across gaps must agree with rates measured over uninterrupted background
+     intervals. Lower-rank observations in those intervals can reveal a turn
+     between the full-plane measurements.
      Beyond either end of the majority, two majority layers predict the reference
      at the candidate depth. The scanner checks forecasts over the same anchor
      spacing, distance and direction against held-out majority layers. Their
@@ -281,7 +288,7 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      scanner tests for an abrupt expansion. A distance without a measured
      comparison supplies no forecast.
      For a turning trajectory the scanner also fits an ambient span to each
-     of two interleaved sets of majority layers. The spans must agree in
+     of two sets of majority layers, interleaved within each rank. The spans must agree in
      dimension and orientation. Each set measures the other set's background
      residuals. Additional modes must lie within the coherence radius of
      the orthogonal complement. Only their component outside the span counts
@@ -289,7 +296,9 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      can track a majority plane from either side through consecutive measured
      spaces. Each step must retain the incoming plane within the ordinary
      angular step allowance. The incoming plane measures complement strength
-     before its projection into the layer supplies the next reference.
+     before its projection into the layer supplies the next reference. At a
+     lower-rank layer, tracking updates the observed directions and carries the
+     orthogonal part of the incoming plane forward.
      In both cases, an independent majority observation bounds how much
      strength could come from a turn hidden inside the measured space.
      The angular allowance covers ordinary motion over that distance and
