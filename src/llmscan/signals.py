@@ -680,15 +680,21 @@ def _expansion_evidence(probe: np.ndarray, bases: list[np.ndarray], names: list[
     """Compare edit strength along the same extra directions on both sides of a boundary."""
     members = np.zeros(len(names), dtype=bool)
     members[run] = True
-    lower, upper = np.full((2, len(names)), np.nan)
-    for i in np.flatnonzero(background | members):
-        if names[i] not in spectra:
-            return None
-        lower[i], upper[i] = spectra[names[i]].projected_bounds(probe, bases[i])
-    # Each observed operator norm can differ from its latent value by one
-    # noise unit. Require disjoint intervals over the entire reference group.
-    strength, reference = lower[run].min(), upper[background].max()
-    if strength <= reference + 2:
+    active = np.flatnonzero(background | members)
+    if any(names[i] not in spectra for i in active):
+        return None
+    # Share the scale before comparing physical amplitudes. Forming each
+    # physical norm first could overflow even for finite checkpoint entries.
+    scale = max(spectra[names[i]].scale for i in active)
+    lower, upper, noise = np.full((3, len(names)), np.nan)
+    for i in active:
+        spectrum = spectra[names[i]]
+        ratio = spectrum.scale / scale
+        lo, hi = spectrum.projected_bounds(probe, bases[i])
+        lower[i], upper[i], noise[i] = ratio * lo, ratio * hi, ratio * spectrum.noise
+    strength = (lower[run] - noise[run]).min()
+    reference = (upper[background] + noise[background]).max()
+    if strength <= reference:
         return None
     ordinary = adjacent & ((background[:-1] & background[1:]) | (members[:-1] & members[1:]))
     steps = np.maximum(upper[1:] - lower[:-1], upper[:-1] - lower[1:])
@@ -697,8 +703,10 @@ def _expansion_evidence(probe: np.ndarray, bases: list[np.ndarray], names: list[
     gaps = np.where(members[:-1], lower[:-1] - upper[1:], lower[1:] - upper[:-1])
     if not np.all(gaps[boundaries] > limit):
         return None
-    return (f"extra-mode strength at least {strength:.2f} noise units "
-            f"vs at most {reference:.2f} in the majority")
+    # Quote the bounds in multiples of a single shared resolution.
+    unit = noise[active].max()
+    return (f"extra-mode strength at least {strength/unit:.2f} vs at most {reference/unit:.2f} "
+            "in the majority, in units of the largest measurement allowance")
 
 
 def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarray], ranks: np.ndarray,

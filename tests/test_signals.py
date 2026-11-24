@@ -874,10 +874,25 @@ class TestAnomalySignals(unittest.TestCase):
                     else:
                         weights = [8.]
                     spaces[r.name] = np.eye(5)[:, :len(weights)]
-                    spectra[r.name] = core.OutputSpectrum(np.array(weights), omitted)
+                    spectra[r.name] = core.OutputSpectrum(np.array(weights), omitted, 1., 1.)
                 findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
                 expected = run if not (gradual or missing or omitted) else set()
                 self.assertEqual(set(findings), {layer_name(i) for i in expected})
+
+    def test_expansion_compares_absolute_strength_when_layer_budgets_differ(self):
+        rows = [row(layer_name(i)) for i in range(17)]
+        run = set(range(6, 11))
+        for scale, extra in product([1e-220, 1., 1e220], [4., 30.]):
+            with self.subTest(scale=scale, extra=extra):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    strength = extra if r.layer in run else 4.
+                    budget = .5 if r.layer in run else 5.
+                    edit = np.diag([20., strength, 0., 0., 0.]) * scale
+                    m = core.analyze_delta(np.zeros_like(edit), edit, 1, budget * scale)
+                    spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), {layer_name(i) for i in run} if extra > 4 else set())
 
     def test_mixed_ranks_share_an_intersection_and_count_independent_moving_modes(self):
         rows = [row(layer_name(i)) for i in range(21)]

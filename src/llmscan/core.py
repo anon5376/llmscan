@@ -27,9 +27,11 @@ _ROWS_PER_BLOCK = 4096
 
 
 class OutputSpectrum(NamedTuple):
-    """Singular values in basis-column order and the largest omitted value, in noise units."""
+    """Basis-ordered singular values, omitted norm and noise floor, all divided by scale."""
     retained: np.ndarray
     omitted: float
+    noise: float
+    scale: float
 
     def projected_bounds(self, probe: np.ndarray, basis: np.ndarray) -> tuple[float, float]:
         """Bound the operator norm of the edit projected onto an orthonormal probe."""
@@ -493,8 +495,8 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int, subspace_bu
     spectrum = None
     if output_subspace is not None and noise is not None:
         floor = max(noise, math.sqrt(math.ulp(1.) * sum(w_suspect.shape) * total))
-        spectrum = OutputSpectrum(np.sqrt(energy[:dim][::-1]) / floor,
-                                  math.sqrt(energy[dim]) / floor if dim < len(energy) else 0.)
+        spectrum = OutputSpectrum(np.sqrt(energy[:dim][::-1]),
+                                  math.sqrt(energy[dim]) if dim < len(energy) else 0., floor, scale)
     return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),
                       fraction, second_share, direction, gain, projection_error, column_spike, tail_norm_fraction,
                       fit_residual, base_probe, output_subspace, spectrum)
