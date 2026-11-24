@@ -59,7 +59,8 @@ class OutputSpectrum(NamedTuple):
     def outside_continuation(self, anchor: np.ndarray, basis: np.ndarray, angle: float) -> float:
         """Strength guaranteed outside any anchor-rank plane within the angular allowance."""
         rank = anchor.shape[1]
-        best_rank_residual = np.partition(self.retained, -rank-1)[-rank-1]
+        best_rank_residual = (np.partition(self.retained, -rank-1)[-rank-1]
+                              if len(self.retained) > rank else 0.)
         if angle >= math.pi / 2:
             return float(best_rank_residual)
         coordinates = anchor.T @ basis

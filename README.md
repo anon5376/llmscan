@@ -259,7 +259,8 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      A higher-rank layer can introduce an extra direction outside a coherent majority
      space. For each candidate rank ceiling, the scanner tests whether the layers at
      or below it form a strict majority with at least eight measured writers.
-     At least two layers must resolve the full reference rank. Lower-rank layers
+     Fixed-plane anchors and moving forecasts require at least two layers
+     resolving the full reference rank. Lower-rank layers
      contribute their own containment measurements and strength bounds, even when
      their resolved directions differ within the reference plane.
      The scanner compares the strength of each layer's unpaired modes with an
@@ -290,10 +291,13 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      worst angular error widens the complement-strength intervals before the
      scanner tests for an abrupt expansion. A distance without a measured
      comparison supplies no forecast.
-     For a turning trajectory the scanner also fits an ambient span to each
-     of two sets of majority layers, interleaved within each rank. The spans must agree in
-     dimension and orientation. Each set measures the other set's background
-     residuals. Additional modes must lie within the coherence radius of
+     The scanner also fits a principal ambient span to the majority observations,
+     independently of their depth order or adjacent angular steps. Its dimension
+     is the smallest whose maximum projection residual on every training writer
+     is within the angular tolerance. Each majority writer is held out in turn.
+     Every held-out fit must reproduce the full fit's dimension and orientation,
+     and must contain the held-out observation within that tolerance.
+     Additional modes must lie within the coherence radius of
      the orthogonal complement. Only their component outside the span counts
      toward expansion strength. Where a shared span fits poorly, the scanner
      can track a majority plane from either side through consecutive measured
@@ -302,17 +306,21 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      before its projection into the layer supplies the next reference. At a
      lower-rank layer, tracking updates the observed directions and carries the
      orthogonal part of the incoming plane forward.
-     In both cases, an independent majority observation bounds how much
-     strength could come from a turn hidden inside the measured space.
-     The angular allowance covers ordinary motion over that distance and
-     the largest majority turn observed at the same distance.
+     The ambient reference bounds strength outside any continuation within
+     its angular matching tolerance. Tracking uses an independent majority
+     observation to bound strength that could come from a hidden turn.
+     Its allowance covers ordinary motion over that distance and the largest
+     majority turn observed at the same distance.
      In a short segment a single resolved amplitude jump can separate two levels
      when every remaining step is smaller by the outlier factor and those steps
      form a strict majority. Repeated amplitude changes still set the step scale.
      A minority rank drop adds no direction.
      For each resolved rank, layers reaching that rank can also compare their additional
-     modes directly. A line shared by two planes supplies no evidence about how their
-     secondary modes compare. A secondary switch requires observations at the boundary.
+     modes directly. A lower-rank observation can challenge a majority in this
+     comparison when it distinguishes the same groups on the same number of
+     resolved modes as a higher-rank writer. A line shared by two planes supplies
+     no evidence about how their secondary modes compare. A secondary switch
+     requires observations at the boundary.
      With eight other independent layers and a coherent majority, it tests the candidate's
      median angle against peer dispersion, allowing for local angular drift.
      When several groups share a leading edit, the scanner compares their secondary modes.

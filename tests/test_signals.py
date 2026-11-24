@@ -1061,6 +1061,94 @@ class TestAnomalySignals(unittest.TestCase):
                 self.assertTrue(all(methods[path] in why and "/25 reference layers" in why
                                     for why in findings.values()), findings)
 
+    def test_expansion_outside_repeated_background_planes(self):
+        rows = [row(layer_name(i)) for i in range(33)]
+        eye = np.eye(15)
+        for start, mixed, shuffled in product([0, 13, 27], [False, True], [False, True]):
+            with self.subTest(start=start, mixed=mixed, shuffled=shuffled):
+                run = range(start, start + 6)
+                # Each component plane recurs independently. Changing their
+                # depth order leaves the supported ambient directions unchanged.
+                planes = [[0, 1], [1, 2], [0, 3]] * 9
+                if mixed:
+                    planes[1::3] = [[2]] * 9
+                if shuffled:
+                    np.random.default_rng(173).shuffle(planes)
+                background = iter(planes)
+                spaces, spectra = {}, {}
+                for r in rows:
+                    if r.layer in run:
+                        axes, values = [0, 1, 2, 3, 4], [4., 5., 6., 3., 12.]
+                        if mixed:
+                            shoulder = run[-1] if start == 0 else run[0]
+                            values[-1] = 6. if r.layer == shoulder else 12.
+                            axes.append(5 + run.index(r.layer))
+                            values.append(4.)
+                    else:
+                        axes = next(background)
+                        values = [4.] * len(axes)
+                    spaces[r.name] = eye[:, axes]
+                    spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .5, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), {layer_name(i) for i in run})
+                self.assertTrue(all("27/27 reference layers against the majority ambient span" in why
+                                    for why in findings.values()), findings)
+
+    def test_honest_alternating_planes_and_smooth_ambient_ramps(self):
+        rows = [row(layer_name(i)) for i in range(36)]
+        eye = np.eye(6)
+        for ramp, reverse in product([0, 1, 2], [False, True]):
+            with self.subTest(ramp=ramp, reverse=reverse):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    depth = 35 - r.layer if reverse else r.layer
+                    weights = np.zeros(len(eye))
+                    weights[1] = 9.
+                    weights[0 if depth % 2 else 2] = 8.
+                    if ramp:
+                        strength = .8 * max(0, depth - 17)
+                        if ramp == 2:
+                            weights[2 if depth % 2 else 0] = strength
+                        weights[4] = strength
+                    elif 13 <= depth < 19:
+                        weights[:3] = 8.  # All three directions are already supported.
+                    m = core.analyze_delta(0. * eye, np.diag(weights), 1, 1.)
+                    spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+                self.assertEqual({q.shape[1] for q in spaces.values()}, {2, 4} if ramp == 2 else {2, 3})
+                self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
+
+    def test_lower_rank_writers_can_validate_a_unique_ceiling_rank_observation(self):
+        rows = [row(layer_name(i)) for i in range(24)]
+        eye = np.eye(6)
+        for ambient_rank in [2, 3]:
+            with self.subTest(ambient_rank=ambient_rank):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    axes = [r.layer % ambient_rank] if r.layer < 15 else [0, 1]
+                    if r.layer >= 16:
+                        axes = [*range(ambient_rank), 4]
+                    spaces[r.name] = eye[:, axes]
+                    spectra[r.name] = core.OutputSpectrum(np.full(len(axes), 8.), 0., .5, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), {layer_name(i) for i in range(16, 24)})
+                self.assertTrue(all("16/16 reference layers against the majority ambient span" in why
+                                    for why in findings.values()), findings)
+
+    def test_an_unrepeated_background_direction_cannot_validate_an_ambient_span(self):
+        rows = [row(layer_name(i)) for i in range(25)]
+        eye = np.eye(7)
+        spaces, spectra = {}, {}
+        for r in rows:
+            axes = [0, 1 if r.layer % 2 else 2]
+            if r.layer == 4:
+                axes[-1] = 3
+            if 10 <= r.layer < 15:
+                axes = [0, 1, 2, 3, 4]
+            spaces[r.name] = eye[:, axes]
+            spectra[r.name] = core.OutputSpectrum(np.full(len(axes), 8.), 0., 1., 1.)
+        findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+        self.assertFalse(any("subspace expansion" in why for why in findings.values()), findings)
+
     def test_mixed_rank_references_require_containment_and_measured_strength(self):
         rows = [row(layer_name(i)) for i in range(25)]
         eye = np.eye(5)
@@ -1374,7 +1462,7 @@ class TestAnomalySignals(unittest.TestCase):
                         expected.add(r.name)
                 self.assertEqual(set(subspace_outliers(rows, spaces, 3., spectra=spectra)), expected)
 
-    def test_an_abrupt_change_between_majority_regimes_is_not_a_drifting_reference(self):
+    def test_an_abrupt_change_between_majority_regimes_still_has_an_ambient_reference(self):
         eye = np.eye(5)
         rows = [row(layer_name(i)) for i in range(30)]
         spaces, spectra = {}, {}
@@ -1386,7 +1474,8 @@ class TestAnomalySignals(unittest.TestCase):
             values = [8., 6.] if expanded else [8.]
             spectra[r.name] = core.OutputSpectrum(np.array(values), 0., 1., 1.)
         findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
-        self.assertFalse(any("subspace expansion" in why for why in findings.values()))
+        self.assertEqual(set(findings), {layer_name(i) for i in range(8, 14)})
+        self.assertTrue(all("majority ambient span" in why for why in findings.values()))
 
     def test_short_expansion_can_have_one_resolved_internal_change_of_level(self):
         rows = [row(layer_name(i)) for i in range(24)]

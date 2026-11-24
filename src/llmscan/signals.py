@@ -475,9 +475,26 @@ def _shared_space_switch(geometry: _OutputGeometry, members: np.ndarray,
             f"minimum switched angle {math.degrees(separation):.2f} degrees")
 
 
+def _has_reference_majority(members: np.ndarray, layer_count: int, partial_matches: np.ndarray | None) -> bool:
+    """Check whether lower-rank observations contradict a rank-conditioned majority."""
+    size = members.sum()
+    if size <= layer_count / 2:
+        return False
+    if partial_matches is not None and not members.all():
+        # An omitted writer can distinguish groups using the modes it does
+        # resolve. Abstain if it matches observations on both sides or neither.
+        inside, outside = partial_matches[:, members], partial_matches[:, ~members]
+        support = np.count_nonzero(inside.all(axis=1) & ~outside.any(axis=1))
+        oppose = np.count_nonzero(~inside.any(axis=1) & outside.any(axis=1))
+        size += support
+        layer_count += support + oppose
+    return size > layer_count / 2
+
+
 def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angles: np.ndarray,
                        overlap: np.ndarray, directions: dict[str, np.ndarray] | None,
-                       bases: list[np.ndarray], factor: float, extent: tuple[int, int]) -> dict[str, str]:
+                       bases: list[np.ndarray], factor: float, extent: tuple[int, int],
+                       partial_matches: np.ndarray | None) -> dict[str, str]:
     """Locate isolated changes in all modes or in the complement of a stable edit space."""
     width = bases[0].shape[0]
     floor = math.sqrt(2 * width * math.ulp(1.))
@@ -491,6 +508,9 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
     geometry = _OutputGeometry(bases, overlap, axes, np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.)), extent)
     partitions = _subspace_groups(ids, angles, layer_count, factor, floor, extent)
     for i, (labels, widths, spread) in enumerate(partitions):
+        background = labels == np.bincount(labels).argmax()
+        if not _has_reference_majority(background, layer_count, partial_matches):
+            continue
         # A resolved leading axis uses the finest partition. A coarser one
         # can establish a collective switch by separating every changing mode.
         found = _partition_switches(ids, names, angles, geometry, factor, floor, adjacent,
@@ -663,8 +683,9 @@ def _subspace_cohorts(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
         if ranks.max() == 1 and directions and all(n in directions for n in names):
             continue  # The direction signal already calibrates this pure leading-axis cohort.
         overlap = _principal_cosines(bases)
+        departures = np.count_nonzero(overlap < 0.9, axis=0)
         extent = min(layers), max(layers)
-        yield ids, names, bases, overlap, len(layers), extent, True
+        yield ids, names, bases, overlap, len(layers), extent, None
         # Containment agrees only on the paired modes. A line inside two
         # distinct planes supplies no vote about their secondary directions.
         # Retain physical layer IDs so missing modes cannot invent a boundary.
@@ -673,8 +694,16 @@ def _subspace_cohorts(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
             if len(keep) < 9:
                 break
             count = sum(any(subspaces[n].shape[1] >= rank for n in group) for group in layers.values())
+            partial = np.flatnonzero(ranks < rank)
+            # A lower-rank writer can distinguish the same regimes only if
+            # it measures every departing mode. Require its counts against
+            # all kept writers to agree with an actual kept writer's counts.
+            kept_counts = departures[np.ix_(keep, keep)]
+            lower_counts = departures[np.ix_(partial, keep)]
+            votes = [counts for counts in lower_counts if np.any(np.all(kept_counts == counts, axis=1))]
+            matches = np.asarray(votes, dtype=int).reshape(-1, len(keep)) == 0
             yield ([ids[i] for i in keep], [names[i] for i in keep], [bases[i] for i in keep],
-                   overlap[:, keep[:, None], keep], count, extent, False)
+                   overlap[:, keep[:, None], keep], count, extent, matches)
 
 
 def _secondary_departures(angles: np.ndarray, names: list[str], bases: list[np.ndarray],
@@ -709,33 +738,47 @@ class _ExpansionReference(NamedTuple):
     paired_rank: int | None = None
 
 
-def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, tolerance: float,
-                       radius: float) -> list[_ExpansionReference | None] | None:
-    """Estimate reproducible ambient directions on two interleaved samples of the trajectory."""
-    # Interleave within rank so alternating measurement resolutions cannot
-    # assign every observation of a secondary direction to the same fold.
-    groups = [np.flatnonzero(ranks == r) for r in np.unique(ranks[ranks <= p])]
-    folds = [np.concatenate([g[offset::2] for g in groups]) for offset in (0, 1)]
-    hulls = []
-    for fold in folds:
-        axes, values, _ = np.linalg.svd(np.column_stack([bases[i] for i in fold]), full_matrices=False)
-        # RMS projection on each component across independent writers.
-        rank = np.count_nonzero(values > math.sqrt(len(fold)) * math.sin(tolerance))
-        if not p < rank < axes.shape[0]:
+def _ambient_frame(planes: list[np.ndarray], tolerance: float) -> np.ndarray:
+    """Smallest principal span containing every training plane within tolerance."""
+    axes, values, right = np.linalg.svd(np.column_stack(planes), full_matrices=False)
+    # A rarely repeated plane still counts as a whole observation. Test the
+    # largest residual of each writer, rather than the mean over writers.
+    cuts = np.cumsum([q.shape[1] for q in planes[:-1]])
+    coordinates = np.split(values[:, None] * right, cuts, axis=1)
+    low, high = max(q.shape[1] for q in planes), len(values)
+    limit = math.sin(tolerance)
+    while low < high:
+        rank = (low + high) // 2
+        if all(np.linalg.norm(q[rank:], ord=2) <= limit for q in coordinates):
+            high = rank
+        else:
+            low = rank + 1
+    return axes[:, :low]
+
+
+def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, tolerance: float, radius: float,
+                       spectra: list[OutputSpectrum | None], fixed_plane: bool) -> list[_ExpansionReference | None] | None:
+    """Fit an ambient span independent of depth and validate it on every held-out writer."""
+    background = np.flatnonzero(ranks <= p)
+    # Work in lossless thin-QR coordinates. Holding out a writer removes
+    # all of its columns from the fit, even if it is the only writer at its rank.
+    axes, coordinates = np.linalg.qr(np.column_stack([bases[i] for i in background]))
+    planes = np.split(coordinates, np.cumsum(ranks[background][:-1]), axis=1)
+    common = _ambient_frame(planes, tolerance)
+    # A single plane with repeated full anchors already has an observed
+    # orientation for measuring ordinary complement motion. Centering it
+    # between two alternating anchors could erase that motion from the bounds.
+    if common.shape[1] == axes.shape[0] or (common.shape[1] == p and fixed_plane):
+        return None
+    frames = [axes @ common] * len(bases)
+    for j, i in enumerate(background):
+        held_out = _ambient_frame(planes[:j] + planes[j+1:], tolerance)
+        if common.shape != held_out.shape:
             return None
-        hulls.append(axes[:, :rank])
-    if hulls[0].shape != hulls[1].shape:
-        return None
-    agreement = np.linalg.svd(hulls[0].T @ hulls[1], compute_uv=False)
-    if agreement.min() < math.cos(tolerance):
-        return None
-    # Each background residual is measured out of sample. For candidates use
-    # the midpoint of the two supported hulls, independent of the candidate.
-    middle = _geodesic(*hulls, .5, 0.)
-    frames = [middle] * len(bases)
-    for fold, held_out in zip(folds, hulls[::-1]):
-        for i in fold:
-            frames[i] = held_out
+        agreement = np.linalg.svd(common.T @ held_out, compute_uv=False)
+        if agreement.min() < math.cos(tolerance):
+            return None
+        frames[i] = axes @ held_out
     references = []
     for i, (frame, basis) in enumerate(zip(frames, bases)):
         cosines = np.linalg.svd(frame.T @ basis, compute_uv=False)
@@ -745,11 +788,17 @@ def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, toler
         if cosines[paired-1] < math.cos(radius):
             references.append(None)
             continue
+        if common.shape[1] == p:
+            references.append(_ExpansionReference(frame))
+            continue
         # More than p axes can be supported by a wider hull. A weak axis
         # inside it must not push a slightly tilted strong axis into the
         # extra set. Only axes near the orthogonal complement are eligible.
         supported = int(np.count_nonzero(cosines > math.sin(radius)))
-        references.append(_ExpansionReference(frame, paired_rank=supported))
+        strength = math.inf
+        if ranks[i] > p and spectra[i] is not None:
+            strength = spectra[i].outside_continuation(frame, basis, radius)
+        references.append(_ExpansionReference(frame, supported_strength=strength, paired_rank=supported))
     return references
 
 
@@ -844,7 +893,13 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     within = angles[np.ix_(peers, peers)]
     containment = angles[np.ix_(peers, background)]
     widths = containment.max(axis=1)
-    if within.max() <= radius and widths.min() <= radius:
+    fixed_plane = len(peers) >= 2 and within.max() <= radius and widths.min() <= radius
+    envelope = _majority_envelope(bases, ranks, p, radius / factor, radius, spectra, fixed_plane)
+    if envelope is not None:
+        yield envelope, "majority ambient span"
+    if len(peers) < 2:
+        return
+    if fixed_plane:
         reference = _ExpansionReference(bases[peers[widths.argmin()]])
         # The selected plane fits every partial layer. Only planes that
         # resolve at least p directions can be tested as supersets of all
@@ -882,7 +937,6 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     # supplies no independent evidence for tracking rather than jitter.
     if widths.min() > np.median(consecutive) + floor:
         limit = min(radius, factor * ordinary)
-        envelope = _majority_envelope(bases, ranks, p, max(floor, min(radius, ordinary) / factor), radius)
         # A measured superset can hide ordinary rotation *inside* it. Bound
         # the evidence against continuations from an independent majority
         # observation, even if the projected path itself appears stationary.
@@ -897,10 +951,7 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
             motion = max(depth * ordinary, containment[horizons == depth].max(initial=0.))
             caps[i] = min(spectra[i].outside_continuation(bases[j], bases[i], motion)
                           for j in peers[distances == depth])
-            if envelope is not None and envelope[i] is not None:
-                envelope[i] = envelope[i]._replace(supported_strength=caps[i])
         if envelope is not None:
-            yield envelope, "majority ambient span"
             # Track only runs the envelope cannot cover completely. Compare
             # the whole run in the same tracked frame convention, retaining
             # the envelope's independent strength constraint wherever valid.
@@ -912,7 +963,7 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
                     frame = envelope[i]
                     if frame is not None and spectra[i] is not None:
                         _, _, extra = spectra[i].outside_bounds(frame.basis, bases[i], frame.paired_rank)
-                        caps[i] = min(caps[i], extra)
+                        caps[i] = min(caps[i], extra, frame.supported_strength)
         if caps.any():
             tracked = _tracked_references(ids, bases, peers, angles, limit)
             for i in expanded:
@@ -1083,7 +1134,7 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
     for p in np.unique(ranks)[:-1]:
         count = np.count_nonzero(ranks <= p)
         peers = np.flatnonzero(ranks == p)
-        if count < 8 or count <= layer_count / 2 or len(peers) < 2:
+        if count < 8 or count <= layer_count / 2:
             continue
         for references, description in _expansion_references(ids, bases, angles, ranks, peers, factor, observations):
             findings.update(_expansions_against(ids, names, bases, ranks, p, references, description,
@@ -1099,7 +1150,8 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
     """Refine leading-axis findings using the resolved spaces in the same output coordinates."""
     leading = dict(direction_flags or {})
     findings = {}
-    for ids, names, bases, overlap, layer_count, extent, full in _subspace_cohorts(rows, subspaces, directions):
+    for ids, names, bases, overlap, layer_count, extent, partial in _subspace_cohorts(rows, subspaces, directions):
+        full = partial is None
         width = bases[0].shape[0]
         ranks = np.array([q.shape[1] for q in bases])
         angles = np.arccos(np.clip(np.nanmin(overlap, axis=0), 0., 1.))
@@ -1109,14 +1161,14 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
                                                  extent, spectra, factor))
         if len(overlap) > 1:
             findings.update(_subspace_switches(ids, names, layer_count, angles, overlap,
-                                               directions, bases, factor, extent))
+                                               directions, bases, factor, extent, partial))
         if not full and directions:
             # Dropping lower ranks changes the leading-axis reference population.
             # Require the higher-rank outlier to differ in its additional modes.
             angles = _secondary_departures(angles, names, bases, directions)
         agreement = angles <= math.acos(0.9)
         supporters = agreement[np.argmax(agreement.sum(axis=1))]
-        if supporters.sum() <= layer_count / 2:
+        if not _has_reference_majority(supporters, layer_count, partial):
             # A repeated space can itself be exceptional among otherwise
             # unrelated spaces. Require an isolated clique, recurrence across
             # separate layer ranges, and an independent spectral departure.
