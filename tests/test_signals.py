@@ -1407,6 +1407,28 @@ class TestAnomalySignals(unittest.TestCase):
                 findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
                 self.assertFalse(any("subspace expansion" in why for why in findings.values()), findings)
 
+    def test_in_span_jump_does_not_supply_a_boundary_for_a_smooth_extra_mode(self):
+        rows = [row(layer_name(i)) for i in range(31)]
+        eye = np.eye(6)
+        axes = self.wandering_axes(eye, len(rows), False)
+        for reverse, ramp in product([False, True], repeat=2):
+            with self.subTest(reverse=reverse, ramp=ramp):
+                spaces, spectra, expected = {}, {}, set()
+                for r in rows:
+                    i = 30 - r.layer if reverse else r.layer
+                    axis = axes[min(i, 24)]
+                    directions, values = [axis], [10.]
+                    if i > 24:
+                        tangent = -axis[1] * eye[0] + axis[0] * eye[1]
+                        directions.extend([tangent, eye[3]])
+                        values.extend([23., 3. * (i - 24) if ramp else 18.])
+                        if not ramp:
+                            expected.add(r.name)
+                    spaces[r.name] = np.column_stack(directions)
+                    spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .25, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), expected)
+
     def test_endpoint_forecast_error_at_the_same_physical_horizon(self):
         ids = [*range(11), 11, 14, 22]
         eye = np.eye(3)

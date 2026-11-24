@@ -736,6 +736,9 @@ class _ExpansionReference(NamedTuple):
     uncertainty: float = 0.
     supported_strength: float = math.inf
     paired_rank: int | None = None
+    # Measured eligible mode strength in an independently validated span.
+    # Distinct from the continuation bound, which can vary with anchor distance.
+    ambient_extra: float = math.inf
 
 
 def _ambient_frame(planes: list[np.ndarray], tolerance: float) -> np.ndarray:
@@ -955,20 +958,17 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
             motion = max(depth * ordinary, containment[horizons == depth].max(initial=0.))
             caps[i] = min(spectra[i].outside_continuation(bases[j], bases[i], motion)
                           for j in peers[distances == depth])
-        if envelope is not None:
-            # The envelope can constrain strength even when ordinary motion
-            # obscures a boundary in its coordinates. Tracking measures the
-            # boundary in a moving plane, subject to both strength bounds.
-            for i in expanded:
-                frame = envelope[i]
-                if frame is not None and spectra[i] is not None:
-                    _, _, extra = spectra[i].outside_bounds(frame.basis, bases[i], frame.paired_rank)
-                    caps[i] = min(caps[i], extra, frame.supported_strength)
         if caps.any():
             tracked = _tracked_references(ids, bases, peers, angles, limit)
             for i in expanded:
-                if tracked[i] is not None:
-                    tracked[i] = tracked[i]._replace(supported_strength=caps[i])
+                if tracked[i] is None or spectra[i] is None:
+                    continue
+                frame = envelope[i] if envelope is not None else None
+                extra = math.inf
+                if frame is not None:
+                    _, _, extra = spectra[i].outside_bounds(frame.basis, bases[i], frame.paired_rank)
+                    caps[i] = min(caps[i], frame.supported_strength)
+                tracked[i] = tracked[i]._replace(supported_strength=caps[i], ambient_extra=extra)
             yield tracked, "tracked majority space"
 
     references = []
@@ -1052,6 +1052,10 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
         # without producing any motion in either one.
         mode_lo, mode_hi = lo, hi
         if math.isfinite(reference.supported_strength):
+            # An in-span change can look abrupt in tracking coordinates.
+            # Where both frames apply, measure the boundary and ordinary
+            # steps on the strength eligible in both, before applying caps.
+            unpaired = min(unpaired, reference.ambient_extra)
             mode_lo, mode_hi = unpaired, math.hypot(unpaired, spectrum.omitted)
             unpaired = min(unpaired, reference.supported_strength)
         elif ranks[i] > p:

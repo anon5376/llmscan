@@ -302,7 +302,8 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      toward expansion strength. The scanner can also track a majority plane
      from either side through consecutive measured spaces. This can resolve a
      boundary obscured by ordinary motion in the shared span. Wherever both
-     references apply, tracked strength must clear both bounds.
+     references apply, the scanner uses the smaller of their measured extra-mode
+     strengths for boundary steps and checks both continuation bounds.
      Each step must retain the incoming plane within the ordinary
      angular step allowance. The incoming plane measures complement strength
      before its projection into the layer supplies the next reference. At a
