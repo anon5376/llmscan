@@ -14,7 +14,7 @@ from llmscan import core, rank
 from llmscan.interval_fit import _box_excess, fit_excess
 from llmscan.names import stack_of
 from llmscan.removal import joint_excess, promising_symmetric_response, skew_excess
-from llmscan.signals import Measurements, _isolated_cliques, _trajectory_groups, subspace_outliers
+from llmscan.signals import Measurements, _endpoint_references, _isolated_cliques, _trajectory_groups, subspace_outliers
 from test_core import to_bf16
 from test_rank import layer_name, row, run_cli
 
@@ -937,6 +937,64 @@ class TestAnomalySignals(unittest.TestCase):
                 findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
                 self.assertEqual(set(findings), {layer_name(i) for i in target})
                 self.assertTrue(all("local majority trajectory" in why for why in findings.values()))
+
+    def test_expansion_past_either_end_of_a_drifting_majority(self):
+        rows = [row(layer_name(i)) for i in range(29)]
+        eye = np.eye(12)
+        for reverse, varying, stepped in product([False, True], repeat=3):
+            with self.subTest(reverse=reverse, varying=varying, stepped=stepped):
+                spaces, spectra, expected = {}, {}, set()
+                for r in rows:
+                    depth = 28 - r.layer if reverse else r.layer
+                    angle = np.radians(2.3 * depth)
+                    axis = np.cos(angle) * eye[0] + np.sin(angle) * eye[1]
+                    axes, values = [axis, eye[2]], [12., 9.]
+                    if depth >= 22:
+                        axes.append(eye[3 + (depth-22 if varying else 0)])
+                        values.append(3. if stepped and depth == 22 else 8.)
+                        expected.add(r.name)
+                    spaces[r.name] = (-1)**depth * np.column_stack(axes[::-1])
+                    noise = 3. if depth == 4 else 1.
+                    spectra[r.name] = core.OutputSpectrum(np.array(values[::-1]), 0., noise, 1.)
+                found = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(found), expected)
+                self.assertTrue(all("local majority trajectory" in reason for reason in found.values()))
+
+    def test_endpoint_forecast_error_at_the_same_physical_horizon(self):
+        ids = [*range(11), 11, 14, 22]
+        eye = np.eye(3)
+        bases = []
+        for depth in ids:
+            angle = np.radians(1.8 * depth + .05 * depth**2)
+            axis = np.cos(angle) * eye[0] + np.sin(angle) * eye[1]
+            bases.append(axis[:, None] if depth <= 10 else np.column_stack((axis, eye[2])))
+        refs = dict(_endpoint_references(ids, bases, np.arange(11), 1e-7, np.arccos(.9)))
+        self.assertEqual({ids[i] for i in refs}, {11, 14})
+        for i, ref in refs.items():
+            h = ids[i] - 10
+            # Continuing the last step of a quadratic misses the true angle
+            # by the same amount after every held-out endpoint at horizon h.
+            error = np.radians(.05 * h * (h+1))
+            self.assertAlmostEqual(ref.uncertainty, np.tan(error))
+
+    def test_curving_trajectory_with_a_terminal_change_in_rank_resolution(self):
+        eye = np.eye(4)
+        rows = [row(layer_name(i)) for i in range(30)]
+        for reverse, ramp in product([False, True], repeat=2):
+            with self.subTest(reverse=reverse, ramp=ramp):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    depth = 29 - r.layer if reverse else r.layer
+                    angle = np.radians(1.4 * depth + .045 * depth**2)
+                    axis = np.cos(angle) * eye[0] + np.sin(angle) * eye[1]
+                    secondary = -np.sin(angle) * eye[0] + np.cos(angle) * eye[1]
+                    strength = .1 * (depth + 1) if ramp else 2.
+                    noise = 2.2 if ramp or depth < 22 else .5
+                    edit = 40. * np.outer(axis, axis) + strength * np.outer(secondary, secondary)
+                    m = core.analyze_delta(0. * eye, edit, 1, noise)
+                    spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+                self.assertEqual({q.shape[1] for q in spaces.values()}, {1, 2})
+                self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
 
     def test_drifting_ramp_and_changes_of_rank_resolution_stay_clear(self):
         rows = [row(layer_name(i)) for i in range(32)]

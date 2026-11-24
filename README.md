@@ -274,7 +274,12 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      The local reference must reduce the worst angular error
      relative to the best fixed representative by the outlier factor. Average
      drift across gaps must agree with rates measured on adjacent majority layers.
-     This comparison requires majority observations on both sides of a candidate.
+     Beyond either end of the majority, two majority layers predict the reference
+     at the candidate depth. The scanner checks forecasts over the same anchor
+     spacing, distance and direction against held-out majority layers. Their
+     worst angular error widens the complement-strength intervals before the
+     scanner tests for an abrupt expansion. A distance without a measured
+     comparison supplies no forecast.
      In a short segment a single resolved amplitude jump can separate two levels
      when every remaining step is smaller by the outlier factor and those steps
      form a strict majority. Repeated amplitude changes still set the step scale.

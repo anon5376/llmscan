@@ -698,14 +698,64 @@ def _secondary_departures(angles: np.ndarray, names: list[str], bases: list[np.n
     return np.minimum(angles, np.arccos(np.clip(cosines, 0., 1.)))
 
 
+class _ExpansionReference(NamedTuple):
+    basis: np.ndarray
+    # Relative operator-norm allowance from the held-out endpoint forecasts.
+    uncertainty: float = 0.
+
+
+def _geodesic(a: np.ndarray, b: np.ndarray, t: float, floor: float) -> np.ndarray | None:
+    left, cosines, right = np.linalg.svd(a.T @ b, full_matrices=False)
+    if cosines.min() <= floor:  # A right angle has no unique shortest arc.
+        return None
+    theta = np.arccos(np.clip(cosines, 0., 1.)) / np.pi
+    return ((a @ left) * ((1-t) * np.sinc((1-t) * theta))
+            + (b @ right.T) * (t * np.sinc(t * theta))) / np.sinc(theta)
+
+
+def _endpoint_references(ids: list[int], bases: list[np.ndarray], peers: np.ndarray,
+                         floor: float, radius: float) -> Iterator[tuple[int, _ExpansionReference]]:
+    """Predict beyond the last peer, backtesting the same spacing, horizon and direction."""
+    a, b = peers[-2:]
+    direction = 1 if b > a else -1
+    stop = len(ids) if direction == 1 else -1
+    spacing = ids[b] - ids[a]
+    observed = {ids[j]: j for j in peers}
+    pairs = [(j, k) for j, k in zip(peers[:-1], peers[1:]) if ids[k] - ids[j] == spacing]
+    for i in range(b + direction, stop, direction):
+        horizon = ids[i] - ids[b]
+        t = 1 + horizon / spacing
+        forecast = _geodesic(bases[a], bases[b], t, floor)
+        if forecast is None:
+            return
+        cosine = np.linalg.svd(forecast.T @ bases[i], compute_uv=False).min()
+        if cosine < math.cos(radius):
+            continue
+        errors = []
+        for j, k in pairs:
+            target = observed.get(ids[k] + horizon)
+            if target is None:
+                continue
+            trial = _geodesic(bases[j], bases[k], t, floor)
+            if trial is None:
+                continue
+            overlap = np.linalg.svd(trial.T @ bases[target], compute_uv=False).min()
+            errors.append(math.acos(min(1., overlap)))
+        if errors and max(errors) <= radius:
+            # The norm of a projector difference is sin(theta_max). Within
+            # the measured space, the unpaired directions (overlap kernel)
+            # can rotate by up to sin(theta_max) / sigma_min(overlap).
+            yield i, _ExpansionReference(forecast, math.sin(max(errors)) / cosine)
+
+
 def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.ndarray,
-                          peers: np.ndarray, factor: float) -> Iterator[tuple[list[np.ndarray | None], str]]:
+                          peers: np.ndarray, factor: float) -> Iterator[tuple[list[_ExpansionReference | None], str]]:
     """Compare a common plane and a locally predicted trajectory of the majority rank."""
     radius = math.acos(0.9)
     within = angles[np.ix_(peers, peers)]
     widths = within.max(axis=1)
     if widths.max() <= radius:
-        reference = bases[peers[widths.argmin()]]
+        reference = _ExpansionReference(bases[peers[widths.argmin()]])
         yield [reference if a <= radius else None for a in angles[:, peers].max(axis=1)], "majority space"
 
     # Directly observed steps may accelerate. Only an unobserved span needs
@@ -734,14 +784,8 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
             references.append(None)
             continue
         t = (ids[i] - ids[a]) / (ids[b] - ids[a])
-        left, cosines, right = np.linalg.svd(bases[a].T @ bases[b], full_matrices=False)
-        reference = None
         # Extend at most one observed interval to validate a held-out endpoint.
-        # At a right angle the shortest arc through the two planes is ambiguous.
-        if -1 <= t <= 2 and cosines.min() > floor:
-            theta = np.arccos(np.clip(cosines, 0., 1.)) / np.pi
-            reference = ((bases[a] @ left) * ((1-t) * np.sinc((1-t) * theta))
-                         + (bases[b] @ right.T) * (t * np.sinc(t * theta))) / np.sinc(theta)
+        reference = _geodesic(bases[a], bases[b], t, floor) if -1 <= t <= 2 else None
         if reference is not None:
             cosine = np.linalg.svd(reference.T @ basis, compute_uv=False).min()
             error = math.acos(min(1., cosine))
@@ -749,10 +793,13 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
                 errors.append(error)
             if error > radius:
                 reference = None
-        references.append(reference)
+        references.append(_ExpansionReference(reference) if reference is not None else None)
     # Require a material improvement in worst held-out angular error over
     # the best fixed reference. Jitter alone does not justify a moving frame.
     if len(errors) == len(peers) and factor * max(floor, max(errors)) < widths.min():
+        for ordered in (peers, peers[::-1]):
+            for i, prediction in _endpoint_references(ids, bases, ordered, floor, radius):
+                references[i] = prediction
         yield references, "local majority trajectory"
 
 
@@ -773,7 +820,7 @@ def _expansion_step(links: np.ndarray, steps: np.ndarray, lower: np.ndarray, upp
 
 
 def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray], ranks: np.ndarray,
-                        p: int, references: list[np.ndarray | None], description: str, layer_count: int,
+                        p: int, references: list[_ExpansionReference | None], description: str, layer_count: int,
                         extent: tuple[int, int], spectra: dict[str, OutputSpectrum], factor: float) -> dict[str, str]:
     background = ranks == p
     measured = np.array([n in spectra and q is not None for n, q in zip(names, references)])
@@ -784,8 +831,11 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
     for i in np.flatnonzero(measured):
         spectrum = spectra[names[i]]
         ratio = spectrum.scale / scale
-        lo, hi, unpaired = spectrum.outside_bounds(references[i], bases[i])
-        lower[i], upper[i], extra[i], noise[i] = ratio * np.array([lo, hi, unpaired, spectrum.noise])
+        reference = references[i]
+        lo, hi, unpaired = spectrum.outside_bounds(reference.basis, bases[i])
+        margin = reference.uncertainty * spectrum.retained.max()
+        lower[i], upper[i], extra[i], noise[i] = ratio * np.array(
+            [max(0., lo - margin), hi + margin, max(0., unpaired - margin), spectrum.noise])
     bounds = np.sort(upper[background] + noise[background])
     # A shoulder can overlap wider intervals, but must clear a strict majority
     # of the entire cohort and connect to a core above every reference interval.
