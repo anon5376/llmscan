@@ -4,7 +4,9 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { readReport } from "../../web/report.mjs";
-import { extent, kindColors, kindOffset, kindOrder, layerColor, linearTicks, logTicks, scale } from "../../web/charts.mjs";
+import {
+  extent, kindColors, kindOffset, kindOrder, layerColor, linearTicks, logTicks, scale, spectrumRuns,
+} from "../../web/charts.mjs";
 import {
   buildWorkbench, filterTensors, formatNumber, formatPercent, median, naturalCompare, pageOf, parseNumber,
   shortName, sortTensors, tierInfo,
@@ -179,6 +181,10 @@ test("chart colours follow the CLI figures and scales stay inside the plot", () 
     assert.ok(Math.max(...offsets.map(Math.abs)) <= 0.3, `${count} kinds`);
     assert.equal(new Set(offsets).size, count);
   }
+  // zero and non-finite singular values are gaps, never coordinates
+  assert.deepEqual(spectrumRuns([2, 1, 0, 0.5, NaN, 0.2, 0.1, Infinity]), [[[1, 2], [2, 1]], [[4, 0.5]], [[6, 0.2], [7, 0.1]]]);
+  assert.deepEqual(spectrumRuns([NaN, 0, -1]), []);
+  assert.deepEqual(spectrumRuns([3]), [[[1, 3]]]);
   const y = scale([1e-4, 1], [200, 0], true);
   assert.deepEqual([y(1e-4), y(1e-2), y(1), y(0)].map(Math.round), [200, 100, 0, 200]);
 });

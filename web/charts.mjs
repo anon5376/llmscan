@@ -147,17 +147,39 @@ export function rankByLayerChart(tensors, { selected, onPick }) {
   return { chart: root, legend: kinds.map((kind) => ({ kind, color: colors.get(kind) })) };
 }
 
-/** A spectrum as a line, or as a dot when the scan kept one singular value per tensor (`-k 1`). */
-function spectrumMark(t, sx, sy, color, width) {
-  if (t.spectrum.length === 1) return svg('circle', { cx: sx(1), cy: sy(t.spectrum[0]), r: width + 2, fill: color });
-  return svg('polyline', {
-    points: t.spectrum.map((v, i) => `${sx(i + 1)},${sy(v)}`).join(' '),
-    fill: 'none', stroke: color, 'stroke-width': width, 'stroke-linejoin': 'round',
+const drawable = (v) => Number.isFinite(v) && v > 0;
+
+/**
+ * The stretches of a spectrum a log axis can show, as [index, value] pairs. A zero or a non-finite value
+ * (the CLI writes `nan` when ΔW has a non-finite entry) has no place on it and is left as a gap.
+ */
+export function spectrumRuns(spectrum) {
+  const runs = [];
+  let run = null;
+  spectrum.forEach((v, i) => {
+    if (!drawable(v)) run = null;
+    else {
+      if (!run) runs.push(run = []);
+      run.push([i + 1, v]);
+    }
   });
+  return runs;
+}
+
+/** A spectrum as lines, with a dot for a value that stands alone (`-k 1`, or between two gaps); null when nothing can be drawn. */
+function spectrumMark(t, sx, sy, color, width) {
+  const runs = spectrumRuns(t.spectrum);
+  if (!runs.length) return null;
+  return svg('g', null, runs.map((run) => (run.length === 1
+    ? svg('circle', { cx: sx(run[0][0]), cy: sy(run[0][1]), r: width + 2, fill: color })
+    : svg('polyline', {
+      points: run.map(([i, v]) => `${sx(i)},${sy(v)}`).join(' '),
+      fill: 'none', stroke: color, 'stroke-width': width, 'stroke-linejoin': 'round',
+    }))));
 }
 
 function spectrumDomain(tensors) {
-  const values = tensors.flatMap((t) => t.spectrum).filter((v) => Number.isFinite(v) && v > 0);
+  const values = tensors.flatMap((t) => t.spectrum).filter(drawable);
   const longest = Math.max(2, extent(tensors.map((t) => t.spectrum.length))[1]);
   return {
     x: { domain: [1, longest] },
@@ -177,6 +199,7 @@ export function kindSpectraChart(kind, tensors, { layerRange: [lo, hi], selected
   for (const t of ordered) {
     const color = t.layer == null ? PALETTE.ink2 : layerColor((t.layer - lo) / Math.max(hi - lo, 1));
     const mark = t.name === selected ? spectrumMark(t, sx, sy, PALETTE.ink, 2.5) : spectrumMark(t, sx, sy, color, 1.3);
+    if (!mark) continue;
     append(mark, svg('title', null, `${t.name}\neffective rank ${formatNumber(t.effectiveRank)}`));
     root.append(pickable(mark, t, onPick));
   }
@@ -195,7 +218,7 @@ export function tensorSpectrumChart(tensor, peers, color) {
     peers.map((t) => spectrumMark(t, sx, sy, PALETTE.axis, 1)),
     spectrumMark(tensor, sx, sy, color, 2.2),
     tensor.spectrum.length > 1 && tensor.spectrum.length <= 12
-      && tensor.spectrum.map((v, i) => svg('circle', { cx: sx(i + 1), cy: sy(v), r: 3, fill: color })),
+      && spectrumRuns(tensor.spectrum).flat().map(([i, v]) => svg('circle', { cx: sx(i), cy: sy(v), r: 3, fill: color })),
   );
   return root;
 }

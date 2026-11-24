@@ -5,7 +5,9 @@ import {
   TIERS, buildWorkbench, filterTensors, formatCount, formatNumber, formatPercent, formatShape,
   pageOf, sortTensors, statusLabel, tierInfo,
 } from './model.mjs';
-import { extent, kindOrder, kindSpectraChart, layerGradient, PALETTE, rankByLayerChart, tensorSpectrumChart } from './charts.mjs';
+import {
+  extent, kindOrder, kindSpectraChart, layerGradient, PALETTE, rankByLayerChart, spectrumRuns, tensorSpectrumChart,
+} from './charts.mjs';
 
 const PAGE_SIZE = 100;
 const DEMO_FILES = ['pair.txt', 'inventory.csv', 'ranking.csv', 'delta.csv'];
@@ -201,6 +203,8 @@ function staleDeltaNote(model) {
 function breakable(name) {
   return name.split(/(?<=[./_])/).flatMap((part, i) => (i ? [h('wbr'), part] : [part]));
 }
+
+const hasSpectrum = (t) => spectrumRuns(t.spectrum).length > 0;
 
 function tensorButton(t) {
   return h('button', {
@@ -409,8 +413,8 @@ function deltaCharts(model) {
   const draw = () => {
     const options = { selected: state.selected, onPick: (name) => select(name, { open: true }) };
     const withLayer = model.measured.filter((t) => t.layer != null);
-    const spectra = (kind) => model.measured.filter((t) => t.kind === kind && t.spectrum.length);
-    const kinds = kindOrder(model.measured.filter((t) => t.spectrum.length).map((t) => t.kind));
+    const spectra = (kind) => model.measured.filter((t) => t.kind === kind && hasSpectrum(t));
+    const kinds = kindOrder(model.measured.filter(hasSpectrum).map((t) => t.kind));
     const layerRange = extent(withLayer.map((t) => t.layer));
     const byLayer = withLayer.length ? rankByLayerChart(withLayer, options) : null;
     const offStack = model.measured.length - withLayer.length;
@@ -504,7 +508,8 @@ function deltaFacts(model, t) {
   }
   const kind = model.kindStats.get(t.kind);
   const ratio = kind && t.effectiveRank > 0 ? t.effectiveRank / kind.median : null;
-  const peers = model.measured.filter((p) => p.kind === t.kind && p !== t && p.spectrum.length);
+  const peers = model.measured.filter((p) => p.kind === t.kind && p !== t && hasSpectrum(p));
+  const drawn = spectrumRuns(t.spectrum).flat().length;
   return [
     staleDeltaNote(model),
     h('dl', { class: 'facts' },
@@ -513,8 +518,9 @@ function deltaFacts(model, t) {
       fact('σ₁ / σ₂', formatNumber(t.gap)),
       kind?.count > 1 && fact(['Median of ', formatCount(kind.count), ' changed ', h('code', null, t.kind)],
         [formatNumber(kind.median), ratio != null && Number.isFinite(ratio) && h('p', { class: 'fine' }, `this tensor is ${formatNumber(ratio)}× that`)])),
-    t.spectrum.length > 0 && h('figure', null, tensorSpectrumChart(t, peers, PALETTE.ink),
+    drawn > 0 && h('figure', null, tensorSpectrumChart(t, peers, PALETTE.ink),
       h('figcaption', { class: 'fine' }, `Top ${t.spectrum.length === 1 ? 'singular value' : `${t.spectrum.length} singular values`} of ΔW`
+        + (drawn < t.spectrum.length ? ` (${t.spectrum.length - drawn} zero or non-finite, not drawn)` : '')
         + (peers.length ? `; gray: the other ${formatCount(peers.length)} changed ${t.kind} tensors.` : '.'))),
   ];
 }
