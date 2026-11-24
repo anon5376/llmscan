@@ -78,7 +78,7 @@ def _unchanged_kinds(rows: list[dict]) -> list[str]:
 
 
 def plot_spectra(rows: list[dict], path: Path, title: str) -> bool:
-    """One panel per changed matrix kind; one line per layer, light (early) to dark (late).
+    """One panel per changed matrix kind; one spectrum per layer, light (early) to dark (late).
     Returns whether a figure was written: nothing is, and nothing is touched, without changed tensors."""
     changed = _changed(rows)
     by_kind = defaultdict(list)
@@ -107,6 +107,9 @@ def plot_spectra(rows: list[dict], path: Path, title: str) -> bool:
         n = len(by_kind[kind])
         ax.set_title(f"{kind}  ({n} tensor{'s' * (n != 1)})", color=INK, fontsize=10, loc="left")
         ax.set_xlabel("singular value index i")
+        for line in ax.lines:
+            if len(line.get_xdata()) == 1:
+                line.set_marker("o")
     for ax in axes[:, 0]:
         ax.set_ylabel("σᵢ(ΔW)")
     for ax in list(axes.flat)[len(kinds):]:
