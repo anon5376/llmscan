@@ -678,7 +678,7 @@ class TestAnomalySignals(unittest.TestCase):
                 for i, angle in enumerate(np.radians(steps), 1):
                     axes[i] = np.cos(angle) * axes[i-1] + np.sin(angle) * axes[i]
                 angles = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
-                result = _isolated_cliques(ids, angles, n, 3., 1e-6)
+                result = _isolated_cliques(ids, angles, n, 3., 1e-6, (0, n - 1))
                 if expected:
                     self.assertEqual(set(np.flatnonzero(result[0])), set(run))
                 else:
@@ -691,7 +691,31 @@ class TestAnomalySignals(unittest.TestCase):
         # There are several copies, but no three consecutive observations.
         axes[[3, 11, 12]] = axes[2]
         angles = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
-        self.assertIsNone(_isolated_cliques(list(range(len(axes))), angles, len(axes), 3., 1e-6))
+        ids = list(range(len(axes)))
+        self.assertIsNone(_isolated_cliques(ids, angles, len(ids), 3., 1e-6, (ids[0], ids[-1])))
+
+    def test_clique_without_measured_boundaries_preserves_other_groups_reference(self):
+        n = 33
+        eye = np.eye(n + 4)
+        walk = eye[1:n + 1].copy()
+        angle = np.radians(40.)
+        for i in range(1, n):
+            walk[i] = np.cos(angle) * walk[i - 1] + np.sin(angle) * walk[i]
+        rows = [row(layer_name(i)) for i in range(n)]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        for line in [0, 9]:
+            with self.subTest(line=line):
+                spaces = {}
+                for r in rows:
+                    i = r.layer
+                    secondary = walk[i]
+                    if 1 <= i <= 8:
+                        secondary = eye[-1]
+                    if 17 <= i <= 24:
+                        secondary = eye[-2]
+                    spaces[r.name] = eye[:, :1] if i == line else np.column_stack((eye[0], secondary))
+                ranked = rank.rank_tensors(rows, stats, subspaces=spaces)
+                self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, set(range(17, 25)))
 
     def test_isolated_secondary_runs_under_a_shared_leading_axis(self):
         n = 30

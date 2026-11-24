@@ -288,8 +288,8 @@ def _trajectory_groups(ids: list[int], angles: np.ndarray, layer_count: int,
         previous = max(floor, separation)
 
 
-def _subspace_groups(ids: list[int], angles: np.ndarray, layer_count: int,
-                     factor: float, floor: float) -> Iterator[tuple[np.ndarray, np.ndarray, str]]:
+def _subspace_groups(ids: list[int], angles: np.ndarray, layer_count: int, factor: float,
+                     floor: float, extent: tuple[int, int]) -> Iterator[tuple[np.ndarray, np.ndarray, str]]:
     """Visit supported partitions from fine to coarse, with their angular resolution."""
     coherent = list(_coherent_groups(angles, layer_count, factor, floor))
     for labels in reversed(coherent):
@@ -302,13 +302,13 @@ def _subspace_groups(ids: list[int], angles: np.ndarray, layer_count: int,
         found = True
         yield labels, np.full(labels.max() + 1, step), "maximum within-group step per layer"
     if not found:
-        cliques = _isolated_cliques(ids, angles, layer_count, factor, floor)
+        cliques = _isolated_cliques(ids, angles, layer_count, factor, floor, extent)
         if cliques is not None:
             yield cliques
 
 
-def _isolated_cliques(ids: list[int], angles: np.ndarray, layer_count: int,
-                      factor: float, floor: float) -> tuple[np.ndarray, np.ndarray, str] | None:
+def _isolated_cliques(ids: list[int], angles: np.ndarray, layer_count: int, factor: float,
+                      floor: float, extent: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, str] | None:
     """Identify compact groups with exceptional boundary steps against wandering peers."""
     radius = math.acos(0.9)
     adjacent = np.diff(ids) == 1
@@ -327,9 +327,10 @@ def _isolated_cliques(ids: list[int], angles: np.ndarray, layer_count: int,
         separation = angles[np.ix_(members, ~members)].min()
         if separation <= factor * max(floor, diameter):
             continue
-        boundaries = adjacent & (members[:-1] != members[1:])
-        if not boundaries.any():
+        observed = _observed_runs(ids, members, adjacent, extent)
+        if not observed.any():
             continue
+        boundaries = observed[:-1] != observed[1:]
         background = steps[adjacent & ~members[:-1] & ~members[1:]]
         if len(background) < 8:
             continue
@@ -468,7 +469,8 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
         if directions and name in directions and directions[name].shape == (width,):
             axes[i] = directions[name]
     geometry = _OutputGeometry(bases, overlap, axes, np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.)), extent)
-    for i, (labels, widths, spread) in enumerate(_subspace_groups(ids, angles, layer_count, factor, floor)):
+    partitions = _subspace_groups(ids, angles, layer_count, factor, floor, extent)
+    for i, (labels, widths, spread) in enumerate(partitions):
         # A resolved leading axis uses the finest partition. A coarser one
         # can establish a collective switch by separating every changing mode.
         found = _partition_switches(ids, names, angles, geometry, factor, floor, adjacent,
@@ -531,6 +533,9 @@ def _observed_runs(ids: list[int], members: np.ndarray, adjacent: np.ndarray,
         right = adjacent[end] if end < len(adjacent) else ids[-1] == extent[1]
         if left and right:
             observed[start:end + 1] = True
+    # A single terminal transition requires a continuous reference trajectory.
+    if np.count_nonzero(observed[:-1] != observed[1:]) == 1 and not adjacent.all():
+        observed[:] = False
     return observed
 
 
@@ -548,8 +553,6 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
         if not observed.any():
             continue
         switches = observed[:-1] != observed[1:]
-        if switches.sum() == 1 and not adjacent.all():
-            continue
         outside = members[:, None] & ~members
         limit = factor * max(floor, within)
         # A stable primary or intersection gives a more specific attribution.
