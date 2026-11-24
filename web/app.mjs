@@ -204,9 +204,10 @@ function emptyState(title, ...body) {
 /** Shown wherever ΔW numbers appear when delta.csv is not the scan this ranking was computed from. */
 function staleDeltaNote(model) {
   return model.deltaUnranked && h('p', { class: 'note warning' },
-    h('strong', null, 'delta.csv is not from the run that wrote this ranking. '),
-    'ranking.csv carries no ΔW stats, which is what ', h('code', null, '--inventory-only'), ' or a scan that stopped early writes, '
-    + 'and neither replaces a delta.csv left by an earlier run. The ΔW numbers shown may describe older weights; rerun llmscan without ',
+    h('strong', null, 'This ranking was not computed from this delta.csv. '),
+    'delta.csv has ΔW stats that ranking.csv does not carry. That is what is left when the last run was ',
+    h('code', null, '--inventory-only'), ', which keeps the delta.csv of an earlier run, or stopped during its scan. '
+    + 'The ΔW numbers shown may describe older weights, including for tensors the inventory now lists as identical; rerun llmscan without ',
     h('code', null, '--inventory-only'), ' to refresh them.');
 }
 
@@ -342,8 +343,8 @@ function rankingView(model) {
     staleDeltaNote(model),
     !model.hasDelta && h('p', { class: 'note' },
       h('strong', null, 'No ΔW stats. '),
-      'delta.csv is missing or lists no tensor, so no row here has singular values behind it: '
-      + 'this ranking rests on structure and location and cannot tell a rank-1 edit from a diffuse one.'),
+      'delta.csv is missing or lists no tensor, so no row here has singular values behind it '
+      + 'and this ranking cannot tell a rank-1 edit from a diffuse one.'),
     listing({
       controls,
       results: () => {
@@ -463,7 +464,7 @@ function deltaView(model) {
   if (!model.hasDelta) {
     return emptyState('No ΔW stats in this report',
       h('p', null, 'delta.csv is missing or lists no tensor. ', h('code', null, 'llmscan --inventory-only'),
-        ' and a scan that stops early write no delta.csv; a scan that finds no 2-D float tensor to analyse writes an empty one.'),
+        ' writes no delta.csv; a scan that finds no 2-D float tensor to analyse, or stops before its first one, writes an empty one.'),
       h('p', null, 'The ranking and inventory are complete, but no tensor has singular values to compare with the others of its kind. '
         + 'If the run was inventory-only, rerun llmscan without ', h('code', null, '--inventory-only'), ' on the same pair to add them.'));
   }
