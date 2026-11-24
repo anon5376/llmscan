@@ -982,6 +982,68 @@ class TestAnomalySignals(unittest.TestCase):
                     spectra[r.name] = core.OutputSpectrum(np.array(values), 0., 1., 1.)
                 self.assertEqual(set(subspace_outliers(rows, spaces, 3., spectra=spectra)), expected)
 
+    @staticmethod
+    def wandering_axes(eye, count, high_dimensional):
+        if not high_dimensional:
+            angles = np.radians([8. * abs(i % 10 - 5) for i in range(count)])
+            return [np.cos(a) * eye[0] + np.sin(a) * eye[1] for a in angles]
+        # Step into a fresh coordinate on the sphere, occasionally retracing
+        # the last step. No fixed small ambient plane reproduces these axes.
+        step = np.radians(7.)
+        axes = [eye[0]]
+        for i in range(1, count):
+            axes.append(axes[-2] if i % 5 == 0 else np.cos(step) * axes[-1] + np.sin(step) * eye[i])
+        return axes
+
+    def test_expansions_along_turning_and_high_dimensional_paths(self):
+        rows = [row(layer_name(i)) for i in range(31)]
+        eye = np.eye(42)
+        for wandering, start, stepped in product([False, True], [0, 12, 25], [False, True]):
+            with self.subTest(wandering=wandering, start=start, stepped=stepped):
+                spaces, spectra = {}, {}
+                run = range(start, start + 6)
+                axes = self.wandering_axes(eye, len(rows), wandering)
+                for r, axis in zip(rows, axes):
+                    directions = [eye[31], axis]
+                    values = [9., 12. if wandering else 100.]
+                    if r.layer in run:
+                        # Two simultaneous extra axes, one changing every layer.
+                        directions.extend([eye[32], eye[33 + run.index(r.layer)]])
+                        shoulder = run[-1] if start == 0 else run[0]
+                        values.extend([4. if stepped and r.layer == shoulder else 11., 3.])
+                    spaces[r.name] = np.column_stack(directions[::-1])
+                    noise = 4. if r.layer == 7 else 1.
+                    spectra[r.name] = core.OutputSpectrum(np.array(values[::-1]), 0., noise, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), {layer_name(i) for i in run})
+                method = "tracked majority space" if wandering else "majority ambient span"
+                self.assertTrue(all(method in why for why in findings.values()), findings)
+
+    def test_honest_wandering_with_constant_and_gradually_resolving_rank(self):
+        rows = [row(layer_name(i)) for i in range(31)]
+        eye = np.eye(33)
+        for wandering, ramp, reverse in product([False, True], repeat=3):
+            with self.subTest(wandering=wandering, ramp=ramp, reverse=reverse):
+                spaces, spectra = {}, {}
+                axes = self.wandering_axes(eye, len(rows), wandering)
+                for r, axis in zip(rows, axes):
+                    depth = 30 - r.layer if reverse else r.layer
+                    extra = 2. * ((depth + 1) / 18.)**4 if ramp else 0.
+                    budget = 3.5
+                    edit = 32. * np.outer(axis, axis) + extra * np.outer(eye[-1], eye[-1])
+                    m = core.analyze_delta(0. * eye, edit, 1, budget)
+                    spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+                self.assertEqual({s.shape[1] for s in spaces.values()}, {1, 2} if ramp else {1})
+                self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
+
+    def test_only_the_extra_modes_component_outside_the_envelope_counts(self):
+        eye = np.eye(5)
+        extra = .8 * eye[2] + .6 * eye[3]
+        basis = np.column_stack((eye[0], eye[1], extra))
+        spectrum = core.OutputSpectrum(np.array([20., 10., 5.]), 0., 1., 1.)
+        self.assertAlmostEqual(spectrum.outside_bounds(eye[:, :3], basis, 2)[2], 3.)
+        self.assertAlmostEqual(spectrum.outside_bounds(eye[:, :4], basis, 2)[2], 0.)
+
     def test_endpoint_forecast_error_at_the_same_physical_horizon(self):
         ids = [*range(11), 11, 14, 22]
         eye = np.eye(3)

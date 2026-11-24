@@ -33,18 +33,26 @@ class OutputSpectrum(NamedTuple):
     noise: float
     scale: float
 
-    def outside_bounds(self, reference: np.ndarray, basis: np.ndarray) -> tuple[float, float, float]:
-        """Bound strength outside the reference and measure its strictly unpaired part."""
+    def outside_bounds(self, reference: np.ndarray, basis: np.ndarray,
+                       paired_rank: int | None = None) -> tuple[float, float, float]:
+        """Bound strength outside the reference and measure the contribution of extra modes."""
         overlap = reference.T @ basis
         residual = basis - reference @ overlap
         lower = float(np.linalg.norm(residual * self.retained, ord=2))
-        # The overlap's right null space consists of directions in this
-        # basis orthogonal to the reference. Tilts of paired axes alone
-        # cannot establish that an extra mode carries appreciable energy.
+        # Tilts of the best-paired axes alone cannot establish that an
+        # extra mode carries appreciable energy.
         unpaired = 0.
-        if basis.shape[1] > reference.shape[1]:
-            _, _, right = np.linalg.svd(overlap, full_matrices=True)
-            unpaired = float(np.linalg.norm(right[reference.shape[1]:] * self.retained, ord=2))
+        paired = reference.shape[1] if paired_rank is None else paired_rank
+        if basis.shape[1] > paired:
+            _, _, right = np.linalg.svd(overlap, full_matrices=basis.shape[1] > reference.shape[1])
+            extra = right[paired:]
+            # In a wider ambient hull even an extra axis may be partly paired.
+            # Residual principal axes are mutually orthogonal with lengths
+            # sin(theta). Count only their component outside that hull.
+            weighted = extra * self.retained
+            if paired < reference.shape[1]:
+                weighted = np.linalg.norm(residual @ extra.T, axis=0)[:, None] * weighted
+            unpaired = float(np.linalg.norm(weighted, ord=2))
         # Retained and omitted terms act on orthogonal right singular spaces.
         return lower, math.hypot(lower, self.omitted), unpaired
 

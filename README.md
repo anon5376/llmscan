@@ -280,6 +280,15 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      worst angular error widens the complement-strength intervals before the
      scanner tests for an abrupt expansion. A distance without a measured
      comparison supplies no forecast.
+     For a turning trajectory the scanner also fits an ambient span to each
+     of two interleaved sets of majority layers. The spans must agree in
+     dimension and orientation. Each set measures the other set's background
+     residuals. Only the part of the additional modes outside the span counts
+     toward expansion strength. Where a shared span fits poorly, the scanner
+     can track a majority plane from either side through consecutive measured
+     spaces. Each step must retain the incoming plane within the ordinary
+     angular step allowance. The incoming plane measures complement strength
+     before its projection into the layer supplies the next reference.
      In a short segment a single resolved amplitude jump can separate two levels
      when every remaining step is smaller by the outlier factor and those steps
      form a strict majority. Repeated amplitude changes still set the step scale.

@@ -704,6 +704,68 @@ class _ExpansionReference(NamedTuple):
     uncertainty: float = 0.
 
 
+def _majority_envelope(bases: list[np.ndarray], peers: np.ndarray, tolerance: float,
+                       radius: float) -> list[_ExpansionReference | None] | None:
+    """Estimate reproducible ambient directions on two interleaved samples of the trajectory."""
+    folds = (peers[::2], peers[1::2])
+    p = bases[peers[0]].shape[1]
+    hulls = []
+    for fold in folds:
+        axes, values, _ = np.linalg.svd(np.column_stack([bases[i] for i in fold]), full_matrices=False)
+        # RMS projection on each component across independent rank-p writers.
+        rank = np.count_nonzero(values > math.sqrt(len(fold)) * math.sin(tolerance))
+        if not p < rank < axes.shape[0]:
+            return None
+        hulls.append(axes[:, :rank])
+    if hulls[0].shape != hulls[1].shape:
+        return None
+    agreement = np.linalg.svd(hulls[0].T @ hulls[1], compute_uv=False)
+    if agreement.min() < math.cos(tolerance):
+        return None
+    # Each background residual is measured out of sample. For candidates use
+    # the midpoint of the two supported hulls, independent of the candidate.
+    middle = _geodesic(*hulls, .5, 0.)
+    frames = [middle] * len(bases)
+    for fold, held_out in zip(folds, hulls[::-1]):
+        for i in fold:
+            frames[i] = held_out
+    references = []
+    for frame, basis in zip(frames, bases):
+        cosines = np.linalg.svd(frame.T @ basis, compute_uv=False)
+        paired = min(p, basis.shape[1])
+        references.append(_ExpansionReference(frame) if cosines[paired-1] >= math.cos(radius) else None)
+    return references
+
+
+def _tracked_references(ids: list[int], bases: list[np.ndarray], peers: np.ndarray,
+                        angles: np.ndarray, limit: float) -> list[_ExpansionReference | None]:
+    """Carry the nearest majority plane through consecutive measured supersets in either direction."""
+    references = [None] * len(ids)
+    distances = np.full(len(ids), np.inf)
+    for j in peers:
+        # Hold out the peer itself when measuring ordinary complement motion.
+        others = peers[peers != j]
+        nearest = min(others, key=lambda k: (abs(ids[j] - ids[k]), angles[j, k]))
+        references[j] = _ExpansionReference(bases[nearest])
+        for direction in (-1, 1):
+            frame = bases[j]
+            i = j + direction
+            while (0 <= i < len(ids) and abs(ids[i] - ids[i-direction]) == 1
+                   and bases[i].shape[1] > frame.shape[1]):
+                left, cosines, _ = np.linalg.svd(bases[i].T @ frame, full_matrices=False)
+                if cosines.min() < math.cos(limit):
+                    break
+                distance = abs(ids[i] - ids[j])
+                if distance < distances[i]:
+                    references[i] = _ExpansionReference(frame)
+                    distances[i] = distance
+                # Compare with the incoming plane before projecting it into
+                # the measured space to predict the next physical layer.
+                frame = bases[i] @ left
+                i += direction
+    return references
+
+
 def _geodesic(a: np.ndarray, b: np.ndarray, t: float, floor: float) -> np.ndarray | None:
     left, cosines, right = np.linalg.svd(a.T @ b, full_matrices=False)
     if cosines.min() <= floor:  # A right angle has no unique shortest arc.
@@ -767,8 +829,19 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     floor = math.sqrt(2 * bases[0].shape[0] * math.ulp(1.))
     if not len(consecutive) or widths.min() <= floor or rates.max() > radius:
         return
-    if np.any(rates[gaps > 1] > factor * max(floor, _ordinary_step(consecutive))):
+    ordinary = max(floor, _ordinary_step(consecutive))
+    if np.any(rates[gaps > 1] > factor * ordinary):
         return
+
+    # Motion through distinct neighborhoods can turn without improving a
+    # straight-line forecast. A trajectory confined to one typical step
+    # supplies no independent evidence for tracking rather than jitter.
+    if widths.min() > np.median(consecutive) + floor:
+        limit = min(radius, factor * ordinary)
+        yield _tracked_references(ids, bases, peers, angles, limit), "tracked majority space"
+        envelope = _majority_envelope(bases, peers, max(floor, min(radius, ordinary) / factor), radius)
+        if envelope is not None:
+            yield envelope, "majority ambient span"
 
     references = []
     errors = []
@@ -838,7 +911,7 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
         spectrum = spectra[names[i]]
         ratio = spectrum.scale / scale
         reference = references[i]
-        lo, hi, unpaired = spectrum.outside_bounds(reference.basis, bases[i])
+        lo, hi, unpaired = spectrum.outside_bounds(reference.basis, bases[i], p)
         margin = reference.uncertainty * spectrum.retained.max()
         lower[i], upper[i], extra[i], noise[i] = ratio * np.array(
             [max(0., lo - margin), hi + margin, max(0., unpaired - margin), spectrum.noise])
