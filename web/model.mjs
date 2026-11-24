@@ -32,6 +32,17 @@ export const STATUSES = ['identical', 'changed', 'dtype_mismatch', 'shape_mismat
 
 const SV_COLUMN = /^sv_(\d+)$/;
 
+// rank.py's MIN_GROUP: changed tensors of one kind needed before a median means anything
+export const MIN_GROUP = 3;
+
+/**
+ * The kind rank.py groups a tensor under (its `canonical_kind`): fused MoE `experts.down_proj` counts as
+ * `down_proj`, GGUF `ffn_down_exps` and `ffn_down_shexp` as `ffn_down`.
+ */
+export function canonicalKind(kind) {
+  return kind.replace(/^experts\./, '').replace(/_(exps|shexp)$/, '');
+}
+
 export function tierInfo(id) {
   return TIERS.find((t) => t.id === id) ?? { id, label: id, meaning: '' };
 }
@@ -51,6 +62,10 @@ export function parseNumber(cell) {
 }
 
 const usable = (v) => v != null && Number.isFinite(v) && v > 0;
+
+/** rank.py's test for a row it can judge: a stat is given, and every given stat is finite and positive. */
+const judgeable = (t) => (t.effectiveRank != null || t.sv1 != null)
+  && [t.effectiveRank, t.sv1].every((v) => v == null || usable(v));
 
 export function median(values) {
   if (!values.length) return null;
@@ -94,7 +109,7 @@ function blankTensor(name) {
   return {
     name, layer: null, kind: '', status: '',
     baseDtype: '', suspectDtype: '', baseShape: '', suspectShape: '', numel: null,
-    rank: null, tier: null, reason: '',
+    rank: null, tier: null, reason: '', yardstick: null,
     scanned: false, effectiveRank: null, sv1: null, spectrum: [], gap: null, seconds: null,
   };
 }
@@ -174,12 +189,25 @@ export function buildWorkbench(report) {
   ];
   const changedOf = (k) => k.counts.get('changed') ?? 0;
 
-  // Yardstick shown next to a tensor: the median effective rank of the changed tensors of its kind.
-  const measured = delta.filter((t) => usable(t.effectiveRank));
-  const byKind = new Map();
-  for (const t of measured) byKind.set(t.kind, [...(byKind.get(t.kind) ?? []), t.effectiveRank]);
-  const kindStats = new Map([...byKind].map(([kind, v]) => [kind, { count: v.length, median: median(v) }]));
+  // What the charts draw: changed tensors whose row rank.py can judge and that have an effective rank.
+  const measured = delta.filter((t) => t.status === 'changed' && judgeable(t) && t.effectiveRank != null);
   const top = measured.reduce((best, t) => (best && best.effectiveRank >= t.effectiveRank ? best : t), null);
+
+  // The yardstick rank.py judged a tensor by: the median over the changed tensors of its canonical kind with
+  // usable stats, effective rank and (for a tensor without one) sv_001 kept apart, and no median below MIN_GROUP.
+  // Only expected kinds are judged this way, and a changed tensor of any other kind is the one ranked T2.
+  const groups = new Map();
+  for (const t of ranking) {
+    if (t.status !== 'changed' || t.tier === 'T2' || !judgeable(t)) continue;
+    const stat = t.effectiveRank != null ? 'effectiveRank' : 'sv1';
+    const key = `${stat} ${canonicalKind(t.kind)}`;
+    if (!groups.has(key)) groups.set(key, { stat, kind: canonicalKind(t.kind), members: [] });
+    groups.get(key).members.push(t);
+  }
+  for (const { stat, kind, members } of groups.values()) {
+    const yardstick = { stat, kind, count: members.length, median: members.length >= MIN_GROUP ? median(members.map((t) => t[stat])) : null };
+    for (const t of members) t.yardstick = yardstick;
+  }
 
   return {
     base: report.base ?? '', suspect: report.suspect ?? '',
@@ -189,7 +217,7 @@ export function buildWorkbench(report) {
     tierCounts, statusCounts, statuses,
     kinds: [...kinds.values()].sort((a, b) => changedOf(b) - changedOf(a) || naturalCompare(a.kind, b.kind)),
     totalParams, identicalParams,
-    measured, kindStats,
+    measured,
     deltaSummary: {
       scanned: delta.length,
       measured: measured.length,
@@ -247,6 +275,11 @@ export function formatNumber(value) {
 
 export function formatCount(value) {
   return value == null ? '–' : value.toLocaleString('en-US');
+}
+
+/** `1 tensor`, `2 tensors`. */
+export function plural(count, noun) {
+  return `${formatCount(count)} ${noun}${count === 1 ? '' : 's'}`;
 }
 
 export function formatPercent(part, whole) {

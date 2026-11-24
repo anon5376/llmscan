@@ -2,11 +2,11 @@
 import { readReport } from './report.mjs';
 import { h } from './dom.mjs';
 import {
-  TIERS, buildWorkbench, filterTensors, formatCount, formatNumber, formatPercent, formatShape,
-  pageOf, sortTensors, statusLabel, tierInfo,
+  MIN_GROUP, TIERS, buildWorkbench, canonicalKind, filterTensors, formatCount, formatNumber, formatPercent, formatShape,
+  pageOf, plural, sortTensors, statusLabel, tierInfo,
 } from './model.mjs';
 import {
-  extent, kindOrder, kindSpectraChart, layerGradient, PALETTE, rankByLayerChart, spectrumRuns, tensorSpectrumChart,
+  extent, kindOrder, kindSpectraChart, layerGradient, PALETTE, rankByLayerChart, spectrumDomain, spectrumRuns, tensorSpectrumChart,
 } from './charts.mjs';
 
 const PAGE_SIZE = 100;
@@ -421,7 +421,6 @@ function inventoryView(model) {
   ];
 }
 
-const tensorCount = (n) => `${formatCount(n)} tensor${n === 1 ? '' : 's'}`;
 
 function tile(label, value, detail) {
   return h('div', { class: 'tile' }, h('dt', null, label), h('dd', null, h('span', { class: 'tile-value' }, value), detail && h('span', { class: 'tile-detail' }, detail)));
@@ -432,8 +431,10 @@ function deltaCharts(model) {
   const draw = () => {
     const options = { selected: state.selected, onPick: (name) => select(name, { open: true }) };
     const withLayer = model.measured.filter((t) => t.layer != null);
-    const spectra = (kind) => model.measured.filter((t) => t.kind === kind && hasSpectrum(t));
-    const kinds = kindOrder(model.measured.filter(hasSpectrum).map((t) => t.kind));
+    const drawn = model.measured.filter(hasSpectrum);
+    const spectra = (kind) => drawn.filter((t) => canonicalKind(t.kind) === kind);
+    const kinds = kindOrder(drawn.map((t) => canonicalKind(t.kind)));
+    const domain = spectrumDomain(drawn);
     const layerRange = extent(withLayer.map((t) => t.layer));
     const byLayer = withLayer.length ? rankByLayerChart(withLayer, options) : null;
     const offStack = model.measured.length - withLayer.length;
@@ -444,13 +445,15 @@ function deltaCharts(model) {
         byLayer ? [byLayer.chart, h('ul', { class: 'legend' }, byLayer.legend.map(({ kind, color }) =>
           h('li', null, h('span', { class: 'swatch', style: { background: color } }), h('code', null, kind))))]
           : h('p', { class: 'note' }, 'No changed tensor in this report belongs to a numbered layer.'),
-        offStack > 0 && h('p', { class: 'fine' }, `${tensorCount(offStack)} outside the layer stack ${offStack === 1 ? 'is' : 'are'} only in the table below.`)),
+        offStack > 0 && h('p', { class: 'fine' }, `${plural(offStack, 'tensor')} outside the layer stack ${offStack === 1 ? 'is' : 'are'} only in the table below.`)),
       h('figure', { class: 'card' },
         h('figcaption', null, h('h3', null, 'Singular values of ΔW by kind'),
-          h('p', null, 'One line per changed tensor, log scale. An abliteration-like edit is one spike above a low floor.')),
+          h('p', null, 'One line per changed tensor, on the same log axis in every panel. A panel holds the tensors the ranking compares with '
+            + 'each other, so MoE expert and shared-expert down projections share one. An abliteration-like edit is one spike above a low floor. '
+            + 'Select a line to open its tensor.')),
         h('div', { class: 'multiples' }, kinds.map((kind) => h('div', null,
-          h('h4', null, h('code', null, kind), ` · ${tensorCount(spectra(kind).length)}`),
-          kindSpectraChart(kind, spectra(kind), { ...options, layerRange })))),
+          h('h4', null, h('code', null, kind), ` · ${plural(spectra(kind).length, 'tensor')}`),
+          kindSpectraChart(kind, spectra(kind), { ...options, domain, layerRange })))),
         withLayer.length > 0 && h('p', { class: 'ramp' }, `layer ${layerRange[0]}`,
           h('span', { class: 'ramp-bar', style: { background: layerGradient } }), `layer ${layerRange[1]}`)),
     );
@@ -519,15 +522,23 @@ function sides(base, suspect, format = (v) => v) {
   return `base ${base ? format(base) : 'absent'} → suspect ${suspect ? format(suspect) : 'absent'}`;
 }
 
+/** The median the ranking judged this tensor by, as rank.py computed it; nothing for a tensor it judged another way. */
+function yardstickFact(t) {
+  const y = t.yardstick;
+  if (!y) return null;
+  const label = [y.stat === 'sv1' ? 'Median σ₁ of ' : 'Median of ', formatCount(y.count), ' changed ', h('code', null, y.kind)];
+  if (y.median == null) return fact(label, ['–', h('p', { class: 'fine' }, `the ranking compares with a median from ${MIN_GROUP} tensors up`)]);
+  return fact(label, [formatNumber(y.median), h('p', { class: 'fine nowrap' }, `${formatNumber(t[y.stat] / y.median)}× the median`)]);
+}
+
 function deltaFacts(model, t) {
   if (!model.hasDelta) return h('p', null, 'delta.csv is missing or lists no tensor, so no tensor in this report has ΔW stats.');
   if (!t.scanned) return h('p', null, 'Not in delta.csv. The scan covers 2-D float tensors that exist in both models with the same shape.');
   if (!t.spectrum.length && t.effectiveRank == null) {
     return h('p', null, t.status === 'identical' ? 'ΔW = 0: identical tensors are listed in delta.csv without stats.' : 'delta.csv lists this tensor without stats.');
   }
-  const kind = model.kindStats.get(t.kind);
-  const ratio = kind && t.effectiveRank > 0 ? t.effectiveRank / kind.median : null;
-  const peers = model.measured.filter((p) => p.kind === t.kind && p !== t && hasSpectrum(p));
+  const kind = canonicalKind(t.kind);
+  const peers = model.measured.filter((p) => canonicalKind(p.kind) === kind && p !== t && hasSpectrum(p));
   const drawn = spectrumRuns(t.spectrum).flat().length;
   return [
     staleDeltaNote(model),
@@ -535,12 +546,11 @@ function deltaFacts(model, t) {
       fact('Effective rank', formatNumber(t.effectiveRank)),
       fact('σ₁', formatNumber(t.sv1)),
       fact('σ₁ / σ₂', formatNumber(t.gap)),
-      kind?.count > 1 && fact(['Median of ', formatCount(kind.count), ' changed ', h('code', null, t.kind)],
-        [formatNumber(kind.median), ratio != null && Number.isFinite(ratio) && h('p', { class: 'fine nowrap' }, `${formatNumber(ratio)}× the median`)])),
+      yardstickFact(t)),
     drawn > 0 && h('figure', null, tensorSpectrumChart(t, peers, PALETTE.ink),
       h('figcaption', { class: 'fine' }, `Top ${t.spectrum.length === 1 ? 'singular value' : `${t.spectrum.length} singular values`} of ΔW`
         + (drawn < t.spectrum.length ? ` (${t.spectrum.length - drawn} zero or non-finite, not drawn)` : '')
-        + (peers.length ? `; gray: the other ${formatCount(peers.length)} changed ${t.kind} tensors.` : '.'))),
+        + (peers.length ? `; gray: the ${plural(peers.length, `other changed ${kind} tensor`)}.` : '.'))),
   ];
 }
 

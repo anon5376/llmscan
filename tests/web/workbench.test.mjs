@@ -5,11 +5,11 @@ import { test } from "node:test";
 
 import { readReport } from "../../web/report.mjs";
 import {
-  extent, kindColors, kindOffset, kindOrder, layerColor, linearTicks, logTicks, scale, spectrumRuns,
+  distanceToPath, extent, kindColors, kindOffset, kindOrder, layerColor, linearTicks, logTicks, scale, spectrumDomain, spectrumRuns,
 } from "../../web/charts.mjs";
 import {
-  buildWorkbench, filterTensors, formatNumber, formatPercent, median, naturalCompare, pageOf, parseNumber,
-  shortName, sortTensors, tierInfo,
+  buildWorkbench, canonicalKind, filterTensors, formatNumber, formatPercent, median, naturalCompare, pageOf, parseNumber,
+  plural, shortName, sortTensors, tierInfo,
 } from "../../web/model.mjs";
 
 const WEB = new URL("../../web/", import.meta.url);
@@ -78,10 +78,60 @@ test("summarises tiers, statuses, kinds and the per-kind yardstick", () => {
   assert.deepEqual(model.kinds.map((k) => [k.kind, k.total, k.counts.get("changed") ?? 0]),
     [["down_proj", 4, 4], ["q_proj", 1, 1], ["k_proj", 1, 0], ["lm_head", 1, 0], ["norm", 1, 0]]);
   assert.equal(formatPercent(model.identicalParams, model.totalParams), "25.00%");
-  assert.deepEqual(model.kindStats.get("down_proj"), { count: 4, median: 1.005 });
+  assert.deepEqual(model.tensors.get("model.layers.10.mlp.down_proj.weight").yardstick, { stat: "effectiveRank", kind: "down_proj", count: 4, median: 1.005 });
+  assert.equal(model.tensors.get("model.layers.2.self_attn.q_proj.weight").yardstick, null); // T2: not judged by a median
   assert.equal(model.deltaSummary.top.name, "model.layers.10.mlp.down_proj.weight");
   assert.deepEqual([model.deltaSummary.scanned, model.deltaSummary.measured], [6, 5]);
   assert.deepEqual([model.baseName, model.suspectName], ["Tiny", "Tiny-abliterated"]);
+});
+
+// Changed tensors as [name, kind, tier, effective_rank, sv_001], in the three files the CLI writes for them.
+function changedReport(rows) {
+  const layer = (name) => /\.(\d+)\./.exec(name)?.[1] ?? "";
+  return {
+    base: "b", suspect: "s",
+    inventory: rows.map(([name, kind]) => inventoryRow(name, layer(name), kind, "changed")),
+    ranking: rows.map(([name, kind, tier, rank, sv = "0.5"], i) => ({ rank: String(i + 1), tier, name, layer: layer(name), kind, status: "changed", effective_rank: rank, sv_001: sv, reason: "" })),
+    delta: rows.map(([name, kind, , rank, sv = "0.5"]) => deltaRow(name, layer(name), kind, "changed", rank, [sv, "0.01"])),
+  };
+}
+
+test("a tensor's yardstick is the median the CLI ranked it by: canonical kind, usable stats, three tensors up", () => {
+  assert.deepEqual(["experts.down_proj", "ffn_down_exps", "ffn_down_shexp", "down_proj.bias", "o_proj"].map(canonicalKind),
+    ["down_proj", "ffn_down", "ffn_down", "down_proj.bias", "o_proj"]);
+
+  // GGUF MoE: the CLI wrote "effective_rank 5.448 is 5.4x the median 1 of changed ffn_down tensors" for blk.4
+  const gguf = buildWorkbench(changedReport([
+    ["blk.4.ffn_down_shexp.weight", "ffn_down_shexp", "T3", "5.448"],
+    ["blk.0.attn_q.weight", "attn_q", "T2", "1"],
+    ...[0, 1, 2, 3].map((i) => [`blk.${i}.ffn_down_exps.weight`, "ffn_down_exps", "T4", "1"]),
+    ["blk.2.ffn_down_shexp.weight", "ffn_down_shexp", "T4", "1"],
+    ["blk.0.attn_output.weight", "attn_output", "T4", "1"], ["blk.1.attn_output.weight", "attn_output", "T4", "1"],
+  ]));
+  assert.deepEqual(gguf.tensors.get("blk.4.ffn_down_shexp.weight").yardstick, { stat: "effectiveRank", kind: "ffn_down", count: 6, median: 1 });
+  assert.equal(gguf.tensors.get("blk.0.ffn_down_exps.weight").yardstick, gguf.tensors.get("blk.4.ffn_down_shexp.weight").yardstick);
+  assert.equal(gguf.tensors.get("blk.0.attn_q.weight").yardstick, null); // T2: an unexpected kind has no median
+  assert.deepEqual(gguf.tensors.get("blk.0.attn_output.weight").yardstick, { stat: "effectiveRank", kind: "attn_output", count: 2, median: null }); // under three
+
+  // HF MoE: the shared expert's down_proj is judged with the fused experts.down_proj tensors
+  const shared = "model.layers.3.mlp.shared_expert.down_proj.weight";
+  const hf = buildWorkbench(changedReport([
+    [shared, "down_proj", "T3", "4.635"],
+    ...[0, 1, 2, 3, 4, 5].map((i) => [`model.layers.${i}.mlp.experts.down_proj`, "experts.down_proj", "T4", "1"]),
+  ]));
+  assert.deepEqual(hf.tensors.get(shared).yardstick, { stat: "effectiveRank", kind: "down_proj", count: 7, median: 1 });
+
+  // a row the CLI calls unusable stays out of every median and the charts; sv_001 is the yardstick without an effective rank
+  const mixed = buildWorkbench(changedReport([
+    ["l.0.o_proj.weight", "o_proj", "T3", "nan"], ["l.1.o_proj.weight", "o_proj", "T3", "2", "0"],
+    ...[2, 3, 4].map((i) => [`l.${i}.o_proj.weight`, "o_proj", "T4", "1"]),
+    ...[5, 6, 7].map((i) => [`l.${i}.o_proj.weight`, "o_proj", "T4", "", String(i)]),
+  ]));
+  assert.equal(mixed.tensors.get("l.0.o_proj.weight").yardstick, null);
+  assert.equal(mixed.tensors.get("l.1.o_proj.weight").yardstick, null);
+  assert.deepEqual(mixed.tensors.get("l.2.o_proj.weight").yardstick, { stat: "effectiveRank", kind: "o_proj", count: 3, median: 1 });
+  assert.deepEqual(mixed.tensors.get("l.6.o_proj.weight").yardstick, { stat: "sv1", kind: "o_proj", count: 3, median: 6 });
+  assert.deepEqual(mixed.measured.map((t) => t.layer), [2, 3, 4]);
 });
 
 test("an inventory-only report keeps its ranking and has no ΔW stats", () => {
@@ -205,6 +255,16 @@ test("chart colours follow the CLI figures and scales stay inside the plot", () 
   assert.deepEqual(spectrumRuns([3]), [[[1, 3]]]);
   const y = scale([1e-4, 1], [200, 0], true);
   assert.deepEqual([y(1e-4), y(1e-2), y(1), y(0)].map(Math.round), [200, 100, 0, 200]);
+});
+
+test("a pointer picks the nearest mark, and every panel of a report shares its axes", () => {
+  const line = [[0, 0], [10, 0], [10, 10]];
+  assert.deepEqual([[5, 3], [14, 5], [-3, -4], [10, 12]].map((p) => distanceToPath(p, line)), [3, 4, 5, 2]);
+  assert.equal(distanceToPath([3, 4], [[0, 0]]), 5); // a single dot
+  const domain = spectrumDomain([{ spectrum: [0.5, 0.01] }, { spectrum: [8, 0, NaN, 2e-6] }]);
+  assert.deepEqual(domain.x.domain, [1, 4]);
+  assert.deepEqual(domain.y.domain, [2e-6 / 1.6, 8 * 1.6]);
+  assert.deepEqual([plural(1, "tensor"), plural(0, "kind"), plural(1200, "changed o_proj tensor")], ["1 tensor", "0 kinds", "1,200 changed o_proj tensors"]);
 });
 
 test("the bundled demo loads through readReport into a complete workbench", async () => {

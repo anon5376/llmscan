@@ -1,6 +1,6 @@
 // SVG charts in the palette of the CLI's PNG figures (src/llmscan/plots.py).
 import { append, svg } from './dom.mjs';
-import { formatNumber, naturalCompare } from './model.mjs';
+import { canonicalKind, formatNumber, naturalCompare, plural } from './model.mjs';
 
 export const PALETTE = {
   surface: '#fcfcfb', ink: '#0b0b0b', ink2: '#52514e', muted: '#898781', grid: '#e1e0d9', axis: '#c3c2b7',
@@ -112,10 +112,50 @@ export function kindOffset(i, count) {
   return (i - (count - 1) / 2) * Math.min(0.16, 0.6 / count);
 }
 
-function pickable(node, tensor, onPick) {
-  node.classList.add('pick');
-  node.addEventListener('click', () => onPick(tensor.name));
-  return node;
+/** Distance from a point to the polyline through `points`; to the point itself when there is only one. */
+export function distanceToPath([px, py], points) {
+  let nearest = Infinity;
+  points.forEach(([x1, y1], i) => {
+    const [x0, y0] = points[i - 1] ?? [x1, y1];
+    const dx = x1 - x0, dy = y1 - y0;
+    const along = dx || dy ? Math.min(1, Math.max(0, ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy))) : 0;
+    nearest = Math.min(nearest, Math.hypot(px - x0 - along * dx, py - y0 - along * dy));
+  });
+  return nearest;
+}
+
+const REACH = 18; // CSS px around the pointer or fingertip in which a mark can be picked
+
+/**
+ * A click picks the tensor of the mark nearest the pointer, and hovering shows which one that is, so a thin
+ * line or a small dot needs no exact aim. `marks`: {tensor, node, paths}, paths in chart units, drawn in order.
+ */
+function pickNearest(root, width, marks, onPick) {
+  const nearest = (event) => {
+    const box = root.getBoundingClientRect();
+    const unit = width / box.width;
+    const at = [(event.clientX - box.left) * unit, (event.clientY - box.top) * unit];
+    let found = null, reach = REACH * unit;
+    for (const mark of marks) {
+      const distance = extent(mark.paths.map((path) => distanceToPath(at, path)))[0];
+      if (distance <= reach) [found, reach] = [mark, distance]; // a tie goes to the mark drawn on top
+    }
+    return found;
+  };
+  let near = null;
+  const show = (mark) => {
+    if (mark === near) return;
+    near?.node.classList.remove('near');
+    mark?.node.classList.add('near');
+    root.classList.toggle('picking', mark != null);
+    near = mark;
+  };
+  root.addEventListener('pointermove', (event) => show(nearest(event)));
+  root.addEventListener('pointerleave', () => show(null));
+  root.addEventListener('click', (event) => {
+    const mark = nearest(event);
+    if (mark) onPick(mark.tensor.name);
+  });
 }
 
 /** Effective rank of ΔW against layer, one line per matrix kind; a point opens its tensor. */
@@ -131,19 +171,24 @@ export function rankByLayerChart(tensors, { selected, onPick }) {
   const { root, sx, sy } = frame({
     width: 720, height: 300, x, y, xLabel: 'layer', yLabel: 'effective rank of ΔW',
     xTicks: integerTicks(firstLayer, lastLayer, 12),
-    label: `Effective rank of ΔW by layer for ${points.length} changed tensors of ${kinds.length} kinds. The table below lists the same values.`,
+    label: `Effective rank of ΔW by layer for ${plural(points.length, 'changed tensor')} of ${plural(kinds.length, 'kind')}. The table below lists the same values.`,
   });
+  const marks = [];
   for (const [i, kind] of kinds.entries()) {
     const series = points.filter((t) => t.kind === kind).sort((a, b) => a.layer - b.layer);
-    const at = (t) => sx(t.layer + kindOffset(i, kinds.length));
-    append(root,
-      svg('polyline', { points: series.map((t) => `${at(t)},${sy(t.effectiveRank)}`).join(' '), fill: 'none', stroke: colors.get(kind), 'stroke-width': 1.5 }),
-      series.map((t) => pickable(svg('circle', {
-        cx: at(t), cy: sy(t.effectiveRank), r: t.name === selected ? 6.5 : 4.5,
+    const at = (t) => [sx(t.layer + kindOffset(i, kinds.length)), sy(t.effectiveRank)];
+    root.append(svg('polyline', { points: series.map((t) => at(t).join(',')).join(' '), fill: 'none', stroke: colors.get(kind), 'stroke-width': 1.5 }));
+    for (const t of series) {
+      const [cx, cy] = at(t);
+      const node = svg('circle', {
+        cx, cy, r: t.name === selected ? 6.5 : 4.5,
         fill: colors.get(kind), stroke: t.name === selected ? PALETTE.ink : PALETTE.surface, 'stroke-width': t.name === selected ? 2 : 1.5,
-      }, svg('title', null, `${t.name}\neffective rank ${formatNumber(t.effectiveRank)}`)), t, onPick)),
-    );
+      }, svg('title', null, `${t.name}\neffective rank ${formatNumber(t.effectiveRank)}`));
+      root.append(node);
+      marks.push({ tensor: t, node, paths: [[[cx, cy]]] });
+    }
   }
+  pickNearest(root, 720, marks, onPick);
   return { chart: root, legend: kinds.map((kind) => ({ kind, color: colors.get(kind) })) };
 }
 
@@ -178,7 +223,8 @@ function spectrumMark(t, sx, sy, color, width) {
     }))));
 }
 
-function spectrumDomain(tensors) {
+/** Axes that hold every spectrum in `tensors`: one domain for all the panels of a report keeps them comparable. */
+export function spectrumDomain(tensors) {
   const values = tensors.flatMap((t) => t.spectrum).filter(drawable);
   const longest = Math.max(2, extent(tensors.map((t) => t.spectrum.length))[1]);
   return {
@@ -188,31 +234,32 @@ function spectrumDomain(tensors) {
   };
 }
 
-/** Singular values of every changed tensor of one kind; lines run light (early layer) to dark (late). */
-export function kindSpectraChart(kind, tensors, { layerRange: [lo, hi], selected, onPick }) {
-  const { x, y, xTicks } = spectrumDomain(tensors);
+/** Singular values of the changed tensors the ranking compares with each other; lines run light (early layer) to dark (late). */
+export function kindSpectraChart(kind, tensors, { domain: { x, y, xTicks }, layerRange: [lo, hi], selected, onPick }) {
   const { root, sx, sy } = frame({
     width: 360, height: 250, x, y, xTicks, xLabel: 'singular value index i', yLabel: 'σᵢ(ΔW)',
-    label: `Singular values of ΔW for ${tensors.length} changed ${kind} tensors, log scale.`,
+    label: `Singular values of ΔW for ${plural(tensors.length, `changed ${kind} tensor`)}, log scale.`,
   });
   const ordered = [...tensors].sort((a, b) => (a.name === selected) - (b.name === selected) || (a.layer ?? -1) - (b.layer ?? -1));
+  const marks = [];
   for (const t of ordered) {
     const color = t.layer == null ? PALETTE.ink2 : layerColor((t.layer - lo) / Math.max(hi - lo, 1));
-    const mark = t.name === selected ? spectrumMark(t, sx, sy, PALETTE.ink, 2.5) : spectrumMark(t, sx, sy, color, 1.3);
-    if (!mark) continue;
-    append(mark, svg('title', null, `${t.name}\neffective rank ${formatNumber(t.effectiveRank)}`));
-    root.append(pickable(mark, t, onPick));
+    const node = t.name === selected ? spectrumMark(t, sx, sy, PALETTE.ink, 2.5) : spectrumMark(t, sx, sy, color, 1.3);
+    if (!node) continue;
+    root.append(append(node, svg('title', null, `${t.name}\neffective rank ${formatNumber(t.effectiveRank)}`)));
+    marks.push({ tensor: t, node, paths: spectrumRuns(t.spectrum).map((run) => run.map(([i, v]) => [sx(i), sy(v)])) });
   }
+  pickNearest(root, 360, marks, onPick);
   return root;
 }
 
-/** One tensor's spectrum in `color`, drawn over the other changed tensors of its kind in gray. */
+/** One tensor's spectrum in `color`, drawn over the other changed tensors the ranking groups it with in gray. */
 export function tensorSpectrumChart(tensor, peers, color) {
   const { x, y, xTicks } = spectrumDomain([tensor, ...peers]);
   const { root, sx, sy } = frame({
     width: 360, height: 220, x, y, xTicks, xLabel: 'singular value index i', yLabel: 'σᵢ(ΔW)',
     label: `Singular values of ΔW for ${tensor.name}, log scale`
-      + (peers.length ? `, over ${peers.length} other changed ${tensor.kind} tensors in gray.` : '.'),
+      + (peers.length ? `, over ${plural(peers.length, `other changed ${canonicalKind(tensor.kind)} tensor`)} in gray.` : '.'),
   });
   append(root,
     peers.map((t) => spectrumMark(t, sx, sy, PALETTE.axis, 1)),
