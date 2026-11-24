@@ -952,18 +952,14 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
             caps[i] = min(spectra[i].outside_continuation(bases[j], bases[i], motion)
                           for j in peers[distances == depth])
         if envelope is not None:
-            # Track only runs the envelope cannot cover completely. Compare
-            # the whole run in the same tracked frame convention, retaining
-            # the envelope's independent strength constraint wherever valid.
-            for run in np.split(expanded, np.flatnonzero(np.diff(depths[expanded]) != 1) + 1):
-                if all(envelope[i] is not None for i in run):
-                    caps[run] = 0.
-                    continue
-                for i in run:
-                    frame = envelope[i]
-                    if frame is not None and spectra[i] is not None:
-                        _, _, extra = spectra[i].outside_bounds(frame.basis, bases[i], frame.paired_rank)
-                        caps[i] = min(caps[i], extra, frame.supported_strength)
+            # The envelope can constrain strength even when ordinary motion
+            # obscures a boundary in its coordinates. Tracking measures the
+            # boundary in a moving plane, subject to both strength bounds.
+            for i in expanded:
+                frame = envelope[i]
+                if frame is not None and spectra[i] is not None:
+                    _, _, extra = spectra[i].outside_bounds(frame.basis, bases[i], frame.paired_rank)
+                    caps[i] = min(caps[i], extra, frame.supported_strength)
         if caps.any():
             tracked = _tracked_references(ids, bases, peers, angles, limit)
             for i in expanded:
@@ -1137,8 +1133,13 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
         if count < 8 or count <= layer_count / 2:
             continue
         for references, description in _expansion_references(ids, bases, angles, ranks, peers, factor, observations):
-            findings.update(_expansions_against(ids, names, bases, ranks, p, references, description,
-                                                 layer_count, extent, spectra, factor))
+            found = _expansions_against(ids, names, bases, ranks, p, references, description,
+                                        layer_count, extent, spectra, factor)
+            # Prefer the depth-independent explanation wherever both the
+            # envelope and the local tracker certify the expansion.
+            if description == "tracked majority space":
+                found = {n: why for n, why in found.items() if n not in findings}
+            findings.update(found)
     return findings
 
 

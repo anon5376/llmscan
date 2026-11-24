@@ -1351,6 +1351,29 @@ class TestAnomalySignals(unittest.TestCase):
                     spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .5, 1.)
                 self.assertEqual(set(subspace_outliers(rows, spaces, 3., spectra=spectra)), expected)
 
+    def test_tracking_resolves_a_boundary_inside_the_ambient_matching_radius(self):
+        rows = [row(layer_name(i)) for i in range(31)]
+        eye = np.eye(6)
+        axes = self.wandering_axes(eye, len(rows), False)
+        for reverse in [False, True]:
+            with self.subTest(reverse=reverse):
+                spaces, spectra, expected = {}, {}, set()
+                for r in rows:
+                    depth = 30 - r.layer if reverse else r.layer
+                    step = max(0, depth - 24)
+                    angle = np.radians(4. * step)
+                    line = np.cos(angle) * axes[min(24, depth)] + np.sin(angle) * eye[2]
+                    directions, values = [line], [100.]
+                    if step:
+                        directions.append(eye[3])
+                        values.append(18.)
+                        expected.add(r.name)
+                    spaces[r.name] = np.column_stack(directions)
+                    spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .25, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), expected)
+                self.assertTrue(all("tracked majority space" in why for why in findings.values()))
+
     def test_smooth_extra_strength_during_a_turn_beyond_partial_coverage(self):
         rows = [row(layer_name(i)) for i in range(37)]
         eye = np.eye(6)

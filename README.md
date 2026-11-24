@@ -299,9 +299,11 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      and must contain the held-out observation within that tolerance.
      Additional modes must lie within the coherence radius of
      the orthogonal complement. Only their component outside the span counts
-     toward expansion strength. Where a shared span fits poorly, the scanner
-     can track a majority plane from either side through consecutive measured
-     spaces. Each step must retain the incoming plane within the ordinary
+     toward expansion strength. The scanner can also track a majority plane
+     from either side through consecutive measured spaces. This can resolve a
+     boundary obscured by ordinary motion in the shared span. Wherever both
+     references apply, tracked strength must clear both bounds.
+     Each step must retain the incoming plane within the ordinary
      angular step allowance. The incoming plane measures complement strength
      before its projection into the layer supplies the next reference. At a
      lower-rank layer, tracking updates the observed directions and carries the
