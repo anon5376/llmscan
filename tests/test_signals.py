@@ -176,7 +176,7 @@ class TestProjectionMeasurements(unittest.TestCase):
         finding, = rank.rank_tensors([row(name)], {name: Measurements(6., 1., reciprocity_excess=excess)})
         self.assertIn("multi-mode change violates projection reciprocity", finding.reason)
 
-    def test_rounding_modes_of_a_single_removal_have_no_peer_subspace(self):
+    def test_single_removal_exports_only_the_line_above_the_rounding_budget(self):
         rng = np.random.default_rng(938)
         for shape in [(40, 19), (19, 40)]:
             base = rng.standard_normal(shape)
@@ -187,7 +187,10 @@ class TestProjectionMeasurements(unittest.TestCase):
             with self.subTest(shape=shape):
                 self.assertGreater(stats.singular_values[1], 0.)
                 self.assertIsNotNone(stats.direction)
-                self.assertIsNone(stats.output_subspace)
+                np.testing.assert_array_equal(stats.output_subspace, stats.direction[:, None])
+                weak = core.analyze_delta(np.zeros(shape), axis @ np.ones((1, shape[1])), 2, 2 * np.sqrt(shape[1]))
+                self.assertIsNotNone(weak.direction)
+                self.assertIsNone(weak.output_subspace)
 
     def test_resolved_column_space_can_include_every_input_of_a_tall_matrix(self):
         b = np.eye(9, 3) * [1., .3, .08]
@@ -746,6 +749,75 @@ class TestAnomalySignals(unittest.TestCase):
             spaces[r.name] = np.column_stack((axis, secondary))
         findings = subspace_outliers(rows, spaces, 3., stats, axes)
         self.assertEqual(set(findings), {layer_name(i) for i in run})
+
+    def test_mixed_rank_compares_only_paired_modes_in_either_rank_order(self):
+        rows = [row(layer_name(i)) for i in range(19)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        run = set(range(6, 11))
+        eye = np.eye(8)
+        rng = np.random.default_rng(416)
+        for (small, large), degrees, reverse in product([(1, 2), (2, 3), (2, 4)], [0, 35, 90], [False, True]):
+            with self.subTest(ranks=(small, large), degrees=degrees, reverse=reverse):
+                theta = np.radians(degrees)
+                plane = eye[:, :large]
+                narrow = np.cos(theta) * plane[:, :small] + np.sin(theta) * eye[:, large:large+small]
+                spaces = {}
+                for r in rows:
+                    q = narrow if (r.layer in run) != reverse else plane
+                    rotation, _ = np.linalg.qr(rng.normal(size=(q.shape[1], q.shape[1])))
+                    spaces[r.name] = q @ rotation
+                ranked = rank.rank_tensors(rows[::-1], stats, subspaces=spaces)
+                self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, run if degrees else set())
+                self.assertTrue(all("whole output subspace" in r.reason for r in ranked if r.tier == "T3"))
+
+    def test_contained_rank_changes_can_change_which_axis_leads(self):
+        rows = [row(layer_name(i)) for i in range(18)]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        eye = np.eye(8)
+        for run, reverse, sparse in product([{7}, {6, 7, 8, 9}], [False, True], [False, True]):
+            with self.subTest(run=run, reverse=reverse, sparse=sparse):
+                spaces = {r.name: eye[:, 1:2] if (r.layer in run) != reverse else eye[:, :2] for r in rows}
+                axes = {r.name: spaces[r.name][:, 0] for r in rows if not sparse or r.layer in run or r.layer < 4}
+                ranked = rank.rank_tensors(rows, stats, directions=axes, subspaces=spaces)
+                self.assertTrue(all(r.tier == "T4" for r in ranked))
+
+    def test_mixed_ranks_share_an_intersection_and_count_independent_moving_modes(self):
+        rows = [row(layer_name(i)) for i in range(21)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        eye = np.eye(9)
+        run = set(range(7, 12))
+        for moving in [1, 2]:
+            with self.subTest(moving=moving):
+                spaces = {}
+                for r in rows:
+                    axes = [0, 1, 2]
+                    if r.layer in run:
+                        axes[-moving:] = [3, 4][:moving]
+                        axes.extend([5, 6][:1 + r.layer % 2])
+                    spaces[r.name] = eye[:, axes]
+                findings = subspace_outliers(rows, spaces, 3., stats)
+                self.assertEqual(set(findings), {layer_name(i) for i in run})
+                self.assertTrue(all(f"shared output dimension {3-moving}" in why for why in findings.values()))
+                # An orthogonal leading-axis change contradicts the common
+                # intersection. Only a second measured moving mode suffices.
+                axes = {r.name: spaces[r.name][:, 2] for r in rows}
+                findings = subspace_outliers(rows, spaces, 3., stats, axes)
+                expected = {layer_name(i) for i in run} if moving == 2 else set()
+                self.assertEqual(set(findings), expected)
+
+    def test_two_moving_modes_with_an_intermittently_resolved_shared_mode(self):
+        rows = [row(layer_name(i)) for i in range(19)]
+        run = set(range(6, 11))
+        eye = np.eye(7)
+        spaces = {}
+        for r in rows:
+            axes = [2, 3, 4] if r.layer in run else [0, 1]
+            if r.layer % 2:
+                axes.append(5)
+            spaces[r.name] = eye[:, axes]
+        findings = subspace_outliers(rows, spaces, 3.)
+        self.assertEqual(set(findings), {layer_name(i) for i in run})
+        self.assertTrue(all("2 output modes" in why for why in findings.values()))
 
     def test_whole_space_switches_include_interior_terminal_and_recurring_groups(self):
         eye = np.eye(8)
@@ -1318,6 +1390,33 @@ class TestAnomalySignals(unittest.TestCase):
 
 
 class TestControlCheckpoints(unittest.TestCase):
+    def test_resolved_line_against_a_plane_through_cli(self):
+        # A run drops one measurable mode. Only its angle to the plane
+        # distinguishes the two cases, with the same per-layer spectra.
+        for contained in [False, True]:
+            with self.subTest(contained=contained), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                base, suspect = {}, {}
+                run = set(range(5, 10))
+                for i in range(18):
+                    w = np.eye(8)
+                    edited = w.copy()
+                    modes = [0, 1]
+                    if i in run:
+                        modes = [0 if contained else 2]
+                    edited[modes] = 0
+                    base[layer_name(i)] = ("F32", w)
+                    suspect[layer_name(i)] = ("F32", edited)
+                write_safetensors(tmp / "base.safetensors", base)
+                write_safetensors(tmp / "suspect.safetensors", suspect)
+                rc, out, err = run_cli("--base", str(tmp / "base.safetensors"),
+                                       "--suspect", str(tmp / "suspect.safetensors"), "--out", str(tmp / "out"))
+                self.assertEqual(rc, 0, out + err)
+                with (tmp / "out" / "ranking.csv").open() as f:
+                    flagged = {int(r["layer"]): r["reason"] for r in csv.DictReader(f) if r["tier"] != "T4"}
+                self.assertEqual(set(flagged), set() if contained else run)
+                self.assertTrue(all("whole output subspace" in why for why in flagged.values()))
+
     def test_symmetric_cross_terms_outside_the_leading_axis_through_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

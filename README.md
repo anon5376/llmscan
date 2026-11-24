@@ -251,10 +251,12 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      rounding budget used for `rank_one_excess` and the numerical floor of the Gram matrix.
      A twofold gap separates the selected modes from the remaining spectrum. A tall matrix
      can also have a measurable output space spanning all its input modes.
-     The scanner compares the output spaces of equal-dimensional
-     clusters across layers of the same stack, writer kind, shape and storage precision. It measures
-     the largest principal angle, which is invariant to basis rotations and ordering inside a tied
-     cluster. With eight other independent layers and a coherent majority, it tests the candidate's
+     The scanner compares resolved output spaces across layers of the same stack, writer kind,
+     shape and storage precision, including a resolved line among higher-rank spaces.
+     For ranks `p` and `q`, the overlap between orthonormal bases yields `min(p, q)` principal
+     angles. The largest measures departure from containment and is invariant to basis rotation.
+     If the smaller space lies inside the larger, all paired angles are zero.
+     With eight other independent layers and a coherent majority, it tests the candidate's
      median angle against peer dispersion, allowing for local angular drift.
      When several groups share a leading edit, the scanner compares their secondary modes.
      It chooses representative layers in order of distance from the nearest representative

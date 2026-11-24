@@ -382,15 +382,17 @@ def _stable_angles(angles: np.ndarray, members: np.ndarray, background: np.ndarr
 
 
 def _principal_cosines(bases: list[np.ndarray]) -> np.ndarray:
-    """Ordered principal cosines for every pair of equal-dimensional spaces."""
-    dim = bases[0].shape[1]
+    """Descending principal cosines. Each pair has min(rank_i, rank_j) measurements."""
+    dim = max(q.shape[1] for q in bases)
     if dim == 1:
         axes = np.stack([q[:, 0] for q in bases])
         return np.abs(axes @ axes.T)[None]
-    overlap = np.ones((dim, len(bases), len(bases)))
+    overlap = np.full((dim, len(bases), len(bases)), np.nan)
     for i, basis in enumerate(bases):
+        overlap[:basis.shape[1], i, i] = 1.
         for j in range(i):
-            overlap[:, i, j] = overlap[:, j, i] = np.linalg.svd(basis.T @ bases[j], compute_uv=False)
+            values = np.linalg.svd(basis.T @ bases[j], compute_uv=False)
+            overlap[:len(values), i, j] = overlap[:len(values), j, i] = values
     return overlap
 
 
@@ -409,6 +411,7 @@ def _shared_space_switch(geometry: _OutputGeometry, members: np.ndarray,
     reference = (background | neighbors) & ~members
     relevant = members | reference
     cross = geometry.cosines[:, members][:, :, reference]
+    cross = cross[np.isfinite(cross).all(axis=(1, 2))]
     widest = np.arccos(np.clip(cross.min(axis=(1, 2)), 0., 1.))
     k = int(np.count_nonzero(widest <= resolution))
     if k == 0 or k == len(widest):
@@ -422,14 +425,18 @@ def _shared_space_switch(geometry: _OutputGeometry, members: np.ndarray,
     # Work with r-by-r matrices, independent of the output width.
     bases = geometry.bases
     anchor = bases[np.flatnonzero(members)[0]]
-    maps = np.stack([q.T @ anchor for q in bases])
-    active = maps[relevant]
-    _, vectors = np.linalg.eigh((active.transpose(0, 2, 1) @ active).sum(axis=0))
-    coordinates, cosines, _ = np.linalg.svd(maps @ vectors[:, -k:], full_matrices=False)
-    if math.acos(min(1., cosines[relevant, -1].min())) > resolution:
-        return None
-    common = [q @ coords for q, coords in zip(bases, coordinates)]
-    shared_angles = np.arccos(np.clip(_principal_cosines(common)[-1], 0., 1.))
+    active = np.flatnonzero(relevant)
+    maps = [bases[i].T @ anchor for i in active]
+    _, vectors = np.linalg.eigh(sum(m.T @ m for m in maps))
+    common = {}
+    for i, m in zip(active, maps):
+        coordinates, retained, _ = np.linalg.svd(m @ vectors[:, -k:], full_matrices=False)
+        if math.acos(min(1., retained[-1])) > resolution:
+            return None
+        common[i] = bases[i] @ coordinates
+    shared_angles = np.zeros_like(geometry.leading_angles)
+    shared_cosines = _principal_cosines(list(common.values()))[-1]
+    shared_angles[np.ix_(active, active)] = np.arccos(np.clip(shared_cosines, 0., 1.))
     width = _stable_angles(shared_angles, members, background, adjacent, factor, floor)
     if width is None or separation <= factor * width:
         return None
@@ -474,11 +481,8 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
 def _independent_mode_switch(cosines: np.ndarray, angles: np.ndarray, members: np.ndarray,
                              same: np.ndarray, adjacent: np.ndarray, switches: np.ndarray,
                              limit: float, floor: float) -> tuple[str, str] | None:
-    """Replacing one axis in an r-plane leaves at least r-1 shared dimensions."""
+    """Test complete separation or at least two independently moving paired modes."""
     outside = members[:, None] & ~members
-    closest = np.arccos(np.clip(cosines[:, outside].max(axis=1), 0., 1.))
-    if closest[-2] <= limit:
-        return None
     # Compare each moving mode at every boundary with ordinary outside steps.
     steps = angles.diagonal(1)[adjacent & same.diagonal(1) & ~members[:-1]]
     reference = "outside step limit"
@@ -494,14 +498,24 @@ def _independent_mode_switch(cosines: np.ndarray, angles: np.ndarray, members: n
         step_limit = angles[same & ~members[:, None]].max() + floor
         reference = "outside within-regime diameter plus tolerance"
     boundary_cosines = cosines.diagonal(1, axis1=1, axis2=2)[:, switches]
-    boundary = np.arccos(np.clip(boundary_cosines.max(axis=1), 0., 1.))
-    moved = np.flatnonzero((closest > limit) & (boundary > step_limit))
-    if len(moved) < 2:
-        return None
-    i = moved[0]
-    switch = "whole output subspace" if i == 0 else f"{len(moved)} output modes"
-    return switch, (f"smallest cross-group principal angle among moving modes {math.degrees(closest[i]):.2f} degrees, "
-                    f"minimum boundary angle {math.degrees(boundary[i]):.2f} degrees "
+    cross = cosines[:, outside]
+    closest = math.acos(min(1., cross[0].max()))
+    boundary = math.acos(min(1., boundary_cosines[0].max()))
+    lines = np.isnan(cosines[1].diagonal())
+    if closest > limit and boundary > step_limit and not (outside & lines[:, None] & lines).any():
+        switch = "whole output subspace"
+    else:
+        # Count from the widest angle in each pair. Missing angles sort last
+        # and cannot contribute evidence of an additional moving mode.
+        widest = np.arccos(np.clip(np.sort(cross, axis=0).max(axis=1), 0., 1.))
+        steps = np.arccos(np.clip(np.sort(boundary_cosines, axis=0).max(axis=1), 0., 1.))
+        moved = np.flatnonzero((widest > limit) & (steps > step_limit))
+        if len(moved) < 2:
+            return None
+        closest, boundary = widest[moved[-1]], steps[moved[-1]]
+        switch = f"{len(moved)} output modes"
+    return switch, (f"smallest cross-group principal angle among moving modes {math.degrees(closest):.2f} degrees, "
+                    f"minimum boundary angle {math.degrees(boundary):.2f} degrees "
                     f"vs {reference} {math.degrees(step_limit):.2f} degrees")
 
 
@@ -526,8 +540,9 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
         switch = "secondary subspace"
         primary = _stable_angles(geometry.leading_angles, members, background, adjacent, factor, floor)
         terminal = switches.sum() == 1
-        secondary = math.acos(min(1., geometry.cosines[1][outside].max()))
-        if finest and primary is not None and (not terminal or secondary > limit):
+        second = geometry.cosines[1][outside]
+        secondary = np.arccos(np.clip(second.max(), 0., 1.))
+        if finest and primary is not None and np.isfinite(secondary) and (not terminal or secondary > limit):
             across = angles[outside].min()
             evidence = (f"minimum between-group angle {math.degrees(across):.2f} degrees, "
                         f"leading axes within {math.degrees(primary):.2f} degrees")
@@ -552,13 +567,15 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
 
 def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float,
                       stats: dict[str, Measurements] | None = None,
-                      directions: dict[str, np.ndarray] | None = None) -> dict[str, str]:
-    """Compare equal-dimensional output spaces, invariant to signs and rotations inside a basis."""
+                      directions: dict[str, np.ndarray] | None = None,
+                      direction_flags: dict[str, str] | None = None) -> dict[str, str]:
+    """Refine leading-axis findings using the resolved spaces in the same output coordinates."""
+    leading = dict(direction_flags or {})
     groups = defaultdict(lambda: defaultdict(list))
     for r in rows:
         kind = canonical_kind(r.kind)
         if r.name in subspaces and r.layer is not None and kind in RESIDUAL_WRITERS:
-            key = (stack_of(r.name), kind, r.base_shape, r.base_dtype, r.suspect_dtype, subspaces[r.name].shape)
+            key = (stack_of(r.name), kind, r.base_shape, r.base_dtype, r.suspect_dtype, subspaces[r.name].shape[0])
             groups[key][r.layer].append(r.name)
 
     findings = {}
@@ -570,12 +587,16 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
             continue
         names = [layers[i][0] for i in ids]
         bases = [subspaces[name] for name in names]
-        width, dim = bases[0].shape
+        width = bases[0].shape[0]
+        ranks = np.array([q.shape[1] for q in bases])
+        multi_mode = ranks.max() > 1
+        if not multi_mode and directions and all(n in directions for n in names):
+            continue  # The direction signal already calibrates this pure leading-axis cohort.
         overlap = _principal_cosines(bases)
-        angles = np.arccos(np.clip(overlap[-1], 0., 1.))
+        angles = np.arccos(np.clip(np.nanmin(overlap, axis=0), 0., 1.))
         np.fill_diagonal(angles, 0.)
         agreement = angles <= math.acos(0.9)
-        if dim >= 2:
+        if multi_mode:
             findings.update(_subspace_switches(ids, names, len(layers), angles, overlap,
                                                directions, bases, factor))
         supporters = agreement[np.argmax(agreement.sum(axis=1))]
@@ -590,19 +611,24 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
                 shift = _recurring_rank_shift(names, supporters, stats)
                 if shift:
                     for i in member_ids:
-                        findings[names[i]] = (f"recurring {dim}-dimensional output subspace in {len(member_ids)} "
-                                              f"layers without a comparable peer group ({shift})")
+                        findings[names[i]] = (f"recurring {ranks[i]}-dimensional output subspace "
+                                              f"in {len(member_ids)} layers without a comparable peer group ({shift})")
             continue
         # Compare each candidate with the coherent population excluding itself.
         np.fill_diagonal(angles, np.nan)
         separation = np.nanmedian(angles[:, supporters], axis=1)
         for i, name in enumerate(names):
-            if name in findings:
-                continue
             peers = Peers.summarize(np.delete(separation, i).tolist())
             limit = max(max(1., factor) * peers.median, peers.median + 6 * 1.4826 * peers.mad,
                         math.sqrt(2 * width * math.ulp(1.)))
-            if separation[i] <= limit:
+            if name in leading:
+                # A change of resolved rank can change which axis leads. Count
+                # containment votes from measured spaces even if their leading
+                # axes were tied or unavailable.
+                contained = supporters & (ranks != ranks[i]) & agreement[i] & (angles[i] <= limit)
+                if contained.sum() > (len(layers) - 1) / 2:
+                    del leading[name]
+            if name in findings or separation[i] <= limit:
                 continue
             # Several mutually aligned layers can represent another editing
             # concept. Demand spectral corroboration for an isolated cohort.
@@ -617,7 +643,7 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
                 matching = np.flatnonzero(members & (angles[i] <= limit))
                 if _on_plateau(ids[i], {ids[j] for j in matching}):
                     continue
-            # Allow smooth drift. The largest principal angle is a metric.
+            # Allow smooth drift between the measured spaces.
             # A constant-speed path through the adjacent layers covers each
             # interval in proportion to its length, also at either endpoint.
             other = [j for j in range(len(ids)) if j != i]
@@ -627,10 +653,10 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
             if (-1 <= t <= 2 and agreement[a, b] and angles[i, a] <= abs(t) * angles[a, b] + limit
                     and angles[i, b] <= abs(1 - t) * angles[a, b] + limit):
                 continue
-            findings[name] = (f"{dim}-dimensional output subspace differs from coherent layers "
+            findings[name] = (f"{ranks[i]}-dimensional output subspace differs from coherent layers "
                               f"(largest principal angle, median {math.degrees(separation[i]):.2f} degrees "
                               f"vs peer upper bound {math.degrees(limit):.2f})")
-    return findings
+    return leading | findings
 
 
 def _follows_drift(layer: int, axis: np.ndarray, neighbors: list[int], axes: dict[int, np.ndarray],
@@ -699,7 +725,8 @@ def direction_outliers(rows: list[InventoryRow], directions: dict[str, np.ndarra
                         if j not in axes or _orthogonal_fraction(float(axes[j] @ axes[layer])) > limit:
                             continue
                         peer = subspaces.get(layers[j][0])
-                        if peer is not None and peer.shape == space.shape:
+                        if (peer is not None and peer.shape[0] == space.shape[0]
+                                and max(peer.shape[1], space.shape[1]) > 1):
                             if np.linalg.svd(space.T @ peer, compute_uv=False)[-1] >= 0.9:
                                 matching.add(j)
                     if _on_plateau(layer, matching):

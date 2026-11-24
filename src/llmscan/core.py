@@ -357,7 +357,7 @@ def _subspace_dimension(energy: np.ndarray, total: float, shape: tuple[int, int]
     # Also exclude eigenvalues at the scale of error in the Gram product.
     gram_floor = math.sqrt(math.ulp(1.) * sum(shape) * total)
     dim = int(np.count_nonzero(np.sqrt(energy) > max(noise, gram_floor)))
-    if dim < 2:
+    if dim == 0:
         return 0
     if dim < shape[0] and (dim == len(energy) or energy[dim - 1] > 4 * energy[dim]):
         return dim
@@ -464,7 +464,9 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int, subspace_bu
 
     noise = None if subspace_budget is None else subspace_budget / scale
     dim = _subspace_dimension(energy, total, w_suspect.shape, noise)
-    if 2 <= dim < len(w_suspect):
+    if dim == 1 and direction is not None and len(w_suspect) > 1:
+        output_subspace = direction[:, None]
+    elif 2 <= dim < len(w_suspect):
         small = vectors[:, -dim:]
         if tall:
             output_subspace = np.empty((len(dw), dim))
