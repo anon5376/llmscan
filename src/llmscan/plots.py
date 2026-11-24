@@ -146,7 +146,7 @@ def plot_effective_rank(rows: list[dict], path: Path, title: str) -> None:
             t.set_color(INK_2)
     unchanged = _unchanged_kinds(rows)
     if unchanged:
-        ax.text(0.0, -0.2, "bit-identical to base: " + ", ".join(unchanged), transform=ax.transAxes,
+        ax.text(0.0, -0.2, "Values match base in scanned matrices: " + ", ".join(unchanged), transform=ax.transAxes,
                 color=MUTED, fontsize=8, va="top", wrap=True)
     ax.set_title(title, color=INK, fontsize=11, loc="left")
     fig.savefig(path, dpi=150, facecolor=SURFACE)
