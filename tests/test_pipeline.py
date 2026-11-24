@@ -152,6 +152,27 @@ class TestInventoryAndCli(unittest.TestCase):
         names = list(suspect)
         write_sharded(self.tmp / "suspect", [{n: suspect[n] for n in names[:5]}, {n: suspect[n] for n in names[5:]}])
 
+    def test_invalid_k_preserves_previous_scan(self):
+        out = self.tmp / "out"
+        args = ["--base", str(self.tmp / "base.safetensors"), "--suspect", str(self.tmp / "suspect"),
+                "--out", str(out)]
+        self.assertEqual(run_cli(*args, "-k", "1")[0], 0)
+        before = {p.name: p.read_bytes() for p in out.iterdir()}
+        for k in ("0", "-1"):
+            with self.subTest(k=k):
+                with self.assertRaises(SystemExit) as cm:
+                    run_cli(*args, "-k", k)
+                self.assertEqual(cm.exception.code, 2)
+                self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
+
+    def test_invalid_k_on_identical_checkpoints_creates_no_output(self):
+        base = str(self.tmp / "base.safetensors")
+        out = self.tmp / "out"
+        with self.assertRaises(SystemExit) as cm:
+            run_cli("--base", base, "--suspect", base, "--out", str(out), "-k", "0")
+        self.assertEqual(cm.exception.code, 2)
+        self.assertFalse(out.exists())
+
     def test_inventory_statuses(self):
         with Checkpoint(self.tmp / "base.safetensors") as b, Checkpoint(self.tmp / "suspect") as s:
             rows = {r.name: r.status for r in inventory.compare(b, s)}
