@@ -1079,6 +1079,28 @@ class TestAnomalySignals(unittest.TestCase):
                 findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
                 self.assertFalse(any("subspace expansion" in why for why in findings.values()))
 
+    def test_static_reference_contains_partial_layers_at_its_own_orientation(self):
+        rows = [row(layer_name(i)) for i in range(30)]
+        eye = np.eye(5)
+        run = range(12, 18)
+        spaces, spectra = {}, {}
+        for r in rows:
+            # The typical full plane contains both departures within the
+            # coherence radius, though the two departures are 35 degrees apart.
+            angle = np.radians({3: -20., 4: 15.}.get(r.layer, 0.))
+            line = np.cos(angle) * eye[0] + np.sin(angle) * eye[2]
+            axes = [line, eye[1]] if r.layer % 2 or r.layer in run else [line]
+            strengths = [2.] * len(axes)
+            if r.layer in run:
+                axes.append(eye[3])
+                strengths.append(8.)
+            spaces[r.name] = np.column_stack(axes)
+            spectra[r.name] = core.OutputSpectrum(np.array(strengths), 0., .25, 1.)
+        findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+        expanded = {n for n, why in findings.items() if "subspace expansion" in why}
+        self.assertEqual(expanded, {layer_name(i) for i in run})
+        self.assertTrue(all("against the majority space" in findings[n] for n in expanded))
+
     def test_honest_mixed_rank_planes_and_gradual_rank_ramps(self):
         rows = [row(layer_name(i)) for i in range(36)]
         eye = np.eye(5)

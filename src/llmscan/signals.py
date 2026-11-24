@@ -841,9 +841,13 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     within = angles[np.ix_(peers, peers)]
     containment = angles[np.ix_(peers, background)]
     widths = containment.max(axis=1)
-    if widths.max() <= radius:
+    if within.max() <= radius and widths.min() <= radius:
         reference = _ExpansionReference(bases[peers[widths.argmin()]])
-        yield [reference if a <= radius else None for a in angles[:, peers].max(axis=1)], "majority space"
+        # The selected plane fits every partial layer. Only planes that
+        # resolve at least p directions can be tested as supersets of all
+        # the mutually coherent full anchors.
+        covered = (ranks < p) | (angles[:, peers].max(axis=1) <= radius)
+        yield [reference if ok else None for ok in covered], "majority space"
 
     # Directly observed steps may accelerate. Only an unobserved span needs
     # its average speed checked against ordinary motion.
