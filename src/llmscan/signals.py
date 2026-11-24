@@ -525,20 +525,57 @@ def _independent_mode_switch(cosines: np.ndarray, angles: np.ndarray, members: n
 
 
 def _observed_runs(ids: list[int], members: np.ndarray, adjacent: np.ndarray,
-                   extent: tuple[int, int]) -> np.ndarray:
+                   extent: tuple[int, int], measured: np.ndarray | None = None) -> np.ndarray:
     """Members of physical runs with a measurement on each outer boundary."""
-    starts = np.flatnonzero(members & np.r_[True, ~(adjacent & members[:-1])])
-    ends = np.flatnonzero(members & np.r_[~(adjacent & members[1:]), True])
+    joined = adjacent
+    if measured is not None:
+        members = members & measured
+        joined = adjacent & measured[:-1] & measured[1:]
+    starts = np.flatnonzero(members & np.r_[True, ~(joined & members[:-1])])
+    ends = np.flatnonzero(members & np.r_[~(joined & members[1:]), True])
     observed = np.zeros_like(members)
     for start, end in zip(starts, ends):
-        left = adjacent[start - 1] if start else ids[0] == extent[0]
-        right = adjacent[end] if end < len(adjacent) else ids[-1] == extent[1]
+        left = joined[start - 1] if start else ids[0] == extent[0]
+        right = joined[end] if end < len(joined) else ids[-1] == extent[1]
         if left and right:
             observed[start:end + 1] = True
     # A single terminal transition requires a continuous reference trajectory.
     if np.count_nonzero(observed[:-1] != observed[1:]) == 1 and not adjacent.all():
         observed[:] = False
     return observed
+
+
+def _switch_reasons(names: list[str], observed: np.ndarray, switch: str, evidence: str,
+                    spread: str, within: float) -> dict[str, str]:
+    reason = (f"abrupt {switch} switch in {observed.sum()} layers "
+              f"({evidence}, {spread} {math.degrees(within):.2f} degrees)")
+    return {names[i]: reason for i in np.flatnonzero(observed)}
+
+
+def _secondary_switch(ids: list[int], angles: np.ndarray, geometry: _OutputGeometry, members: np.ndarray,
+                      background: np.ndarray, adjacent: np.ndarray, factor: float, floor: float,
+                      limit: float) -> tuple[np.ndarray, str] | None:
+    """Attribute a change to secondary modes under a stable measured primary."""
+    second = geometry.cosines[1]
+    paired = _observed_runs(ids, members, adjacent, geometry.extent, np.isfinite(second.diagonal()))
+    if not paired.any():
+        return None
+    primary = _stable_angles(geometry.leading_angles, members, background, adjacent, factor, floor)
+    if primary is None:
+        return None
+    outside = members[:, None] & ~members
+    across = angles[outside].min()
+    evidence = (f"minimum between-group angle {math.degrees(across):.2f} degrees, "
+                f"leading axes within {math.degrees(primary):.2f} degrees")
+    boundaries = np.flatnonzero(paired[:-1] != paired[1:])
+    if len(boundaries) == 1:
+        secondary = math.acos(min(1., np.nanmax(second[outside])))
+        if secondary <= limit:
+            return None
+        i = boundaries[0]
+        evidence += (f", minimum secondary angle {math.degrees(secondary):.2f} degrees "
+                     f"at boundary {ids[i]}–{ids[i+1]}")
+    return paired, evidence
 
 
 def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, geometry: _OutputGeometry,
@@ -555,41 +592,27 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
         if not observed.any():
             continue
         switches = adjacent & (members[:-1] != members[1:])
-        outside = members[:, None] & ~members
         limit = factor * max(floor, within)
         # A stable primary or intersection gives a more specific attribution.
         # If it cannot be established, two exceptional principal angles still
         # certify movement that changing a single leading axis cannot explain.
         switch = "secondary subspace"
-        primary = _stable_angles(geometry.leading_angles, members, background, adjacent, factor, floor)
-        reported_boundaries = observed[:-1] != observed[1:]
-        terminal = reported_boundaries.sum() == 1
-        second = geometry.cosines[1]
-        secondary = None
-        if np.isfinite(second.diagonal(1)[switches]).all():
-            # Every boundary measured a second mode. Other pairs can bound
-            # its separation only where both writers resolved that mode.
-            secondary = math.acos(min(1., np.nanmax(second[outside])))
-        if finest and primary is not None and secondary is not None and (not terminal or secondary > limit):
-            across = angles[outside].min()
-            evidence = (f"minimum between-group angle {math.degrees(across):.2f} degrees, "
-                        f"leading axes within {math.degrees(primary):.2f} degrees")
-            if terminal:
-                i = int(np.flatnonzero(reported_boundaries)[0])
-                evidence += (f", minimum secondary angle {math.degrees(secondary):.2f} degrees "
-                             f"at boundary {ids[i]}–{ids[i+1]}")
-        else:
-            evidence = _shared_space_switch(geometry, members, background, adjacent, limit, factor, floor)
-            if evidence is None:
-                independent = _independent_mode_switch(geometry.cosines, angles, members, same, adjacent,
-                                                       switches, limit, floor)
-                if independent is None:
+        if finest:
+            secondary = _secondary_switch(ids, angles, geometry, members, background, adjacent, factor, floor, limit)
+            if secondary is not None:
+                paired, evidence = secondary
+                findings.update(_switch_reasons(names, paired, switch, evidence, spread, within))
+                observed &= ~paired
+                if not observed.any():
                     continue
-                switch, evidence = independent
-        reason = (f"abrupt {switch} switch in {observed.sum()} layers "
-                  f"({evidence}, {spread} {math.degrees(within):.2f} degrees)")
-        for i in np.flatnonzero(observed):
-            findings[names[i]] = reason
+        evidence = _shared_space_switch(geometry, members, background, adjacent, limit, factor, floor)
+        if evidence is None:
+            independent = _independent_mode_switch(geometry.cosines, angles, members, same, adjacent,
+                                                   switches, limit, floor)
+            if independent is None:
+                continue
+            switch, evidence = independent
+        findings.update(_switch_reasons(names, observed, switch, evidence, spread, within))
     return findings
 
 

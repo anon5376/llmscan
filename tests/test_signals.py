@@ -888,6 +888,27 @@ class TestAnomalySignals(unittest.TestCase):
                 flagged = {r.layer for r in ranked if r.tier == "T3" and r.layer in terminal}
                 self.assertEqual(flagged, terminal if measured else set())
 
+    def test_sparse_planes_corroborate_only_runs_with_secondary_boundary_measurements(self):
+        rows = [row(layer_name(i)) for i in range(22)]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        eye = np.eye(5)
+        first, second = {5, 6, 7}, {13, 14, 15}
+        angle = np.radians(8)
+        for planes, expected in [({4, 8}, first), ({12, 16}, second), ({4, 16}, set()),
+                                 ({4, 8, 12, 16}, first | second)]:
+            with self.subTest(planes=planes):
+                axes, spaces = {}, {}
+                for r in rows:
+                    i = r.layer
+                    member = i in first or i in second
+                    q = eye[:, [0, 2 if member else 1]]
+                    measured = member or i in planes
+                    axis = q[:, 0] if measured else q @ [np.cos(angle), np.sin(angle)]
+                    axes[r.name] = axis
+                    spaces[r.name] = q if measured else axis[:, None]
+                ranked = rank.rank_tensors(rows, stats, directions=axes, subspaces=spaces)
+                self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, expected)
+
     def test_cohort_endpoints_require_observations_of_the_switched_modes(self):
         rows = [row(layer_name(i)) for i in range(21)]
         stats = {r.name: Measurements(2., 1.) for r in rows}
