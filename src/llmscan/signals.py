@@ -958,6 +958,12 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
         ratio = spectrum.scale / scale
         reference = references[i]
         lo, hi, unpaired = spectrum.outside_bounds(reference.basis, bases[i], reference.paired_rank)
+        if math.isfinite(reference.supported_strength):
+            # A turning plane can contribute to the total residual as the
+            # span gains or loses coverage. The same interval must certify
+            # the boundary and bound ordinary steps: only the measured
+            # extra modes supply a lower bound, while hi covers all motion.
+            lo = unpaired
         unpaired = min(unpaired, reference.supported_strength)
         margin = reference.uncertainty * spectrum.retained.max()
         lower[i], upper[i], extra[i], noise[i] = ratio * np.array(
@@ -976,6 +982,15 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
     unit = noise[measured].max()
     confirmed = []
     for members in ([strong, elevated] if np.any(elevated != strong) else [strong]):
+        # A threshold (including loss of span coverage) can split a smooth
+        # higher-rank trajectory. Calibrate that boundary against the motion
+        # on its measured outer side too, excluding the boundary step itself.
+        outer_motion = np.zeros(len(names))
+        outer = np.flatnonzero((ranks > p) & measured & ~members)
+        breaks = np.flatnonzero((np.diff(np.asarray(ids)[outer]) != 1) | np.diff(elevated[outer])) + 1
+        for segment in np.split(outer, breaks):
+            if len(segment) > 1:
+                outer_motion[segment] = _expansion_step(segment[:-1], steps, lower, upper, factor)
         for start, end in _bounded_runs(ids, members, adjacent, extent):
             run = np.arange(start, end + 1)
             if not strong[run].any():
@@ -987,7 +1002,7 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
                               for segment in segments)
             limit = factor * max(outside_step, inside_step)
             boundaries = [(run[0], run[0]-1), (run[-1], run[-1]+1)]
-            if any(lower[i] - upper[j] <= max(limit, noise[i] + noise[j])
+            if any(lower[i] - upper[j] <= max(limit, factor * outer_motion[j], noise[i] + noise[j])
                    for i, j in boundaries if 0 <= j < len(names)):
                 continue
             confirmed.append((start, end))

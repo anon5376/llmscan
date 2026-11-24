@@ -1102,6 +1102,27 @@ class TestAnomalySignals(unittest.TestCase):
                     spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .5, 1.)
                 self.assertEqual(set(subspace_outliers(rows, spaces, 3., spectra=spectra)), expected)
 
+    def test_smooth_extra_strength_during_a_turn_beyond_partial_coverage(self):
+        rows = [row(layer_name(i)) for i in range(37)]
+        eye = np.eye(6)
+        axes = self.wandering_axes(eye, len(rows), False)
+        for reverse in [False, True]:
+            with self.subTest(reverse=reverse):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    i = 36 - r.layer if reverse else r.layer
+                    depth = max(0, i - 24)
+                    angle = np.radians(6. * depth)
+                    a = axes[min(i, 24)]
+                    b = -a[1] * eye[0] + a[0] * eye[1]
+                    leading = np.cos(angle) * a + np.sin(angle) * eye[2]
+                    secondary = np.cos(angle) * b + np.sin(angle) * eye[3]
+                    edit = 60. * np.outer(leading, leading) + (1. + .8 * depth) * np.outer(secondary, secondary)
+                    m = core.analyze_delta(0. * eye, edit, 1, .25 if depth else 1.25)
+                    spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertFalse(any("subspace expansion" in why for why in findings.values()), findings)
+
     def test_endpoint_forecast_error_at_the_same_physical_horizon(self):
         ids = [*range(11), 11, 14, 22]
         eye = np.eye(3)
