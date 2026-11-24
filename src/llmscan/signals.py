@@ -723,20 +723,24 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     for i, basis in enumerate(bases):
         # Leave the target out, including when measuring background strength.
         before, after = peers[peers < i], peers[peers > i]
-        reference = None
         if len(before) and len(after):
             a, b = before[-1], after[0]
-            left, cosines, right = np.linalg.svd(bases[a].T @ bases[b], full_matrices=False)
-            if cosines.min() > floor:  # A right angle has no unique shortest arc.
-                # Interpolate aligned principal vectors on the Grassmann geodesic.
-                theta = np.arccos(np.clip(cosines, 0., 1.)) / np.pi
-                t = (ids[i] - ids[a]) / (ids[b] - ids[a])
-                reference = ((bases[a] @ left) * ((1-t) * np.sinc((1-t) * theta))
-                             + (bases[b] @ right.T) * (t * np.sinc(t * theta))) / np.sinc(theta)
-        elif i == peers[0] or i == peers[-1]:
-            # Score endpoint peers against a real neighbor. Do not extrapolate
-            # the path to a candidate beyond the measured reference range.
-            reference = bases[after[0] if len(after) else before[-1]]
+        elif i == peers[0]:
+            a, b = after[:2]
+        elif i == peers[-1]:
+            a, b = before[-2:]
+        else:
+            references.append(None)
+            continue
+        t = (ids[i] - ids[a]) / (ids[b] - ids[a])
+        left, cosines, right = np.linalg.svd(bases[a].T @ bases[b], full_matrices=False)
+        reference = None
+        # Extend at most one observed interval to validate a held-out endpoint.
+        # At a right angle the shortest arc through the two planes is ambiguous.
+        if -1 <= t <= 2 and cosines.min() > floor:
+            theta = np.arccos(np.clip(cosines, 0., 1.)) / np.pi
+            reference = ((bases[a] @ left) * ((1-t) * np.sinc((1-t) * theta))
+                         + (bases[b] @ right.T) * (t * np.sinc(t * theta))) / np.sinc(theta)
         if reference is not None:
             cosine = np.linalg.svd(reference.T @ basis, compute_uv=False).min()
             error = math.acos(min(1., cosine))

@@ -920,13 +920,13 @@ class TestAnomalySignals(unittest.TestCase):
         rows = [row(layer_name(i)) for i in range(28)]
         eye = np.eye(12)
         target = range(11, 17)
-        for rank, rate, stepped in product([1, 2, 3], [1., 3.], [False, True]):
-            with self.subTest(rank=rank, rate=rate, stepped=stepped):
+        for rank, rate, primary, stepped in product([1, 2, 3], [1., 3.], [10., 150.], [False, True]):
+            with self.subTest(rank=rank, rate=rate, primary=primary, stepped=stepped):
                 spaces, spectra = {}, {}
                 for r in rows:
                     angle = np.radians(rate * r.layer)
                     line = np.cos(angle) * eye[0] + np.sin(angle) * eye[3]
-                    axes, values = [line, *eye[1:rank]], [10.] * rank
+                    axes, values = [line, *eye[1:rank]], [primary, *([10.] * (rank-1))]
                     if r.layer in target:
                         axes.append(eye[4 + target.index(r.layer)])
                         values.append(2.7 if stepped and r.layer == target.start else 7.)
