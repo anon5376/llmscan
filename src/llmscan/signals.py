@@ -850,26 +850,44 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     # supplies no independent evidence for tracking rather than jitter.
     if widths.min() > np.median(consecutive) + floor:
         limit = min(radius, factor * ordinary)
-        frames = _majority_envelope(bases, peers, max(floor, min(radius, ordinary) / factor), radius)
-        description = "majority ambient span"
-        if frames is None:
-            frames = _tracked_references(ids, bases, peers, angles, limit)
-            description = "tracked majority space"
+        envelope = _majority_envelope(bases, peers, max(floor, min(radius, ordinary) / factor), radius)
         # A measured superset can hide ordinary rotation *inside* it. Bound
         # the evidence against continuations from an independent majority
         # observation, even if the projected path itself appears stationary.
         p = bases[peers[0]].shape[1]
         horizons = np.abs(depths[peers, None] - depths[peers])
-        for i, (basis, spectrum) in enumerate(zip(bases, spectra)):
-            if basis.shape[1] <= p or spectrum is None or frames[i] is None:
+        expanded = np.flatnonzero([basis.shape[1] > p for basis in bases])
+        caps = np.zeros(len(ids))
+        for i in expanded:
+            if spectra[i] is None:
                 continue
             distances = abs(depths[peers] - ids[i])
             depth = distances.min()
             motion = max(depth * ordinary, within[horizons == depth].max(initial=0.))
-            strength = min(spectrum.outside_continuation(bases[j], basis, motion)
-                           for j in peers[distances == depth])
-            frames[i] = frames[i]._replace(supported_strength=strength)
-        yield frames, description
+            caps[i] = min(spectra[i].outside_continuation(bases[j], bases[i], motion)
+                          for j in peers[distances == depth])
+            if envelope is not None and envelope[i] is not None:
+                envelope[i] = envelope[i]._replace(supported_strength=caps[i])
+        if envelope is not None:
+            yield envelope, "majority ambient span"
+            # Track only runs the envelope cannot cover completely. Compare
+            # the whole run in the same tracked frame convention, retaining
+            # the envelope's independent strength constraint wherever valid.
+            for run in np.split(expanded, np.flatnonzero(np.diff(depths[expanded]) != 1) + 1):
+                if all(envelope[i] is not None for i in run):
+                    caps[run] = 0.
+                    continue
+                for i in run:
+                    frame = envelope[i]
+                    if frame is not None and spectra[i] is not None:
+                        _, _, extra = spectra[i].outside_bounds(frame.basis, bases[i], frame.paired_rank)
+                        caps[i] = min(caps[i], extra)
+        if caps.any():
+            tracked = _tracked_references(ids, bases, peers, angles, limit)
+            for i in expanded:
+                if tracked[i] is not None:
+                    tracked[i] = tracked[i]._replace(supported_strength=caps[i])
+            yield tracked, "tracked majority space"
 
     references = []
     errors = []

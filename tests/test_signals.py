@@ -1082,6 +1082,26 @@ class TestAnomalySignals(unittest.TestCase):
         findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
         self.assertFalse(any("subspace expansion" in why for why in findings.values()))
 
+    def test_tracking_completes_a_run_that_leaves_the_majority_envelope(self):
+        rows = [row(layer_name(i)) for i in range(31)]
+        eye = np.eye(6)
+        axes = self.wandering_axes(eye, len(rows), False)
+        for reverse in [False, True]:
+            with self.subTest(reverse=reverse):
+                spaces, spectra, expected = {}, {}, set()
+                for r in rows:
+                    depth = 30 - r.layer if reverse else r.layer
+                    angle = np.radians(8. * max(0, depth - 24))
+                    line = np.cos(angle) * axes[min(24, depth)] + np.sin(angle) * eye[2]
+                    directions, values = [line], [10.]
+                    if depth > 24:
+                        directions.append(eye[3])
+                        values.append(9.)
+                        expected.add(r.name)
+                    spaces[r.name] = np.column_stack(directions)
+                    spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .5, 1.)
+                self.assertEqual(set(subspace_outliers(rows, spaces, 3., spectra=spectra)), expected)
+
     def test_endpoint_forecast_error_at_the_same_physical_horizon(self):
         ids = [*range(11), 11, 14, 22]
         eye = np.eye(3)
