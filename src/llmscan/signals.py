@@ -539,6 +539,18 @@ def _independent_mode_switch(cosines: np.ndarray, angles: np.ndarray, members: n
                     f"vs {reference} {math.degrees(step_limit):.2f} degrees")
 
 
+def _bounded_runs(ids: list[int], members: np.ndarray, adjacent: np.ndarray,
+                  extent: tuple[int, int]) -> Iterator[tuple[int, int]]:
+    """Inclusive endpoints of physical runs with each outer boundary measured."""
+    starts = np.flatnonzero(members & np.r_[True, ~(adjacent & members[:-1])])
+    ends = np.flatnonzero(members & np.r_[~(adjacent & members[1:]), True])
+    for start, end in zip(starts, ends):
+        left = adjacent[start - 1] if start else ids[0] == extent[0]
+        right = adjacent[end] if end < len(adjacent) else ids[-1] == extent[1]
+        if left and right:
+            yield start, end
+
+
 def _observed_runs(ids: list[int], members: np.ndarray, adjacent: np.ndarray,
                    extent: tuple[int, int], measured: np.ndarray | None = None) -> np.ndarray:
     """Members of physical runs with a measurement on each outer boundary."""
@@ -546,14 +558,9 @@ def _observed_runs(ids: list[int], members: np.ndarray, adjacent: np.ndarray,
     if measured is not None:
         members = members & measured
         joined = adjacent & measured[:-1] & measured[1:]
-    starts = np.flatnonzero(members & np.r_[True, ~(joined & members[:-1])])
-    ends = np.flatnonzero(members & np.r_[~(joined & members[1:]), True])
     observed = np.zeros_like(members)
-    for start, end in zip(starts, ends):
-        left = joined[start - 1] if start else ids[0] == extent[0]
-        right = joined[end] if end < len(joined) else ids[-1] == extent[1]
-        if left and right:
-            observed[start:end + 1] = True
+    for start, end in _bounded_runs(ids, members, joined, extent):
+        observed[start:end + 1] = True
     # A single terminal transition requires a continuous reference trajectory.
     if np.count_nonzero(observed[:-1] != observed[1:]) == 1 and not adjacent.all():
         observed[:] = False
@@ -730,10 +737,10 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
     steps = np.maximum(upper[1:] - lower[:-1], upper[:-1] - lower[1:])
     outside_step = _ordinary_step(steps[adjacent & background[:-1] & background[1:]])
     unit = noise[measured].max()
-    findings = {}
+    accepted = np.zeros_like(strong)
     for members in ([strong, elevated] if np.any(elevated != strong) else [strong]):
-        observed = np.flatnonzero(_observed_runs(ids, members, adjacent, extent))
-        for run in np.split(observed, np.flatnonzero(np.diff(np.asarray(ids)[observed]) > 1) + 1):
+        for start, end in _bounded_runs(ids, members, adjacent, extent):
+            run = np.arange(start, end + 1)
             if not strong[run].any():
                 continue
             # Compare ordinary motion within each confidence level. Crossing
@@ -744,12 +751,15 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
             if any(lower[i] - upper[j] <= max(limit, noise[i] + noise[j])
                    for i, j in boundaries if 0 <= j < len(names)):
                 continue
-            for i in run:
-                votes = np.searchsorted(bounds, resolved[i])
-                findings[names[i]] = (f"abrupt output subspace expansion beyond rank {p} "
-                                      f"(unpaired strength at least {resolved[i]/unit:.2f} exceeds "
-                                      f"the upper bounds of {votes}/{len(peers)} reference layers, "
-                                      "in units of the largest measurement allowance)")
+            accepted[run] = True
+    # Only confirmed expansions can corroborate another terminal transition.
+    findings = {}
+    for i in np.flatnonzero(_observed_runs(ids, accepted, adjacent, extent)):
+        votes = np.searchsorted(bounds, resolved[i])
+        findings[names[i]] = (f"abrupt output subspace expansion beyond rank {p} "
+                              f"(unpaired strength at least {resolved[i]/unit:.2f} exceeds "
+                              f"the upper bounds of {votes}/{len(peers)} reference layers, "
+                              "in units of the largest measurement allowance)")
     return findings
 
 

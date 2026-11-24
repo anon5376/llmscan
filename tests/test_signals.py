@@ -1052,6 +1052,22 @@ class TestAnomalySignals(unittest.TestCase):
                 expected = run if measured or 18 not in run else set()
                 self.assertEqual(set(findings), {layer_name(i) for i in expected})
 
+    def test_only_confirmed_interior_expansions_support_a_separate_terminal_run(self):
+        rows = [row(layer_name(i)) for i in range(24)]
+        for strength in [2.5, 6.]:
+            with self.subTest(strength=strength):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    extra = {2: 1.1, 8: strength, 21: 2.5, 22: 6., 23: 6.}.get(r.layer)
+                    values = [10.] if extra is None else [10., extra]
+                    spaces[r.name] = np.eye(4)[:, :len(values)]
+                    if r.layer != 2:
+                        noise = 2. if r.layer == 0 else 1.
+                        spectra[r.name] = core.OutputSpectrum(np.array(values), 0., noise, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                expected = {8, 21, 22, 23} if strength == 6. else set()
+                self.assertEqual(set(findings), {layer_name(i) for i in expected})
+
     def test_mixed_ranks_share_an_intersection_and_count_independent_moving_modes(self):
         rows = [row(layer_name(i)) for i in range(21)]
         stats = {r.name: Measurements(2., 1.) for r in rows}
