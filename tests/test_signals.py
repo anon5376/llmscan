@@ -956,6 +956,22 @@ class TestAnomalySignals(unittest.TestCase):
                 findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
                 self.assertEqual(set(findings), {layer_name(i) for i in run} if extra > 4 else set())
 
+    def test_terminal_expansion_requires_a_continuous_measured_trajectory(self):
+        rows = [row(layer_name(i)) for i in range(19)]
+        for run, measured in product([{11, 12}, {17, 18}], [False, True]):
+            with self.subTest(run=run, measured=measured):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    strengths = [8.]
+                    if r.layer in run or r.layer == 3:
+                        strengths.append(6. if r.layer in run else 1.1)
+                    spaces[r.name] = np.eye(4)[:, :len(strengths)]
+                    if measured or r.layer != 3:
+                        spectra[r.name] = core.OutputSpectrum(np.array(strengths), 0., 1., 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                expected = run if measured or 18 not in run else set()
+                self.assertEqual(set(findings), {layer_name(i) for i in expected})
+
     def test_mixed_ranks_share_an_intersection_and_count_independent_moving_modes(self):
         rows = [row(layer_name(i)) for i in range(21)]
         stats = {r.name: Measurements(2., 1.) for r in rows}

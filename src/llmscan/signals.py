@@ -703,11 +703,10 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
         lower[i], upper[i], extra[i], noise[i] = ratio * np.array([lo, hi, unpaired, spectrum.noise])
     peer_bound = (upper[background] + noise[background]).max()
     strong = (ranks > p) & (extra - noise > peer_bound)
-    adjacent = np.diff(ids) == 1
-    observed = np.flatnonzero(_observed_runs(ids, strong, adjacent, extent, measured))
+    adjacent = (np.diff(ids) == 1) & measured[:-1] & measured[1:]
+    observed = np.flatnonzero(_observed_runs(ids, strong, adjacent, extent))
     steps = np.maximum(upper[1:] - lower[:-1], upper[:-1] - lower[1:])
-    outside = measured & ~strong
-    outside_step = steps[adjacent & outside[:-1] & outside[1:]].max(initial=0.)
+    outside_step = steps[adjacent & ~strong[:-1] & ~strong[1:]].max(initial=0.)
     findings = {}
     for run in np.split(observed, np.flatnonzero(np.diff(np.asarray(ids)[observed]) > 1) + 1):
         if not len(run):
