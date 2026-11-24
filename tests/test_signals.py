@@ -789,16 +789,37 @@ class TestAnomalySignals(unittest.TestCase):
         rows = [row(layer_name(i)) for i in range(24)]
         stats = {r.name: Measurements(2., 1.) for r in rows}
         minority = {r.layer for r in rows[-4:]}
-        for closest, drift, expected in [(0., False, minority), (50., False, set()),
-                                         (80., False, minority), (90., True, set())]:
-            with self.subTest(closest=closest, drift=drift):
+        rotations = [(0., 60.), (10., 10.), (30., 60.), (45., 45.), (45., 90.), (50., 90.), (90., 90.)]
+        for rotation, drift in product(rotations, (True, False)):
+            with self.subTest(rotation=rotation, drift=drift):
                 spaces = {}
                 for r in rows:
                     t = np.clip((r.layer - 8) / 12, 0., 1.) if drift else float(r.layer in minority)
-                    angles = np.radians([closest, 90.]) * t
+                    angles = np.radians(rotation) * t
                     spaces[r.name] = eye[:, :2] * np.cos(angles) + eye[:, 2:] * np.sin(angles)
                 ranked = rank.rank_tensors(rows, stats, subspaces=spaces)
-                self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
+                self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, set() if drift else minority)
+
+    def test_whole_space_switch_compares_weakest_boundary_mode_with_outside_steps(self):
+        rows = [row(layer_name(i)) for i in range(32)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        eye = np.eye(len(rows) + 5)
+        group = {7, 10, 11, 12, 19}
+        for angle, expected in [(32., set()), (55., group)]:
+            with self.subTest(angle=angle):
+                walk = eye[2]
+                tilt = np.radians(angle)
+                first = np.cos(tilt) * eye[0] + np.sin(tilt) * eye[1]
+                spaces = {}
+                for r in rows:
+                    if r.layer in group:
+                        spaces[r.name] = np.column_stack((first, eye[-1]))
+                    else:
+                        step = np.radians(36 + r.layer % 3)
+                        walk = np.cos(step) * walk + np.sin(step) * eye[3 + r.layer]
+                        spaces[r.name] = np.column_stack((eye[0], walk))
+                findings = subspace_outliers(rows, spaces, 3., stats)
+                self.assertEqual(set(findings), {layer_name(i) for i in expected})
 
     def test_unresolved_shared_space_with_rotated_bases_and_multiple_groups(self):
         rows = [row(layer_name(i)) for i in range(32)]

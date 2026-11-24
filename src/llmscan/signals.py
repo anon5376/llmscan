@@ -466,9 +466,41 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
         # can establish a collective switch by separating every changing mode.
         found = _partition_switches(ids, names, angles, geometry, factor, floor, adjacent,
                                     labels, widths, spread, i == 0)
-        for name, reason in found.items():
-            findings.setdefault(name, reason)
+        # A supported coarser partition can explain neighboring subgroups as
+        # one switch. Report the collective evidence for those layers.
+        findings.update(found)
     return findings
+
+
+def _whole_space_switch(geometry: _OutputGeometry, angles: np.ndarray, members: np.ndarray,
+                        background: np.ndarray, adjacent: np.ndarray, switches: np.ndarray,
+                        limit: float, floor: float, factor: float) -> str | None:
+    outside = members[:, None] & ~members
+    closest = math.acos(min(1., geometry.cosines[0][outside].max()))
+    if closest <= limit:
+        return None
+    # A nearly shared, independently measured leading edit can move at the
+    # same boundary as a much larger secondary change. Retain the stability
+    # check for that leading axis, including when some measurements are absent.
+    near_primary = geometry.leading_angles <= np.minimum(math.acos(0.9), angles / factor)
+    if near_primary[np.ix_(members, background)].any() or near_primary.diagonal(1)[switches].any():
+        return None
+    # Compare the weakest moving mode at each boundary with ordinary steps
+    # outside the group. A large jump in one mode cannot vouch for the others.
+    steps = angles.diagonal(1)[adjacent & ~members[:-1] & ~members[1:]]
+    if not len(steps):
+        return None
+    if len(steps) >= 8:
+        peers = Peers.summarize(steps.tolist())
+        step_limit = peers.median + max(floor, 6 * 1.4826 * peers.mad)
+    else:
+        step_limit = steps.max() + floor
+    boundary = math.acos(min(1., geometry.cosines[0].diagonal(1)[switches].max()))
+    if boundary <= step_limit:
+        return None
+    return (f"smallest cross-group principal angle {math.degrees(closest):.2f} degrees, "
+            f"minimum boundary angle {math.degrees(boundary):.2f} degrees "
+            f"vs outside step limit {math.degrees(step_limit):.2f} degrees")
 
 
 def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, geometry: _OutputGeometry,
@@ -485,12 +517,11 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
             continue
         outside = members[:, None] & ~members
         limit = factor * max(floor, within)
-        closest = math.acos(min(1., geometry.cosines[0][outside].max()))
-        switch = "secondary subspace"
-        if closest >= math.asin(0.9) and closest > limit:
+        evidence = _whole_space_switch(geometry, angles, members, background, adjacent, switches, limit, floor, factor)
+        if evidence is not None:
             switch = "whole output subspace"
-            evidence = f"smallest cross-group principal angle {math.degrees(closest):.2f} degrees"
         else:
+            switch = "secondary subspace"
             primary = _stable_angles(geometry.leading_angles, members, background, adjacent, factor, floor)
             terminal = switches.sum() == 1
             secondary = math.acos(min(1., geometry.cosines[1][outside].max()))
