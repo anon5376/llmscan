@@ -104,13 +104,19 @@ async function directoryFiles(directory) {
   }
 }
 
-/** Files of a drop: loose files, or the top level of a dropped folder (the CLI writes a flat directory). */
+/**
+ * Files of a drop: loose files, or the top level of one dropped folder (the CLI writes a flat directory).
+ * Dropped entries carry no folder path, so a second folder would mix its files into the first one's report.
+ */
 async function droppedFiles(dataTransfer) {
   const entries = [...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
   if (!entries.length) return { files: [...dataTransfer.files] };
-  const files = [];
-  for (const entry of entries) files.push(...(entry.isDirectory ? await directoryFiles(entry) : [await entryFile(entry)]));
-  return { files, folder: entries.find((entry) => entry.isDirectory)?.name };
+  const folders = entries.filter((entry) => entry.isDirectory);
+  if (folders.length > 1 || (folders.length === 1 && entries.length > 1)) {
+    throw new Error('Drop one llmscan output folder at a time, on its own: a report is the files of a single folder.');
+  }
+  if (folders.length) return { files: await directoryFiles(folders[0]), folder: folders[0].name };
+  return { files: await Promise.all(entries.map(entryFile)) };
 }
 
 function wireImport() {
@@ -130,25 +136,25 @@ function wireImport() {
       importFiles(files, files[0]?.webkitRelativePath.split('/')[0]);
     });
   }
-  let depth = 0;
   const hasFiles = (event) => event.dataTransfer?.types.includes('Files');
-  window.addEventListener('dragenter', (event) => {
-    if (hasFiles(event) && ++depth === 1) document.body.classList.add('dropping');
-  });
-  window.addEventListener('dragleave', (event) => {
-    if (hasFiles(event) && --depth === 0) document.body.classList.remove('dropping');
-  });
-  window.addEventListener('dragover', (event) => { if (hasFiles(event)) event.preventDefault(); });
-  window.addEventListener('drop', async (event) => {
+  const hint = (on) => document.body.classList.toggle('dropping', on);
+  window.addEventListener('dragenter', (event) => { if (hasFiles(event)) hint(true); });
+  // no related target: the drag left the page (for the tab strip, another window), where a drop is not ours
+  window.addEventListener('dragleave', (event) => { if (!event.relatedTarget) hint(false); });
+  window.addEventListener('dragover', (event) => {
     if (!hasFiles(event)) return;
     event.preventDefault();
-    depth = 0;
-    document.body.classList.remove('dropping');
+    hint(true);
+  });
+  window.addEventListener('drop', async (event) => {
+    hint(false);
+    if (!hasFiles(event)) return;
+    event.preventDefault();
     try {
       const { files, folder } = await droppedFiles(event.dataTransfer);
       importFiles(files, folder);
     } catch (error) {
-      showNotice('The dropped folder could not be read', error instanceof Error ? error.message : String(error));
+      showNotice('This drop could not be imported', error instanceof Error ? error.message : String(error));
     }
   });
 }
