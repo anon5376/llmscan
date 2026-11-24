@@ -102,12 +102,14 @@ def plot_spectra(rows: list[dict], path: Path, title: str) -> bool:
                 color = INK_2
             else:
                 color = LAYER_CMAP((int(r["layer"]) - lo) / max(hi - lo, 1))
-            ax.plot(range(1, len(sv) + 1), [max(s, 1e-12) for s in sv], color=color, linewidth=1.2,
-                    marker="o" if len(sv) == 1 else None)
+            ax.plot(range(1, len(sv) + 1), [max(s, 1e-12) for s in sv], color=color, linewidth=1.2)
         ax.set_yscale("log")
         n = len(by_kind[kind])
         ax.set_title(f"{kind}  ({n} tensor{'s' * (n != 1)})", color=INK, fontsize=10, loc="left")
         ax.set_xlabel("singular value index i")
+        for line in ax.lines:
+            if len(line.get_xdata()) == 1:
+                line.set_marker("o")
     for ax in axes[:, 0]:
         ax.set_ylabel("σᵢ(ΔW)")
     for ax in list(axes.flat)[len(kinds):]:
