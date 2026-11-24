@@ -43,7 +43,8 @@ def natural_key(name: str) -> list:
 
 
 def bytes_equal(base: Checkpoint, suspect: Checkpoint, name: str) -> bool:
-    for a, b in zip_longest(base.iter_bytes(name), suspect.iter_bytes(name)):
+    chunk = 64 << 10  # mmap slices are copies; keep the two byte streams' working set small
+    for a, b in zip_longest(base.iter_bytes(name, chunk), suspect.iter_bytes(name, chunk)):
         if a != b:
             return False
     return True

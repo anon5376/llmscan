@@ -111,8 +111,9 @@ Output goes to `out/<suspect>-vs-<base>/`:
 - `spectra.png`, `effective_rank.png`.
 
 Safetensors checkpoints (single file or sharded directory) are memory-mapped and read one tensor at
-a time. The inventory compares tensors in chunks, so it needs a few megabytes of RAM
-whatever the model size (4.2 MB of allocations measured on a pair of 160 MB tensors); the ΔW scan loads the two copies of one 2-D tensor at a time as float32, so
+a time. The inventory compares same-dtype tensors byte for byte in 64 KiB chunks, and float
+re-saves by value in bounded chunks; neither comparison needs a tensor-sized copy. The ΔW scan
+loads the two copies of one 2-D tensor at a time as float32, so
 RAM must hold twice the float32 size of the largest 2-D tensor (4 bytes per element each). CPU only; the only
 dependencies are numpy and matplotlib, no torch. GGUF support is next.
 
