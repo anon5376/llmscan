@@ -102,7 +102,10 @@ def plot_spectra(rows: list[dict], path: Path, title: str) -> bool:
                 color = INK_2
             else:
                 color = LAYER_CMAP((int(r["layer"]) - lo) / max(hi - lo, 1))
-            ax.plot(range(1, len(sv) + 1), [max(s, 1e-12) for s in sv], color=color, linewidth=1.2)
+            heights = [s if s > 0 and math.isfinite(s) else math.nan for s in sv]
+            # A zero tail can leave one drawable value with no line segment.
+            marker = "o" if len(sv) > 1 and sum(map(math.isfinite, heights)) == 1 else None
+            ax.plot(range(1, len(sv) + 1), heights, color=color, linewidth=1.2, marker=marker)
         ax.set_yscale("log")
         n = len(by_kind[kind])
         ax.set_title(f"{kind}  ({n} tensor{'s' * (n != 1)})", color=INK, fontsize=10, loc="left")
