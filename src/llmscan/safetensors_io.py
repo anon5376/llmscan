@@ -58,9 +58,11 @@ def shard_files(path: Path) -> list[Path]:
         raise CheckpointError(f"{path}: no such file or directory")
     if (path / "model.safetensors").is_file():  # transformers loads this before any index
         return [path / "model.safetensors"]
-    indexes = sorted(path.glob("*.safetensors.index.json"))
-    if indexes:
-        weight_map = json.loads(indexes[0].read_text(encoding="utf-8"))["weight_map"]
+    index = path / "model.safetensors.index.json"
+    if not index.is_file():
+        index = min(path.glob("*.safetensors.index.json"), default=None)
+    if index is not None:
+        weight_map = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
         return [path / f for f in sorted(set(weight_map.values()))]
     files = sorted(path.glob("*.safetensors"))
     if not files:
