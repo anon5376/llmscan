@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--base", required=True, help="base model: local directory, .safetensors or .gguf file, or a cached HF id")
     ap.add_argument("--suspect", required=True, help="suspect model, same forms as --base")
     ap.add_argument("--out", type=Path, help="output directory (default: out/<suspect>-vs-<base>)")
-    ap.add_argument("-k", type=int, default=32, help="leading singular values kept per tensor (default: 32)")
+    ap.add_argument("-k", type=int, default=32, help="leading singular values kept per tensor (at least 1; default: 32)")
     ap.add_argument("--inventory-only", action="store_true", help="stop after the tensor inventory")
     ap.add_argument("--top", type=int, default=10, help="suspects to print from the ranking (default: 10)")
     ap.add_argument("--expected-kinds", type=rank.parse_kinds, default=rank.DEFAULT_EXPECTED_KINDS, metavar="KINDS",
@@ -108,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--outlier-factor", type=rank.parse_factor, default=rank.DEFAULT_OUTLIER_FACTOR, metavar="X",
                     help="effective rank above X times the median of its kind is an outlier (default: 3)")
     args = ap.parse_args(argv)
+    if args.k < 1:
+        ap.error("-k must be at least 1")
     for stream in (sys.stdout, sys.stderr):  # a redirected Windows console may not encode every path
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
