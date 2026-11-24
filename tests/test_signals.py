@@ -879,11 +879,53 @@ class TestAnomalySignals(unittest.TestCase):
                 expected = run if not (gradual or missing or omitted) else set()
                 self.assertEqual(set(findings), {layer_name(i) for i in expected})
 
+    def test_expansions_allow_multiple_directions_and_short_runs(self):
+        rows = [row(layer_name(i)) for i in range(22)]
+        eye = np.eye(10)
+        layouts = [range(7, 13), (0, 3, 6, 9, 12, 21), (2, 3, 9, 10, 16, 17)]
+        for layout, directions in product(layouts, [2, 6]):
+            with self.subTest(layout=layout, directions=directions):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    axes, strengths = [0, 1], [8., 7.]
+                    if r.layer in layout:
+                        axes.append(2 + layout.index(r.layer) * directions // len(layout))
+                        strengths.append(5.)
+                    spaces[r.name] = eye[:, axes]
+                    spectra[r.name] = core.OutputSpectrum(np.array(strengths), .1, 1., 1.)
+                findings = subspace_outliers(rows[::-1], spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), {layer_name(i) for i in layout})
+
+    def test_strength_trajectory_rejects_a_ramp_even_as_extra_axes_rotate(self):
+        rows = [row(layer_name(i)) for i in range(19)]
+        for strengths, expected in [([1.1] * 5, []), ([1.1, 3., 5., 3., 1.1], []),
+                                    ([1.1, 7., 7., 7., 1.1], [7, 8, 9])]:
+            with self.subTest(strengths=strengths):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    axes, weights = [0], [8.]
+                    if 6 <= r.layer <= 10:
+                        axes.append(r.layer - 5)
+                        weights.append(strengths[r.layer - 6])
+                    spaces[r.name] = np.eye(7)[:, axes]
+                    spectra[r.name] = core.OutputSpectrum(np.array(weights), 0., 1., 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), {layer_name(i) for i in expected})
+
+    def test_tilt_of_a_strong_paired_axis_cannot_certify_a_weak_extra_mode(self):
+        eye = np.eye(5)
+        tilt = np.cos(.2) * eye[0] + np.sin(.2) * eye[1]
+        basis = np.column_stack((tilt, eye[2]))
+        spectrum = core.OutputSpectrum(np.array([100., 1.1]), 0., 1., 1.)
+        lower, upper, unpaired = spectrum.outside_bounds(eye[:, :1], basis)
+        self.assertAlmostEqual(lower, 100. * np.sin(.2))
+        self.assertAlmostEqual(upper, lower)
+        self.assertAlmostEqual(unpaired, 1.1)
+
     def test_expansion_compares_absolute_strength_when_layer_budgets_differ(self):
         rows = [row(layer_name(i)) for i in range(17)]
-        run = set(range(6, 11))
-        for scale, extra in product([1e-220, 1., 1e220], [4., 30.]):
-            with self.subTest(scale=scale, extra=extra):
+        for scale, extra, run in product([1e-220, 1., 1e220], [4., 30.], [set(range(6, 11)), {4, 9, 10}]):
+            with self.subTest(scale=scale, extra=extra, run=run):
                 spaces, spectra = {}, {}
                 for r in rows:
                     strength = extra if r.layer in run else 4.

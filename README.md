@@ -256,12 +256,13 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      For ranks `p` and `q`, the overlap between orthonormal bases yields `min(p, q)` principal
      angles. The largest measures departure from containment and is invariant to basis rotation.
      If the smaller space lies inside the larger, all paired angles are zero.
-     A run of at least three higher-rank layers can also introduce a common direction
-     outside a coherent majority space. The scanner projects the edits on both sides
-     onto the unpaired directions and bounds their strength using the resolved singular
-     values and the largest omitted value. It requires separation after allowing for
-     rounding in each measurement and a boundary step larger than ordinary steps
-     within the run and its reference layers. A minority rank drop adds no direction.
+     A higher-rank layer can introduce an extra direction outside a coherent majority
+     space. The scanner compares the strength of each layer's unpaired modes with an
+     upper bound on the majority edits in the entire orthogonal complement. It tracks
+     strength in that same complement across depth, so adjacent expansions can point
+     in different directions. Even a single layer must clear both measurement allowances
+     and show an abrupt step at each observed boundary relative to ordinary steps.
+     A minority rank drop adds no direction.
      For each resolved rank, layers reaching that rank can also compare their additional
      modes directly. A line shared by two planes supplies no evidence about how their
      secondary modes compare. A secondary switch requires observations at the boundary.

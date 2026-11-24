@@ -33,11 +33,20 @@ class OutputSpectrum(NamedTuple):
     noise: float
     scale: float
 
-    def projected_bounds(self, probe: np.ndarray, basis: np.ndarray) -> tuple[float, float]:
-        """Bound the operator norm of the edit projected onto an orthonormal probe."""
-        lower = float(np.linalg.norm((probe.T @ basis) * self.retained, ord=2))
+    def outside_bounds(self, reference: np.ndarray, basis: np.ndarray) -> tuple[float, float, float]:
+        """Bound strength outside the reference and measure its strictly unpaired part."""
+        overlap = reference.T @ basis
+        residual = basis - reference @ overlap
+        lower = float(np.linalg.norm(residual * self.retained, ord=2))
+        # The overlap's right null space consists of directions in this
+        # basis orthogonal to the reference. Tilts of paired axes alone
+        # cannot establish that an extra mode carries appreciable energy.
+        unpaired = 0.
+        if basis.shape[1] > reference.shape[1]:
+            _, _, right = np.linalg.svd(overlap, full_matrices=True)
+            unpaired = float(np.linalg.norm(right[reference.shape[1]:] * self.retained, ord=2))
         # Retained and omitted terms act on orthogonal right singular spaces.
-        return lower, math.hypot(lower, self.omitted)
+        return lower, math.hypot(lower, self.omitted), unpaired
 
 
 class DeltaStats(NamedTuple):

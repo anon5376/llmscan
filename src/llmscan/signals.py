@@ -674,45 +674,10 @@ def _secondary_departures(angles: np.ndarray, names: list[str], bases: list[np.n
     return np.minimum(angles, np.arccos(np.clip(cosines, 0., 1.)))
 
 
-def _expansion_evidence(probe: np.ndarray, bases: list[np.ndarray], names: list[str],
-                        spectra: dict[str, OutputSpectrum], run: np.ndarray, background: np.ndarray,
-                        adjacent: np.ndarray, factor: float) -> str | None:
-    """Compare edit strength along the same extra directions on both sides of a boundary."""
-    members = np.zeros(len(names), dtype=bool)
-    members[run] = True
-    active = np.flatnonzero(background | members)
-    if any(names[i] not in spectra for i in active):
-        return None
-    # Share the scale before comparing physical amplitudes. Forming each
-    # physical norm first could overflow even for finite checkpoint entries.
-    scale = max(spectra[names[i]].scale for i in active)
-    lower, upper, noise = np.full((3, len(names)), np.nan)
-    for i in active:
-        spectrum = spectra[names[i]]
-        ratio = spectrum.scale / scale
-        lo, hi = spectrum.projected_bounds(probe, bases[i])
-        lower[i], upper[i], noise[i] = ratio * lo, ratio * hi, ratio * spectrum.noise
-    strength = (lower[run] - noise[run]).min()
-    reference = (upper[background] + noise[background]).max()
-    if strength <= reference:
-        return None
-    ordinary = adjacent & ((background[:-1] & background[1:]) | (members[:-1] & members[1:]))
-    steps = np.maximum(upper[1:] - lower[:-1], upper[:-1] - lower[1:])
-    limit = max(1., factor) * steps[ordinary].max(initial=0.)
-    boundaries = adjacent & (members[:-1] != members[1:])
-    gaps = np.where(members[:-1], lower[:-1] - upper[1:], lower[1:] - upper[:-1])
-    if not np.all(gaps[boundaries] > limit):
-        return None
-    # Quote the bounds in multiples of a single shared resolution.
-    unit = noise[active].max()
-    return (f"extra-mode strength at least {strength/unit:.2f} vs at most {reference/unit:.2f} "
-            "in the majority, in units of the largest measurement allowance")
-
-
 def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarray], ranks: np.ndarray,
                          angles: np.ndarray, layer_count: int, extent: tuple[int, int],
                          spectra: dict[str, OutputSpectrum], factor: float) -> dict[str, str]:
-    """Find observed higher-rank runs containing a coherent lower-rank majority space."""
+    """Test each unpaired mode against strength outside a common majority space."""
     p = np.bincount(ranks).argmax()
     background = ranks == p
     if background.sum() < 8 or background.sum() <= layer_count / 2 or not np.any(ranks > p):
@@ -723,25 +688,41 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
     if within.max() > radius:
         return {}
     reference = bases[peers[within.max(axis=1).argmin()]]
+    # All layers use the same observable for the trajectory: the operator
+    # norm in the orthogonal complement of the reference. The maximizing
+    # direction can differ at every layer, even within a contiguous run.
+    measured = np.array([n in spectra for n in names]) & (angles[:, peers].max(axis=1) <= radius)
+    if not measured[background].all():
+        return {}
+    scale = max(spectra[names[i]].scale for i in np.flatnonzero(measured))
+    lower, upper, extra, noise = np.full((4, len(names)), np.nan)
+    for i in np.flatnonzero(measured):
+        spectrum = spectra[names[i]]
+        ratio = spectrum.scale / scale
+        lo, hi, unpaired = spectrum.outside_bounds(reference, bases[i])
+        lower[i], upper[i], extra[i], noise[i] = ratio * np.array([lo, hi, unpaired, spectrum.noise])
+    peer_bound = (upper[background] + noise[background]).max()
+    strong = (ranks > p) & (extra - noise > peer_bound)
     adjacent = np.diff(ids) == 1
-    observed = np.flatnonzero(_observed_runs(ids, ranks > p, adjacent, extent))
+    observed = np.flatnonzero(_observed_runs(ids, strong, adjacent, extent, measured))
+    steps = np.maximum(upper[1:] - lower[:-1], upper[:-1] - lower[1:])
+    outside = measured & ~strong
+    outside_step = steps[adjacent & outside[:-1] & outside[1:]].max(initial=0.)
     findings = {}
     for run in np.split(observed, np.flatnonzero(np.diff(np.asarray(ids)[observed]) > 1) + 1):
-        if len(run) < 3:
+        if not len(run):
             continue
-        if (run[0] and not background[run[0]-1]) or (run[-1]+1 < len(ids) and not background[run[-1]+1]):
+        limit = max(1., factor) * max(outside_step, steps[run[:-1]].max(initial=0.))
+        boundaries = [(run[0], run[0]-1), (run[-1], run[-1]+1)]
+        if any(extra[i] - upper[j] <= max(limit, noise[i] + noise[j])
+               for i, j in boundaries if 0 <= j < len(names)):
             continue
-        if angles[np.ix_(run, peers)].max() > radius or angles[np.ix_(run, run)].max() > radius:
-            continue
-        # The right null space of U.T @ W gives exactly the unpaired modes
-        # of W. Rotations of either basis leave this probe space unchanged.
-        anchor = bases[run[ranks[run].argmin()]]
-        _, _, right = np.linalg.svd(reference.T @ anchor, full_matrices=True)
-        probe = anchor @ right[p:].T
-        evidence = _expansion_evidence(probe, bases, names, spectra, run, background, adjacent, factor)
-        if evidence:
-            reason = f"abrupt output subspace expansion beyond rank {p} in {len(run)} layers ({evidence})"
-            findings.update((names[i], reason) for i in run)
+        unit = noise[measured].max()
+        for i in run:
+            findings[names[i]] = (f"abrupt output subspace expansion beyond rank {p} "
+                                  f"(unpaired strength at least {(extra[i]-noise[i])/unit:.2f} "
+                                  f"vs at most {peer_bound/unit:.2f} outside the majority space, "
+                                  "in units of the largest measurement allowance)")
     return findings
 
 
