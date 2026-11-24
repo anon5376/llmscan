@@ -736,9 +736,8 @@ class _ExpansionReference(NamedTuple):
     uncertainty: float = 0.
     supported_strength: float = math.inf
     paired_rank: int | None = None
-    # Measured eligible mode strength in an independently validated span.
-    # Distinct from the continuation bound, which can vary with anchor distance.
-    ambient_extra: float = math.inf
+    # Independently measured in the validated ambient frame, when covered.
+    ambient_bounds: tuple[float, float] | None = None
 
 
 def _ambient_frame(planes: list[np.ndarray], tolerance: float) -> np.ndarray:
@@ -960,15 +959,20 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
                           for j in peers[distances == depth])
         if caps.any():
             tracked = _tracked_references(ids, bases, peers, angles, limit)
-            for i in expanded:
+            for i in range(len(ids)):
                 if tracked[i] is None or spectra[i] is None:
                     continue
                 frame = envelope[i] if envelope is not None else None
-                extra = math.inf
+                ambient_bounds = None
                 if frame is not None:
-                    _, _, extra = spectra[i].outside_bounds(frame.basis, bases[i], frame.paired_rank)
-                    caps[i] = min(caps[i], frame.supported_strength)
-                tracked[i] = tracked[i]._replace(supported_strength=caps[i], ambient_extra=extra)
+                    lo, hi, extra = spectra[i].outside_bounds(frame.basis, bases[i], frame.paired_rank)
+                    ambient_bounds = (lo, hi)
+                    if ranks[i] > p:
+                        ambient_bounds = (extra, math.hypot(extra, spectra[i].omitted))
+                        caps[i] = min(caps[i], extra, frame.supported_strength)
+                tracked[i] = tracked[i]._replace(ambient_bounds=ambient_bounds)
+                if ranks[i] > p:
+                    tracked[i] = tracked[i]._replace(supported_strength=caps[i])
             yield tracked, "tracked majority space"
 
     references = []
@@ -1033,6 +1037,39 @@ def _expansion_step(links: np.ndarray, steps: np.ndarray, lower: np.ndarray, upp
     return _ordinary_step(local)
 
 
+def _abrupt_expansion_runs(ids: list[int], background: np.ndarray, adjacent: np.ndarray, extent: tuple[int, int],
+                           strong: np.ndarray, elevated: np.ndarray, steps: np.ndarray, lower: np.ndarray,
+                           upper: np.ndarray, noise: np.ndarray, factor: float) -> set[tuple[int, int]]:
+    """Test boundaries and ordinary steps in one reference's measurement coordinates."""
+    measured = np.isfinite(lower)
+    outside_step = _ordinary_step(steps[adjacent & background[:-1] & background[1:] & np.isfinite(steps)])
+    confirmed = set()
+    for members in ([strong, elevated] if np.any(elevated != strong) else [strong]):
+        # Calibrate a threshold crossing against ordinary motion on its
+        # measured outer side too, excluding the boundary step itself.
+        outer_motion = np.zeros(len(ids))
+        outer = np.flatnonzero(~background & measured & ~members)
+        breaks = np.flatnonzero((np.diff(np.asarray(ids)[outer]) != 1) | np.diff(elevated[outer])) + 1
+        for segment in np.split(outer, breaks):
+            if len(segment) > 1:
+                outer_motion[segment] = _expansion_step(segment[:-1], steps, lower, upper, factor)
+        for start, end in _bounded_runs(ids, members, adjacent, extent):
+            if not strong[start:end+1].any():
+                continue
+            run = np.flatnonzero(measured[start:end+1]) + start
+            # Each contiguous measured level supplies its own ordinary steps.
+            breaks = np.flatnonzero((np.diff(run) != 1) | np.diff(strong[run])) + 1
+            inside_step = max(_expansion_step(segment[:-1], steps, lower, upper, factor)
+                              for segment in np.split(run, breaks))
+            limit = factor * max(outside_step, inside_step)
+            if any(lower[i] - upper[j] <= max(limit, factor * outer_motion[j], noise[i] + noise[j])
+                   for i, j in ((start, start-1), (end, end+1))
+                   if 0 <= j < len(ids) and measured[i] and measured[j]):
+                continue
+            confirmed.add((start, end))
+    return confirmed
+
+
 def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray], ranks: np.ndarray,
                         p: int, references: list[_ExpansionReference | None], description: str, layer_count: int,
                         extent: tuple[int, int], spectra: dict[str, OutputSpectrum], factor: float) -> dict[str, str]:
@@ -1042,6 +1079,7 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
         return {}
     scale = max(spectra[names[i]].scale for i in np.flatnonzero(measured))
     lower, upper, mode_lower, mode_upper, extra, noise = np.full((6, len(names)), np.nan)
+    ambient_lower, ambient_upper = np.full((2, len(names)), np.nan)
     for i in np.flatnonzero(measured):
         spectrum = spectra[names[i]]
         ratio = spectrum.scale / scale
@@ -1052,10 +1090,6 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
         # without producing any motion in either one.
         mode_lo, mode_hi = lo, hi
         if math.isfinite(reference.supported_strength):
-            # An in-span change can look abrupt in tracking coordinates.
-            # Where both frames apply, measure the boundary and ordinary
-            # steps on the strength eligible in both, before applying caps.
-            unpaired = min(unpaired, reference.ambient_extra)
             mode_lo, mode_hi = unpaired, math.hypot(unpaired, spectrum.omitted)
             unpaired = min(unpaired, reference.supported_strength)
         elif ranks[i] > p:
@@ -1067,7 +1101,9 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
         lower[i], upper[i], extra[i], noise[i] = ratio * np.array(
             [max(0., lo - margin), hi + margin, max(0., unpaired - margin), spectrum.noise])
         mode_lower[i], mode_upper[i] = ratio * max(0., mode_lo - margin), ratio * (mode_hi + margin)
-    bounds = np.sort(upper[background] + noise[background])
+        if reference.ambient_bounds is not None:
+            ambient_lower[i], ambient_upper[i] = ratio * np.array(reference.ambient_bounds)
+    bounds = np.sort(np.fmax(upper[background], ambient_upper[background]) + noise[background])
     # A shoulder can overlap wider intervals, but must clear a strict majority
     # of the entire cohort and connect to a core above every reference interval.
     resolved = extra - noise
@@ -1078,34 +1114,15 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
     adjacent = (np.diff(ids) == 1) & measured[:-1] & measured[1:]
     steps = np.maximum.reduce((upper[1:] - lower[:-1], upper[:-1] - lower[1:],
                                mode_upper[1:] - mode_lower[:-1], mode_upper[:-1] - mode_lower[1:]))
-    outside_step = _ordinary_step(steps[adjacent & background[:-1] & background[1:]])
     unit = noise[measured].max()
-    confirmed = []
-    for members in ([strong, elevated] if np.any(elevated != strong) else [strong]):
-        # A threshold (including loss of span coverage) can split a smooth
-        # higher-rank trajectory. Calibrate that boundary against the motion
-        # on its measured outer side too, excluding the boundary step itself.
-        outer_motion = np.zeros(len(names))
-        outer = np.flatnonzero((ranks > p) & measured & ~members)
-        breaks = np.flatnonzero((np.diff(np.asarray(ids)[outer]) != 1) | np.diff(elevated[outer])) + 1
-        for segment in np.split(outer, breaks):
-            if len(segment) > 1:
-                outer_motion[segment] = _expansion_step(segment[:-1], steps, mode_lower, upper, factor)
-        for start, end in _bounded_runs(ids, members, adjacent, extent):
-            run = np.arange(start, end + 1)
-            if not strong[run].any():
-                continue
-            # Estimate motion in each uninterrupted segment. A long, flat
-            # core supplies no evidence about step variation in a shoulder.
-            segments = np.split(run, np.flatnonzero(np.diff(strong[run])) + 1)
-            inside_step = max(_expansion_step(segment[:-1], steps, mode_lower, upper, factor)
-                              for segment in segments)
-            limit = factor * max(outside_step, inside_step)
-            boundaries = [(run[0], run[0]-1), (run[-1], run[-1]+1)]
-            if any(mode_lower[i] - upper[j] <= max(limit, factor * outer_motion[j], noise[i] + noise[j])
-                   for i, j in boundaries if 0 <= j < len(names)):
-                continue
-            confirmed.append((start, end))
+    confirmed = _abrupt_expansion_runs(ids, background, adjacent, extent, strong, elevated,
+                                       steps, mode_lower, upper, noise, factor)
+    if confirmed and np.isfinite(ambient_lower).any():
+        # Test the same runs in ambient coordinates on covered links. Never
+        # subtract a tracked measurement from an ambient measurement.
+        ambient_steps = np.maximum(ambient_upper[1:] - ambient_lower[:-1], ambient_upper[:-1] - ambient_lower[1:])
+        confirmed &= _abrupt_expansion_runs(ids, background, adjacent, extent, strong, elevated,
+                                            ambient_steps, ambient_lower, ambient_upper, noise, factor)
     # A terminal candidate needs continuity or a disjoint confirmed run.
     # Test coverage before unioning overlapping core and extended candidates:
     # the interior core may have two boundaries even if its extension has one.

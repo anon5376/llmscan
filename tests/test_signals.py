@@ -1386,6 +1386,29 @@ class TestAnomalySignals(unittest.TestCase):
                 self.assertEqual(set(findings), expected)
                 self.assertTrue(all("tracked majority space" in why for why in findings.values()))
 
+    def test_leaving_ambient_coverage_is_not_an_internal_strength_step(self):
+        rows = [row(layer_name(i)) for i in range(29)]
+        eye = np.eye(6)
+        axes = self.wandering_axes(eye, len(rows), False)
+        for reverse in [False, True]:
+            with self.subTest(reverse=reverse):
+                spaces, spectra, expected = {}, {}, set()
+                for r in rows:
+                    i = 28 - r.layer if reverse else r.layer
+                    axis = axes[min(i, 24)]
+                    directions, values = [axis], [10.]
+                    if i > 24:
+                        tangent = -axis[1] * eye[0] + axis[0] * eye[1]
+                        angle = np.radians(8. * (i - 24))
+                        directions = [np.cos(angle) * axis + np.sin(angle) * eye[2],
+                                      np.cos(angle) * tangent + np.sin(angle) * eye[3], eye[4]]
+                        values = [10., 23., 9.]
+                        expected.add(r.name)
+                    spaces[r.name] = np.column_stack(directions)
+                    spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .25, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                self.assertEqual(set(findings), expected)
+
     def test_smooth_extra_strength_during_a_turn_beyond_partial_coverage(self):
         rows = [row(layer_name(i)) for i in range(37)]
         eye = np.eye(6)
