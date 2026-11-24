@@ -267,16 +267,22 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      smallest between-group angle with the largest within-group step in layer order,
      dividing each step by the layer interval. This allows gradual rotation over many
      layers while requiring the groups to remain separated throughout the trajectory.
-     When the other layers wander, the scanner can also identify a contiguous run of at
-     least three mutually close layers. Its diameter must be small compared with both
+     When the other layers wander, the scanner can also identify an isolated group of at
+     least three mutually close layers. Its members may recur in separate layer ranges.
+     The group's diameter must be small compared with both
      its distance to every outside layer and the usual step between adjacent outside
      layers. Each observed boundary must exceed that usual step by more than the run's
      diameter and six robust standard deviations. At least eight outside steps must be
      available for comparison, and a strict majority of layers must remain outside the
-     isolated runs.
+     isolated groups.
 
      Each minority group can produce a T3 finding when its boundaries are observed at
-     consecutive layer IDs. The separately measured leading axes must agree across groups,
+     consecutive layer IDs. Even with tied singular values, the scanner can identify
+     a switch of the entire output space. The smallest principal angle across every
+     member–outsider pair must place the member space within the coherence radius of
+     the other space's orthogonal complement and exceed the group's angular variation by
+     the configured outlier factor. An intersecting pair retains a zero principal angle.
+     For a secondary-mode switch, the separately measured leading axes must agree across groups,
      and each boundary step in the leading direction must be consistent with adjacent steps
      inside the groups. For a single terminal boundary, the cohort must be uninterrupted
      and even the second principal angle to every other group must exceed the separation

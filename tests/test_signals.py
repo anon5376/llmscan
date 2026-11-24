@@ -14,7 +14,7 @@ from llmscan import core, rank
 from llmscan.interval_fit import _box_excess, fit_excess
 from llmscan.names import stack_of
 from llmscan.removal import joint_excess, promising_symmetric_response, skew_excess
-from llmscan.signals import Measurements, _isolated_runs, _trajectory_groups, subspace_outliers
+from llmscan.signals import Measurements, _isolated_cliques, _trajectory_groups, subspace_outliers
 from test_core import to_bf16
 from test_rank import layer_name, row, run_cli
 
@@ -674,7 +674,7 @@ class TestAnomalySignals(unittest.TestCase):
                 for i, angle in enumerate(np.radians(steps), 1):
                     axes[i] = np.cos(angle) * axes[i-1] + np.sin(angle) * axes[i]
                 angles = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
-                result = _isolated_runs(ids, angles, n, 3., 1e-6)
+                result = _isolated_cliques(ids, angles, n, 3., 1e-6)
                 if expected:
                     self.assertEqual(set(np.flatnonzero(result[0])), set(run))
                 else:
@@ -687,7 +687,7 @@ class TestAnomalySignals(unittest.TestCase):
         # There are several copies, but no three consecutive observations.
         axes[[3, 11, 12]] = axes[2]
         angles = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
-        self.assertIsNone(_isolated_runs(list(range(len(axes))), angles, len(axes), 3., 1e-6))
+        self.assertIsNone(_isolated_cliques(list(range(len(axes))), angles, len(axes), 3., 1e-6))
 
     def test_isolated_secondary_runs_under_a_shared_leading_axis(self):
         n = 30
@@ -718,7 +718,67 @@ class TestAnomalySignals(unittest.TestCase):
                 stats = {r.name: Measurements(1.5, 1.) for r in rows}
                 ranked = rank.rank_tensors(rows[::-1], stats, directions=axes, subspaces=spaces)
                 self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
-                self.assertTrue(all("within-run angle" in r.reason for r in ranked if r.tier == "T3"))
+                self.assertTrue(all("within-clique angle" in r.reason for r in ranked if r.tier == "T3"))
+
+    def test_whole_space_switches_include_interior_terminal_and_recurring_groups(self):
+        eye = np.eye(8)
+        n = 29
+        # The modes inside each plane can swap order or rotate freely.
+        # Effective rank is identical across all layers.
+        groups = [{0, 1, 2}, {7, 8, 9, 10}, {15, 19, 25}]
+        for missing in [None, 6]:
+            with self.subTest(missing=missing):
+                rows = [row(layer_name(i)) for i in range(n) if i != missing]
+                stats = {r.name: Measurements(2., 1.) for r in rows}
+                spaces = {}
+                for r in rows:
+                    k = next((j for j, g in enumerate(groups, 1) if r.layer in g), 0)
+                    theta = .7 * r.layer
+                    c, s = np.cos(theta), np.sin(theta)
+                    spaces[r.name] = eye[:, 2*k:2*k+2] @ np.array([[c, -s], [s, c]])
+                ranked = rank.rank_tensors(rows[::-1], stats, subspaces=spaces)
+                expected = set.union(*groups) if missing is None else groups[2]
+                self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
+                self.assertTrue(all("smallest cross-group principal angle" in r.reason
+                                    for r in ranked if r.tier == "T3"))
+
+    def test_whole_space_switch_needs_each_mode_to_leave_and_an_abrupt_boundary(self):
+        eye = np.eye(4)
+        rows = [row(layer_name(i)) for i in range(24)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        minority = {r.layer for r in rows[-4:]}
+        for closest, drift, expected in [(0., False, set()), (50., False, set()),
+                                         (80., False, minority), (90., True, set())]:
+            with self.subTest(closest=closest, drift=drift):
+                spaces = {}
+                for r in rows:
+                    t = np.clip((r.layer - 8) / 12, 0., 1.) if drift else float(r.layer in minority)
+                    angles = np.radians([closest, 90.]) * t
+                    spaces[r.name] = eye[:, :2] * np.cos(angles) + eye[:, 2:] * np.sin(angles)
+                ranked = rank.rank_tensors(rows, stats, subspaces=spaces)
+                self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
+
+    def test_recurring_clique_with_matched_rank_among_wandering_peers(self):
+        rows = [row(layer_name(i)) for i in range(30)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        minority = {3, 9, 14, 16, 26}
+        eye = np.eye(2 * len(rows) + 2)
+        for shared_axis in [True, False]:
+            with self.subTest(shared_axis=shared_axis):
+                bg = eye[:, :2]
+                spaces = {}
+                axes = {r.name: eye[:, 0] for r in rows} if shared_axis else {}
+                for r in rows:
+                    if r.layer in minority:
+                        basis = eye[:, -2:]
+                    else:
+                        if r.layer:
+                            theta = np.radians(38 + r.layer % 4)
+                            bg = bg * np.cos(theta) + eye[:, 2*r.layer:2*r.layer+2] * np.sin(theta)
+                        basis = bg
+                    spaces[r.name] = np.column_stack((eye[:, 0], basis[:, 1])) if shared_axis else basis
+                ranked = rank.rank_tensors(rows, stats, subspaces=spaces, directions=axes)
+                self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, minority)
 
     def test_gradual_transitions_between_three_plateaus(self):
         eye = np.eye(3)
@@ -935,6 +995,27 @@ class TestControlCheckpoints(unittest.TestCase):
                 finding, = csv.DictReader(f)
             self.assertEqual(finding["tier"], "T3")
             self.assertIn("inner product constraints", finding["reason"])
+
+    def test_tied_modes_switch_output_space_through_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            base, suspect = {}, {}
+            for i in range(16):
+                w = np.eye(8, dtype=np.float32)
+                edited = w.copy()
+                start = 2 if 5 <= i <= 8 else 0
+                edited[start:start + 2] = 0
+                base[layer_name(i)] = ("F32", w)
+                suspect[layer_name(i)] = ("F32", edited)
+            write_safetensors(tmp / "b.safetensors", base)
+            write_safetensors(tmp / "s.safetensors", suspect)
+            rc, out, err = run_cli("--base", str(tmp / "b.safetensors"), "--suspect", str(tmp / "s.safetensors"),
+                                   "--out", str(tmp / "out"), "-k", "1")
+            self.assertEqual(rc, 0, out + err)
+            with (tmp / "out" / "ranking.csv").open() as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual({r["name"] for r in rows if r["tier"] == "T3"}, {layer_name(i) for i in range(5, 9)})
+            self.assertTrue(all("whole output subspace switch" in r["reason"] for r in rows if r["tier"] == "T3"))
 
     def test_rank_three_shared_subspace_through_cli(self):
         # Both tied and separated spectra have the same output space except

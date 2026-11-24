@@ -290,8 +290,8 @@ def _trajectory_groups(ids: list[int], angles: np.ndarray, layer_count: int,
     return None
 
 
-def _secondary_groups(ids: list[int], angles: np.ndarray, layer_count: int,
-                      factor: float, floor: float) -> tuple[np.ndarray, np.ndarray, str] | None:
+def _subspace_groups(ids: list[int], angles: np.ndarray, layer_count: int,
+                     factor: float, floor: float) -> tuple[np.ndarray, np.ndarray, str] | None:
     """Return group labels and the angular scale supporting each group's separation."""
     labels = _coherent_groups(angles, layer_count, factor, floor)
     if labels is not None:
@@ -302,26 +302,28 @@ def _secondary_groups(ids: list[int], angles: np.ndarray, layer_count: int,
         labels, step = trajectory
         return labels, np.full(labels.max() + 1, step), "maximum within-group step per layer"
 
-    return _isolated_runs(ids, angles, layer_count, factor, floor)
+    return _isolated_cliques(ids, angles, layer_count, factor, floor)
 
 
-def _isolated_runs(ids: list[int], angles: np.ndarray, layer_count: int,
-                   factor: float, floor: float) -> tuple[np.ndarray, np.ndarray, str] | None:
-    """Identify compact contiguous runs against an otherwise wandering background."""
+def _isolated_cliques(ids: list[int], angles: np.ndarray, layer_count: int,
+                      factor: float, floor: float) -> tuple[np.ndarray, np.ndarray, str] | None:
+    """Identify compact groups with exceptional boundary steps against wandering peers."""
     radius = math.acos(0.9)
     adjacent = np.diff(ids) == 1
     steps = angles.diagonal(offset=1)
-    cuts = np.flatnonzero(~adjacent | (steps > radius)) + 1
+    agreement = angles <= radius
     labels = np.zeros(len(ids), dtype=int)
     diameters = [0.]  # Label zero collects the background observations.
-    for run in np.split(np.arange(len(ids)), cuts):
-        if not 3 <= len(run) < len(ids) / 2:
+    for i, members in enumerate(agreement):
+        # In an isolated clique, every member has exactly the same neighbors.
+        # Check it once, even if its members occupy separate layer ranges.
+        if members[:i].any() or not 3 <= members.sum() < len(ids) / 2:
             continue
-        members = np.zeros(len(ids), dtype=bool)
-        members[run] = True
-        diameter = angles[np.ix_(run, run)].max()
-        separation = angles[np.ix_(run, ~members)].min()
-        if diameter > radius or separation <= max(radius, factor * max(floor, diameter)):
+        if not np.all(agreement[members] == members):
+            continue
+        diameter = angles[np.ix_(members, members)].max()
+        separation = angles[np.ix_(members, ~members)].min()
+        if separation <= factor * max(floor, diameter):
             continue
         boundaries = members[:-1] != members[1:]
         if not adjacent[boundaries].all():
@@ -335,57 +337,79 @@ def _isolated_runs(ids: list[int], angles: np.ndarray, layer_count: int,
         resolution = max(floor, diameter)
         if peers.median <= factor * resolution or not peers.high(steps[boundaries].min(), resolution):
             continue
-        labels[run] = len(diameters)
+        labels[members] = len(diameters)
         diameters.append(diameter)
     background_count = np.count_nonzero(labels == 0)
     if len(diameters) == 1 or background_count < 8 or background_count <= layer_count / 2:
         return None
-    return labels, np.asarray(diameters), "maximum within-run angle"
+    return labels, np.asarray(diameters), "maximum within-clique angle"
 
 
-def _secondary_switches(ids: list[int], names: list[str], layer_count: int, angles: np.ndarray,
-                        secondary_overlap: np.ndarray, directions: dict[str, np.ndarray] | None,
-                        width: int, factor: float) -> dict[str, str]:
-    """Locate abrupt changes of secondary modes under a shared, separately resolved leading edit."""
+def _shared_primary(names: list[str], directions: dict[str, np.ndarray] | None, width: int,
+                    labels: np.ndarray, adjacent: np.ndarray, factor: float,
+                    floor: float) -> tuple[float, np.ndarray, float] | None:
+    """Measure leading-axis steps only when a common leading edit is independently resolved."""
     if not directions or any(name not in directions or directions[name].shape != (width,) for name in names):
-        return {}
-    floor = math.sqrt(2 * width * math.ulp(1.))
-    factor = max(1., factor)
-    groups = _secondary_groups(ids, angles, layer_count, factor, floor)
-    if groups is None:
-        return {}
-    labels, widths, spread = groups
+        return None
     same = labels[:, None] == labels
     axes = np.stack([directions[name] for name in names])
     primary = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
     if not (primary.max() <= math.acos(0.9)
             and primary[~same].max() <= factor * max(floor, primary[same].max())):
-        return {}
-    adjacent = np.diff(ids) == 1
+        return None
     primary_steps = primary.diagonal(offset=1)
     usual_step = primary_steps[adjacent & (labels[:-1] == labels[1:])].max(initial=floor)
+    return primary.max(), primary_steps, usual_step
+
+
+def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angles: np.ndarray,
+                       overlap: np.ndarray, directions: dict[str, np.ndarray] | None,
+                       width: int, factor: float) -> dict[str, str]:
+    """Locate isolated changes in all modes, or in secondary modes under a shared leading edit."""
+    floor = math.sqrt(2 * width * math.ulp(1.))
+    factor = max(1., factor)
+    groups = _subspace_groups(ids, angles, layer_count, factor, floor)
+    if groups is None:
+        return {}
+    labels, widths, spread = groups
+    adjacent = np.diff(ids) == 1
+    primary = _shared_primary(names, directions, width, labels, adjacent, factor, floor)
     sizes = np.bincount(labels)
     findings = {}
     for label in np.flatnonzero(sizes < sizes.max()):
         within = widths[label]
         members = labels == label
         switches = members[:-1] != members[1:]
-        if not adjacent[switches].all() or primary_steps[switches].max() > factor * usual_step:
-            continue  # Each observed boundary needs neighboring layers with a stable leading edit.
+        if not adjacent[switches].all() or (switches.sum() == 1 and not adjacent.all()):
+            continue
         outside = members[:, None] & ~members
-        boundary = ""
-        if switches.sum() == 1:
-            secondary = math.acos(min(1., secondary_overlap[outside].max()))
-            if not adjacent.all() or secondary <= factor * max(floor, within):
-                continue  # A terminal regime needs independent separation of every secondary mode.
-            i = int(np.flatnonzero(switches)[0])
-            boundary = (f" at boundary {ids[i]}–{ids[i+1]} "
-                        f"(minimum secondary angle {math.degrees(secondary):.2f} degrees)")
-        across = angles[outside].min()
-        reason = (f"abrupt secondary subspace switch in {sizes[label]} layers{boundary} "
-                  f"(minimum between-group angle {math.degrees(across):.2f} degrees, "
-                  f"{spread} {math.degrees(within):.2f} degrees, "
-                  f"leading axes within {math.degrees(primary.max()):.2f} degrees)")
+        limit = factor * max(floor, within)
+        if primary is None:
+            # Even the closest mode must lie in the coherence cone of the
+            # other space's orthogonal complement, across every pair.
+            closest = math.acos(min(1., overlap[0][outside].max()))
+            if closest < math.asin(0.9) or closest <= limit:
+                continue
+            reason = (f"abrupt whole output subspace switch in {sizes[label]} layers "
+                      f"(smallest cross-group principal angle {math.degrees(closest):.2f} degrees, "
+                      f"{spread} {math.degrees(within):.2f} degrees)")
+        else:
+            primary_angle, steps, usual = primary
+            if steps[switches].max() > factor * usual:
+                continue
+            boundary = ""
+            if switches.sum() == 1:
+                secondary = math.acos(min(1., overlap[1][outside].max()))
+                if secondary <= limit:
+                    continue
+                i = int(np.flatnonzero(switches)[0])
+                boundary = (f" at boundary {ids[i]}–{ids[i+1]} "
+                            f"(minimum secondary angle {math.degrees(secondary):.2f} degrees)")
+            across = angles[outside].min()
+            reason = (f"abrupt secondary subspace switch in {sizes[label]} layers{boundary} "
+                      f"(minimum between-group angle {math.degrees(across):.2f} degrees, "
+                      f"{spread} {math.degrees(within):.2f} degrees, "
+                      f"leading axes within {math.degrees(primary_angle):.2f} degrees)")
         for i in np.flatnonzero(members):
             findings[names[i]] = reason
     return findings
@@ -412,17 +436,17 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
         names = [layers[i][0] for i in ids]
         width, dim = subspaces[names[0]].shape
         angles = np.zeros((len(ids), len(ids)))
-        secondary_overlap = np.ones_like(angles)
+        overlap = np.ones((2, len(ids), len(ids)))
         for i, name in enumerate(names):
             for j in range(i):
                 cosines = np.linalg.svd(subspaces[name].T @ subspaces[names[j]], compute_uv=False)
                 angles[i, j] = angles[j, i] = math.acos(min(1., float(cosines[-1])))
                 if dim >= 2:
-                    secondary_overlap[i, j] = secondary_overlap[j, i] = cosines[1]
+                    overlap[:, i, j] = overlap[:, j, i] = cosines[:2]
         agreement = angles <= math.acos(0.9)
         if dim >= 2:
-            findings.update(_secondary_switches(ids, names, len(layers), angles, secondary_overlap,
-                                                directions, width, factor))
+            findings.update(_subspace_switches(ids, names, len(layers), angles, overlap,
+                                               directions, width, factor))
         supporters = agreement[np.argmax(agreement.sum(axis=1))]
         if supporters.sum() <= len(layers) / 2:
             # A repeated space can itself be exceptional among otherwise
