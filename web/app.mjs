@@ -494,8 +494,8 @@ function deltaFacts(model, t) {
       fact('σ₁ / σ₂', formatNumber(t.gap)),
       kind && fact(['Median of ', formatCount(kind.count), ' changed ', h('code', null, t.kind)],
         [formatNumber(kind.median), ratio != null && Number.isFinite(ratio) && h('p', { class: 'fine' }, `this tensor is ${formatNumber(ratio)}× that`)])),
-    t.spectrum.length > 1 && h('figure', null, tensorSpectrumChart(t, peers, PALETTE.ink),
-      h('figcaption', { class: 'fine' }, `Top ${t.spectrum.length} singular values of ΔW`
+    t.spectrum.length > 0 && h('figure', null, tensorSpectrumChart(t, peers, PALETTE.ink),
+      h('figcaption', { class: 'fine' }, `Top ${t.spectrum.length === 1 ? 'singular value' : `${t.spectrum.length} singular values`} of ΔW`
         + (peers.length ? `; gray: the other ${formatCount(peers.length)} changed ${t.kind} tensors.` : '.'))),
   ];
 }

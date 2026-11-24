@@ -147,8 +147,13 @@ export function rankByLayerChart(tensors, { selected, onPick }) {
   return { chart: root, legend: kinds.map((kind) => ({ kind, color: colors.get(kind) })) };
 }
 
-function spectrumPath(t, sx, sy) {
-  return t.spectrum.map((v, i) => `${sx(i + 1)},${sy(v)}`).join(' ');
+/** A spectrum as a line, or as a dot when the scan kept one singular value per tensor (`-k 1`). */
+function spectrumMark(t, sx, sy, color, width) {
+  if (t.spectrum.length === 1) return svg('circle', { cx: sx(1), cy: sy(t.spectrum[0]), r: width + 2, fill: color });
+  return svg('polyline', {
+    points: t.spectrum.map((v, i) => `${sx(i + 1)},${sy(v)}`).join(' '),
+    fill: 'none', stroke: color, 'stroke-width': width, 'stroke-linejoin': 'round',
+  });
 }
 
 function spectrumDomain(tensors) {
@@ -171,10 +176,9 @@ export function kindSpectraChart(kind, tensors, { layerRange: [lo, hi], selected
   const ordered = [...tensors].sort((a, b) => (a.name === selected) - (b.name === selected) || (a.layer ?? -1) - (b.layer ?? -1));
   for (const t of ordered) {
     const color = t.layer == null ? PALETTE.ink2 : layerColor((t.layer - lo) / Math.max(hi - lo, 1));
-    append(root, pickable(svg('polyline', {
-      points: spectrumPath(t, sx, sy), fill: 'none', 'stroke-linejoin': 'round',
-      stroke: t.name === selected ? PALETTE.ink : color, 'stroke-width': t.name === selected ? 2.5 : 1.3,
-    }, svg('title', null, `${t.name}\neffective rank ${formatNumber(t.effectiveRank)}`)), t, onPick));
+    const mark = t.name === selected ? spectrumMark(t, sx, sy, PALETTE.ink, 2.5) : spectrumMark(t, sx, sy, color, 1.3);
+    append(mark, svg('title', null, `${t.name}\neffective rank ${formatNumber(t.effectiveRank)}`));
+    root.append(pickable(mark, t, onPick));
   }
   return root;
 }
@@ -188,9 +192,10 @@ export function tensorSpectrumChart(tensor, peers, color) {
       + (peers.length ? `, over ${peers.length} other changed ${tensor.kind} tensors in gray.` : '.'),
   });
   append(root,
-    peers.map((t) => svg('polyline', { points: spectrumPath(t, sx, sy), fill: 'none', stroke: PALETTE.axis, 'stroke-width': 1 })),
-    svg('polyline', { points: spectrumPath(tensor, sx, sy), fill: 'none', stroke: color, 'stroke-width': 2.2, 'stroke-linejoin': 'round' }),
-    tensor.spectrum.length <= 12 && tensor.spectrum.map((v, i) => svg('circle', { cx: sx(i + 1), cy: sy(v), r: 3, fill: color })),
+    peers.map((t) => spectrumMark(t, sx, sy, PALETTE.axis, 1)),
+    spectrumMark(tensor, sx, sy, color, 2.2),
+    tensor.spectrum.length > 1 && tensor.spectrum.length <= 12
+      && tensor.spectrum.map((v, i) => svg('circle', { cx: sx(i + 1), cy: sy(v), r: 3, fill: color })),
   );
   return root;
 }
