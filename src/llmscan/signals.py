@@ -743,10 +743,11 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
             run = np.arange(start, end + 1)
             if not strong[run].any():
                 continue
-            # Compare ordinary motion within each confidence level. Crossing
-            # between levels is itself a possible transition.
-            inside = run[:-1][strong[run[:-1]] == strong[run[1:]]]
-            limit = max(1., factor) * max(outside_step, _ordinary_step(steps[inside]))
+            # Estimate motion in each uninterrupted segment. A long, flat
+            # core supplies no evidence about step variation in a shoulder.
+            segments = np.split(run, np.flatnonzero(np.diff(strong[run])) + 1)
+            inside_step = max(_ordinary_step(steps[segment[:-1]]) for segment in segments)
+            limit = max(1., factor) * max(outside_step, inside_step)
             boundaries = [(run[0], run[0]-1), (run[-1], run[-1]+1)]
             if any(lower[i] - upper[j] <= max(limit, noise[i] + noise[j])
                    for i, j in boundaries if 0 <= j < len(names)):

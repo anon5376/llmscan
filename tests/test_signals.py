@@ -986,6 +986,23 @@ class TestAnomalySignals(unittest.TestCase):
                 expected = {r.name for r, value in zip(rows, values) if value in [6., *attributed]}
                 self.assertEqual(set(findings), expected)
 
+    def test_flat_core_cannot_hide_motion_among_transition_layers(self):
+        rows = [row(layer_name(i)) for i in range(36)]
+        for first, reverse in product([2.5, 4.], [False, True]):
+            with self.subTest(first=first, reverse=reverse):
+                values = [0.] * 10 + [first, first + 1.] + [14.] * 10 + [0.] * 14
+                if reverse:
+                    values.reverse()
+                spaces, spectra = {}, {}
+                for r, extra in zip(rows, values):
+                    strengths = [20., extra] if extra else [20.]
+                    spaces[r.name] = np.eye(4)[:, :len(strengths)]
+                    noise = 5. if r.layer in (0, 35) else 1.
+                    spectra[r.name] = core.OutputSpectrum(np.array(strengths), 0., noise, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                expected = {r.name for r, v in zip(rows, values) if v == 14. or (v and first > 3.)}
+                self.assertEqual(set(findings), expected)
+
     def test_expansion_step_reference_tolerates_isolated_but_not_typical_motion(self):
         rows = [row(layer_name(i)) for i in range(26)]
         eye = np.eye(4)
