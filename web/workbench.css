@@ -275,6 +275,10 @@ table.compact tbody th { font-weight: 400; }
 .detail-rank .tier { flex-wrap: wrap; white-space: normal; }
 .detail-steps { display: flex; flex: none; gap: 6px; } /* stays put while stepping, whatever the tier label's length */
 .detail-steps .button { min-height: 32px; padding: 3px 10px; font-size: 0.87rem; }
+@media (max-width: 760px) { /* the controls get their own row above the tier and rank */
+  .detail-bar { flex-direction: column-reverse; align-items: stretch; }
+  .detail-steps { justify-content: flex-end; }
+}
 .tensor-name { font-size: 1rem; line-height: 1.4; overflow-wrap: anywhere; }
 .tensor-name:focus { outline: none; }
 .detail section { display: grid; gap: 6px; padding-top: 12px; border-top: 1px solid var(--grid); }

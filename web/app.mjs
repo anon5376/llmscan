@@ -251,6 +251,8 @@ function pager(page, total, onPage) {
     step('Next', page.page + 1, page.page < page.pages - 1));
 }
 
+const SORT_NAMES = { tier: 'tier', name: 'tensor name', layer: 'layer', kind: 'kind', effectiveRank: 'effective rank', sv1: 'σ₁' };
+
 const COLUMNS = {
   rank: { key: 'rank', label: '#', class: 'num narrow', cell: (t) => formatCount(t.rank) },
   tier: { key: 'tier', label: 'Tier', cell: (t) => tierBadge(t.tier) },
@@ -341,8 +343,12 @@ function rankingView(model) {
       controls,
       results: () => {
         const rows = filterTensors(model.ranking, view);
+        const { key, direction } = view.sort;
+        const order = key === 'rank'
+          ? `${direction === 'asc' ? 'most' : 'least'} suspicious first`
+          : `sorted by ${SORT_NAMES[key] ?? key}, ${direction === 'asc' ? 'ascending' : 'descending'}`;
         return [
-          h('p', { class: 'count', role: 'status' }, `${formatCount(rows.length)} of ${formatCount(model.ranking.length)} ranked tensors, most suspicious first`),
+          h('p', { class: 'count', role: 'status' }, `${formatCount(rows.length)} of ${formatCount(model.ranking.length)} ranked tensors, ${order}`),
           resultsFor(view, rows, (pageRows, onSort) => tensorTable({ caption: 'Ranked tensors', columns, rows: pageRows, sort: view.sort, onSort }), {
             empty: 'Try another tier or a shorter search.',
             onClear: () => { view.query = ''; setTiers(new Set()); },
@@ -523,7 +529,7 @@ function deltaFacts(model, t) {
       fact('σ₁', formatNumber(t.sv1)),
       fact('σ₁ / σ₂', formatNumber(t.gap)),
       kind?.count > 1 && fact(['Median of ', formatCount(kind.count), ' changed ', h('code', null, t.kind)],
-        [formatNumber(kind.median), ratio != null && Number.isFinite(ratio) && h('p', { class: 'fine' }, `this tensor is ${formatNumber(ratio)}× that`)])),
+        [formatNumber(kind.median), ratio != null && Number.isFinite(ratio) && h('p', { class: 'fine nowrap' }, `${formatNumber(ratio)}× the median`)])),
     drawn > 0 && h('figure', null, tensorSpectrumChart(t, peers, PALETTE.ink),
       h('figcaption', { class: 'fine' }, `Top ${t.spectrum.length === 1 ? 'singular value' : `${t.spectrum.length} singular values`} of ΔW`
         + (drawn < t.spectrum.length ? ` (${t.spectrum.length - drawn} zero or non-finite, not drawn)` : '')
@@ -541,7 +547,7 @@ function detailContent(model, t, { modal }) {
   return [
     h('div', { class: 'detail-bar' },
       h('p', { class: 'detail-rank' }, tierBadge(t.tier, { full: true }),
-        t.rank != null && h('span', null, `Rank ${formatCount(t.rank)} of ${formatCount(model.ranking.length)}`)),
+        t.rank != null && h('span', { class: 'nowrap' }, `Rank ${formatCount(t.rank)} of ${formatCount(model.ranking.length)}`)),
       h('div', { class: 'detail-steps' },
         index >= 0 && [step('Previous', 'previous', state.rows[index - 1]), step('Next', 'next', state.rows[index + 1])],
         modal && h('button', { type: 'button', class: 'button quiet', onclick: () => dialog.close() }, 'Close'))),
