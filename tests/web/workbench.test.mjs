@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { readReport } from "../../web/report.mjs";
-import { extent, kindColors, kindOrder, layerColor, linearTicks, logTicks, scale } from "../../web/charts.mjs";
+import { extent, kindColors, kindOffset, kindOrder, layerColor, linearTicks, logTicks, scale } from "../../web/charts.mjs";
 import {
   buildWorkbench, filterTensors, formatNumber, formatPercent, median, naturalCompare, pageOf, parseNumber,
   shortName, sortTensors, tierInfo,
@@ -164,6 +164,12 @@ test("chart colours follow the CLI figures and scales stay inside the plot", () 
   // 64 tensors with 2,048 singular values each: more values than Math.min(...values) accepts as arguments
   assert.deepEqual(extent(Array.from({ length: 64 * 2048 }, (_, i) => 1 + (i * 7919) % 1000)), [1, 1000]);
   assert.deepEqual(extent([]), [Infinity, -Infinity]);
+  // every kind of a layer is drawn inside the half-layer margin, even when layer 0 is the only one
+  for (const count of [1, 2, 3, 8, 40]) {
+    const offsets = Array.from({ length: count }, (_, i) => kindOffset(i, count));
+    assert.ok(Math.max(...offsets.map(Math.abs)) <= 0.3, `${count} kinds`);
+    assert.equal(new Set(offsets).size, count);
+  }
   const y = scale([1e-4, 1], [200, 0], true);
   assert.deepEqual([y(1e-4), y(1e-2), y(1), y(0)].map(Math.round), [200, 100, 0, 200]);
 });

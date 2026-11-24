@@ -104,6 +104,14 @@ function frame({ width, height, x, y, xLabel, yLabel, xTicks, label }) {
 
 const integerTicks = (lo, hi, count) => [...new Set(linearTicks(lo, hi, count).map(Math.round))].filter((t) => t >= lo && t <= hi);
 
+/**
+ * Offset, in layers, of kind `i` of `count`: kinds sit side by side inside a layer, so two kinds with the
+ * same rank do not hide each other. It stays within 0.3 of the layer, inside the axis' half-layer margin.
+ */
+export function kindOffset(i, count) {
+  return (i - (count - 1) / 2) * Math.min(0.16, 0.6 / count);
+}
+
 function pickable(node, tensor, onPick) {
   node.classList.add('pick');
   node.addEventListener('click', () => onPick(tensor.name));
@@ -118,18 +126,16 @@ export function rankByLayerChart(tensors, { selected, onPick }) {
   const [firstLayer, lastLayer] = extent(points.map((t) => t.layer));
   const [lowRank, highRank] = extent(points.map((t) => t.effectiveRank));
   const log = highRank / lowRank > 30;
-  const x = { domain: padded(firstLayer, lastLayer) };
+  const x = { domain: [firstLayer - 0.5, lastLayer + 0.5] };
   const y = { domain: padded(lowRank, highRank, log), log };
   const { root, sx, sy } = frame({
     width: 720, height: 300, x, y, xLabel: 'layer', yLabel: 'effective rank of ΔW',
     xTicks: integerTicks(firstLayer, lastLayer, 12),
     label: `Effective rank of ΔW by layer for ${points.length} changed tensors of ${kinds.length} kinds. The table below lists the same values.`,
   });
-  // kinds sit side by side inside a layer, so two kinds with the same rank do not hide each other
-  const step = Math.min(0.16, 0.6 / kinds.length);
   for (const [i, kind] of kinds.entries()) {
     const series = points.filter((t) => t.kind === kind).sort((a, b) => a.layer - b.layer);
-    const at = (t) => sx(t.layer + (i - (kinds.length - 1) / 2) * step);
+    const at = (t) => sx(t.layer + kindOffset(i, kinds.length));
     append(root,
       svg('polyline', { points: series.map((t) => `${at(t)},${sy(t.effectiveRank)}`).join(' '), fill: 'none', stroke: colors.get(kind), 'stroke-width': 1.5 }),
       series.map((t) => pickable(svg('circle', {
