@@ -703,6 +703,7 @@ class _ExpansionReference(NamedTuple):
     # Relative operator-norm allowance from the held-out endpoint forecasts.
     uncertainty: float = 0.
     supported_strength: float = math.inf
+    paired_rank: int | None = None
 
 
 def _majority_envelope(bases: list[np.ndarray], peers: np.ndarray, tolerance: float,
@@ -731,14 +732,19 @@ def _majority_envelope(bases: list[np.ndarray], peers: np.ndarray, tolerance: fl
         for i in fold:
             frames[i] = held_out
     references = []
-    for frame, basis in zip(frames, bases):
+    for i, (frame, basis) in enumerate(zip(frames, bases)):
         cosines = np.linalg.svd(frame.T @ basis, compute_uv=False)
         paired = min(p, basis.shape[1])
-        references.append(_ExpansionReference(frame) if cosines[paired-1] >= math.cos(radius) else None)
-    for i in peers:
-        overlap = frames[i].T @ bases[i]
-        if np.linalg.svd(overlap, compute_uv=False).min() < math.cos(tolerance):
+        if i in peers and cosines[paired-1] < math.cos(tolerance):
             return None
+        if cosines[paired-1] < math.cos(radius):
+            references.append(None)
+            continue
+        # More than p axes can be supported by a wider hull. A weak axis
+        # inside it must not push a slightly tilted strong axis into the
+        # extra set. Only axes near the orthogonal complement are eligible.
+        supported = int(np.count_nonzero(cosines > math.sin(radius)))
+        references.append(_ExpansionReference(frame, paired_rank=supported))
     return references
 
 
@@ -933,7 +939,7 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
         spectrum = spectra[names[i]]
         ratio = spectrum.scale / scale
         reference = references[i]
-        lo, hi, unpaired = spectrum.outside_bounds(reference.basis, bases[i], p)
+        lo, hi, unpaired = spectrum.outside_bounds(reference.basis, bases[i], reference.paired_rank)
         unpaired = min(unpaired, reference.supported_strength)
         margin = reference.uncertainty * spectrum.retained.max()
         lower[i], upper[i], extra[i], noise[i] = ratio * np.array(

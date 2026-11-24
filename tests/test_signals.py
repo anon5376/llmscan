@@ -1067,6 +1067,21 @@ class TestAnomalySignals(unittest.TestCase):
                 self.assertEqual({s.shape[1] for s in spaces.values()}, {1, 2})
                 self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
 
+    def test_in_span_secondary_axis_cannot_unpair_a_tilted_leading_axis(self):
+        rows = [row(layer_name(i)) for i in range(31)]
+        eye = np.eye(5)
+        spaces, spectra = {}, {}
+        for r, axis in zip(rows, self.wandering_axes(eye, len(rows), False)):
+            tangent = -axis[1] * eye[0] + axis[0] * eye[1]
+            resolved = 11 <= r.layer < 15
+            tilt = np.radians(16. if resolved else 0.)
+            leading = np.cos(tilt) * axis + np.sin(tilt) * eye[-1]
+            edit = 100. * np.outer(leading, leading) + 2. * np.outer(tangent, tangent)
+            m = core.analyze_delta(0. * eye, edit, 1, .25 if resolved else 2.1)
+            spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+        findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+        self.assertFalse(any("subspace expansion" in why for why in findings.values()))
+
     def test_endpoint_forecast_error_at_the_same_physical_horizon(self):
         ids = [*range(11), 11, 14, 22]
         eye = np.eye(3)

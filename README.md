@@ -283,7 +283,8 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      For a turning trajectory the scanner also fits an ambient span to each
      of two interleaved sets of majority layers. The spans must agree in
      dimension and orientation. Each set measures the other set's background
-     residuals. Only the part of the additional modes outside the span counts
+     residuals. Additional modes must lie within the coherence radius of
+     the orthogonal complement. Only their component outside the span counts
      toward expansion strength. Where a shared span fits poorly, the scanner
      can track a majority plane from either side through consecutive measured
      spaces. Each step must retain the incoming plane within the ordinary
