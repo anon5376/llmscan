@@ -287,11 +287,11 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      such steps the scanner compares against their maximum. If every observed pair
      changes regime, it uses the largest within-regime diameter outside the candidate.
      The same angular resolution determines which output modes could be shared and
-     whether every mode has moved. A single measured pair of leading axes cannot
-     establish a separate dominant edit in each regime. For that explanation, each
-     endpoint needs another measured leading axis in its regime. Their boundary jump
-     must exceed the observed leading-axis variation on both sides and be smaller than
-     the full-space step, each by the configured outlier factor. An unchanged layer
+     whether every mode has moved. Replacing only the leading direction in a
+     space of dimension `r` preserves at least `r - 1` dimensions. Two principal
+     angles that independently clear both comparisons therefore establish a
+     multi-mode switch, even when other modes are retained. This evidence
+     depends only on the measured spaces. An unchanged layer
      between edited depth bands supplies no edit direction for a boundary comparison.
      A secondary-mode switch can also preserve one or more axes. When leading axes are
      unresolved, the scanner estimates the shared space inside a candidate layer by

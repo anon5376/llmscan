@@ -471,42 +471,15 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
     return findings
 
 
-def _leading_regime_change(leading: np.ndarray, angles: np.ndarray, members: np.ndarray,
-                           same: np.ndarray, adjacent: np.ndarray, floor: float, factor: float) -> bool:
-    """Require independent support on both sides for a smaller change of dominant edit."""
-    sampled = np.flatnonzero(np.isfinite(leading.diagonal()))
-    breaks = ~(adjacent & same.diagonal(1))
-    runs = np.r_[0, np.cumsum(breaks)]
-    left, right = sampled[:-1], sampled[1:]
-    crossing = (runs[right] - runs[left] == 1) & (members[left] != members[right])
-    left, right = left[crossing], right[crossing]
-    if not len(left):
-        return False
-    # Estimate the spread about each endpoint from other resolved axes in
-    # its regime. One measurement cannot establish a characteristic axis.
-    peers = same & np.isfinite(leading)
-    np.fill_diagonal(peers, False)
-    widths = np.where(peers, leading, 0.).max(axis=1)
-    widths[~peers.any(axis=1)] = np.inf
-    noise = np.maximum(floor, np.maximum(widths[left], widths[right]))
-    jump = leading[left, right]
-    # The crossed boundary ends the left sample's run. A full-space
-    # comparison at the sample endpoints would include within-run drift.
-    boundary = np.flatnonzero(breaks)[runs[left]]
-    step = angles.diagonal(1)[boundary]
-    return bool(np.any((jump > factor * noise) & (factor * jump < step)))
-
-
-def _whole_space_switch(geometry: _OutputGeometry, angles: np.ndarray, members: np.ndarray,
-                        same: np.ndarray, adjacent: np.ndarray, switches: np.ndarray,
-                        limit: float, floor: float, factor: float) -> str | None:
+def _independent_mode_switch(cosines: np.ndarray, angles: np.ndarray, members: np.ndarray,
+                             same: np.ndarray, adjacent: np.ndarray, switches: np.ndarray,
+                             limit: float, floor: float) -> tuple[str, str] | None:
+    """Replacing one axis in an r-plane leaves at least r-1 shared dimensions."""
     outside = members[:, None] & ~members
-    closest = math.acos(min(1., geometry.cosines[0][outside].max()))
-    if closest <= limit or _leading_regime_change(geometry.leading_angles, angles, members,
-                                                  same, adjacent, floor, factor):
+    closest = np.arccos(np.clip(cosines[:, outside].max(axis=1), 0., 1.))
+    if closest[-2] <= limit:
         return None
-    # Compare the weakest moving mode at each boundary with ordinary steps
-    # outside the group. A large jump in one mode cannot vouch for the others.
+    # Compare each moving mode at every boundary with ordinary outside steps.
     steps = angles.diagonal(1)[adjacent & same.diagonal(1) & ~members[:-1]]
     reference = "outside step limit"
     if len(steps) >= 8:
@@ -520,12 +493,16 @@ def _whole_space_switch(geometry: _OutputGeometry, angles: np.ndarray, members: 
         # bound on movement within it, even across nonconsecutive layers.
         step_limit = angles[same & ~members[:, None]].max() + floor
         reference = "outside within-regime diameter plus tolerance"
-    boundary = math.acos(min(1., geometry.cosines[0].diagonal(1)[switches].max()))
-    if boundary <= step_limit:
+    boundary_cosines = cosines.diagonal(1, axis1=1, axis2=2)[:, switches]
+    boundary = np.arccos(np.clip(boundary_cosines.max(axis=1), 0., 1.))
+    moved = np.flatnonzero((closest > limit) & (boundary > step_limit))
+    if len(moved) < 2:
         return None
-    return (f"smallest cross-group principal angle {math.degrees(closest):.2f} degrees, "
-            f"minimum boundary angle {math.degrees(boundary):.2f} degrees "
-            f"vs {reference} {math.degrees(step_limit):.2f} degrees")
+    i = moved[0]
+    switch = "whole output subspace" if i == 0 else f"{len(moved)} output modes"
+    return switch, (f"smallest cross-group principal angle among moving modes {math.degrees(closest[i]):.2f} degrees, "
+                    f"minimum boundary angle {math.degrees(boundary[i]):.2f} degrees "
+                    f"vs {reference} {math.degrees(step_limit):.2f} degrees")
 
 
 def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, geometry: _OutputGeometry,
@@ -543,27 +520,29 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
             continue
         outside = members[:, None] & ~members
         limit = factor * max(floor, within)
-        evidence = _whole_space_switch(geometry, angles, members, same, adjacent,
-                                       switches, limit, floor, factor)
-        if evidence is not None:
-            switch = "whole output subspace"
+        # A stable primary or intersection gives a more specific attribution.
+        # If it cannot be established, two exceptional principal angles still
+        # certify movement that changing a single leading axis cannot explain.
+        switch = "secondary subspace"
+        primary = _stable_angles(geometry.leading_angles, members, background, adjacent, factor, floor)
+        terminal = switches.sum() == 1
+        secondary = math.acos(min(1., geometry.cosines[1][outside].max()))
+        if finest and primary is not None and (not terminal or secondary > limit):
+            across = angles[outside].min()
+            evidence = (f"minimum between-group angle {math.degrees(across):.2f} degrees, "
+                        f"leading axes within {math.degrees(primary):.2f} degrees")
+            if terminal:
+                i = int(np.flatnonzero(switches)[0])
+                evidence += (f", minimum secondary angle {math.degrees(secondary):.2f} degrees "
+                             f"at boundary {ids[i]}–{ids[i+1]}")
         else:
-            switch = "secondary subspace"
-            primary = _stable_angles(geometry.leading_angles, members, background, adjacent, factor, floor)
-            terminal = switches.sum() == 1
-            secondary = math.acos(min(1., geometry.cosines[1][outside].max()))
-            if finest and primary is not None and (not terminal or secondary > limit):
-                across = angles[outside].min()
-                evidence = (f"minimum between-group angle {math.degrees(across):.2f} degrees, "
-                            f"leading axes within {math.degrees(primary):.2f} degrees")
-                if terminal:
-                    i = int(np.flatnonzero(switches)[0])
-                    evidence += (f", minimum secondary angle {math.degrees(secondary):.2f} degrees "
-                                 f"at boundary {ids[i]}–{ids[i+1]}")
-            else:
-                evidence = _shared_space_switch(geometry, members, background, adjacent, limit, factor, floor)
-                if evidence is None:
+            evidence = _shared_space_switch(geometry, members, background, adjacent, limit, factor, floor)
+            if evidence is None:
+                independent = _independent_mode_switch(geometry.cosines, angles, members, same, adjacent,
+                                                       switches, limit, floor)
+                if independent is None:
                     continue
+                switch, evidence = independent
         reason = (f"abrupt {switch} switch in {sizes[label]} layers "
                   f"({evidence}, {spread} {math.degrees(within):.2f} degrees)")
         for i in np.flatnonzero(members):

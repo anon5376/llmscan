@@ -580,9 +580,10 @@ class TestAnomalySignals(unittest.TestCase):
                     self.assertEqual(flagged, minority)
                     self.assertTrue(all("secondary subspace switch" in r.reason for r in ranked if r.tier == "T3"))
 
-    def test_multiple_secondary_switches_need_stable_primary_axes_and_observed_boundaries(self):
+    def test_multiple_mode_switches_need_observed_boundaries(self):
         eye = np.eye(6)
-        for missing, shift, expected in [(None, 0., {1, 2, 3, 7, 8, 9}), (6, 0., {1, 2, 3}), (None, .1, set())]:
+        both = {1, 2, 3, 7, 8, 9}
+        for missing, shift, expected in [(None, 0., both), (6, 0., {1, 2, 3}), (None, .1, both)]:
             with self.subTest(missing=missing, shift=shift):
                 rows = [row(layer_name(i)) for i in range(17) if i != missing]
                 stats = {r.name: Measurements(1.5, 1.) for r in rows}
@@ -833,21 +834,20 @@ class TestAnomalySignals(unittest.TestCase):
         changed = eye[:, :2] * np.cos(rotation) + eye[:, 2:] * np.sin(rotation)
         spaces = {r.name: changed if r.layer in group else eye[:, :2] for r in rows}
         axes = {r.name: spaces[r.name][:, int(r.layer in (6, 12))] for r in rows}
-        for observed, expected in [(range(20), group), ([3, 6, 9, 12, 18], group),
-                                   ([4, 9, 15], group), ([4, 8, 9, 15], set())]:
+        for observed in [range(20), [3, 6, 9, 12, 18], [4, 9, 15], [4, 8, 9, 15]]:
             with self.subTest(observed=observed):
                 samples = {layer_name(i): axes[layer_name(i)] for i in observed}
                 found = subspace_outliers(rows, spaces, 3., stats, samples)
-                self.assertEqual(set(found), {layer_name(i) for i in expected})
+                self.assertEqual(set(found), {layer_name(i) for i in group})
 
-    def test_sparse_leading_samples_must_span_a_single_partition_boundary(self):
+    def test_sparse_leading_samples_across_one_or_two_multimode_boundaries(self):
         rows = [row(layer_name(i)) for i in range(24)]
         stats = {r.name: Measurements(1.5, 1.) for r in rows}
         eye = np.eye(6)
         rotation = np.radians([16., 80.])
         second = eye[:, :2] * np.cos(rotation) + eye[:, 2:4] * np.sin(rotation)
         first_run = {4, 5, 6}
-        for start, detected in [(7, False), (12, True)]:
+        for start in (7, 12):
             with self.subTest(start=start):
                 second_run = set(range(start, start + 3))
                 spaces = {r.name: eye[:, 4:] for r in rows}
@@ -856,10 +856,10 @@ class TestAnomalySignals(unittest.TestCase):
                 axes = {layer_name(i): spaces[layer_name(i)][:, 0]
                         for i in (4, 5, start + 1, start + 2)}
                 found = subspace_outliers(rows, spaces, 3., stats, axes)
-                expected = first_run | second_run if detected else set()
+                expected = first_run | second_run
                 self.assertEqual(set(found), {layer_name(i) for i in expected})
 
-    def test_sparse_leading_measurements_compare_with_the_crossed_boundary_step(self):
+    def test_within_run_drift_preserves_two_abrupt_mode_changes(self):
         rows = [row(layer_name(i)) for i in range(22)]
         stats = {r.name: Measurements(1.6, 1.) for r in rows}
         group = set(range(8, 14))
@@ -872,28 +872,59 @@ class TestAnomalySignals(unittest.TestCase):
                     spaces[layer_name(i)] = eye[:, :2] * np.cos(angles) + eye[:, 2:] * np.sin(angles)
                 axes = {layer_name(i): spaces[layer_name(i)][:, 0] for i in (11, 12, 15, 16)}
                 found = subspace_outliers(rows, spaces, 3., stats, axes)
-                # The sampled axes straddle the exit. Only the subspace step
-                # from layer 13 to 14 can corroborate a regime change there.
-                expected = group if edge < 3 * 20. else set()
-                self.assertEqual(set(found), {layer_name(i) for i in expected})
+                self.assertEqual(set(found), {layer_name(i) for i in group})
 
     def test_sparse_boundary_axes_use_the_resolution_of_the_output_spaces(self):
-        rows = [row(layer_name(i)) for i in range(22)]
+        rows = [row(layer_name(i)) for i in range(24)]
         stats = {r.name: Measurements(1.6, 1.) for r in rows}
         group = set(range(9, 14))
         eye = np.eye(4)
-        for weak, strong, distinct_leading_edit in [(8., 50., True), (18., 72., True), (32., 80., False)]:
+        for weak, strong in [(0., 60.), (8., 50.), (18., 72.), (20., 90.), (32., 80.), (45., 45.)]:
             angles = np.radians([weak, strong])
             rotated = eye[:, :2] * np.cos(angles) + eye[:, 2:] * np.sin(angles)
             spaces = {r.name: rotated if r.layer in group else eye[:, :2] for r in rows}
-            # With repeated, consistent dominant axes on both sides, a smaller
-            # dominant-axis change corroborates a separate editing regime.
-            for samples in [(8, 9), (7, 8, 9), (7, 8, 9, 10)]:
+            for samples in [(), (8, 9), (7, 8, 9), range(7, 11), range(5, 13), range(24)]:
                 with self.subTest(weak=weak, strong=strong, samples=samples):
                     axes = {layer_name(i): spaces[layer_name(i)][:, 0] for i in samples}
                     ranked = rank.rank_tensors(rows, stats, directions=axes, subspaces=spaces)
-                    expected = set() if len(samples) == 4 and distinct_leading_edit else group
-                    self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
+                    self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, group)
+
+    def test_two_moving_modes_with_a_retained_dimension(self):
+        # One dimension is shared, but replacing one leading axis in a
+        # three-dimensional space would retain two dimensions.
+        rows = [row(layer_name(i)) for i in range(21)]
+        group = {6, 7, 8, 9}
+        stats = {r.name: Measurements(1.6, 1.) for r in rows}
+        eye = np.eye(6)
+        angles = np.radians([0., 18., 75.])
+        rotated = eye[:, :3] * np.cos(angles) + eye[:, 3:] * np.sin(angles)
+        for leading in (1, 2):
+            with self.subTest(leading=leading):
+                spaces, axes = {}, {}
+                for r in rows:
+                    basis = rotated if r.layer in group else eye[:, :3]
+                    spaces[r.name] = np.roll(basis, r.layer % 3, axis=1)
+                    axes[r.name] = (-1) ** r.layer * basis[:, leading]
+                found = subspace_outliers(rows, spaces, 3., stats, axes)
+                self.assertEqual(set(found), {layer_name(i) for i in group})
+                self.assertTrue(all("2 output modes" in reason for reason in found.values()))
+
+    def test_resolved_primary_replacement_with_a_retained_complement(self):
+        rows = [row(layer_name(i)) for i in range(24)]
+        stats = {r.name: Measurements(1.6, 1.) for r in rows}
+        eye = np.eye(5)
+        for dim, samples in product((2, 3), [(7, 8), range(6, 10), range(4, 12), range(24)]):
+            with self.subTest(dim=dim, samples=samples):
+                spaces, axes = {}, {}
+                for r in rows:
+                    angle = np.radians(35. if 8 <= r.layer < 14 else 0.)
+                    primary = np.cos(angle) * eye[0] + np.sin(angle) * eye[-1]
+                    basis = np.column_stack((primary, eye[:, 1:dim]))
+                    spaces[r.name] = np.roll(basis, r.layer % dim, axis=1)
+                    if r.layer in samples:
+                        axes[r.name] = (-1) ** r.layer * primary
+                ranked = rank.rank_tensors(rows, stats, directions=axes, subspaces=spaces)
+                self.assertTrue(all(r.tier == "T4" for r in ranked))
 
     def test_separate_edit_bands_have_no_observed_subspace_boundary(self):
         # Independently edited depth bands can have distinct, constant planes.
@@ -1157,7 +1188,7 @@ class TestAnomalySignals(unittest.TestCase):
                 result = subspace_outliers(rows, spaces, 3., stats, axes)
                 self.assertEqual(set(result), {layer_name(i) for i in expected})
 
-    def test_terminal_switch_needs_an_observed_boundary_and_stable_axis(self):
+    def test_terminal_switch_needs_an_observed_boundary(self):
         eye = np.eye(4)
         for missing, resolved, shift in [(11, True, 0.), (5, True, 0.), (None, False, 0.), (None, True, .1)]:
             with self.subTest(missing=missing, resolved=resolved, shift=shift):
@@ -1170,7 +1201,7 @@ class TestAnomalySignals(unittest.TestCase):
                     if resolved:
                         directions[r.name] = primary
                 stats = {r.name: Measurements(1.5, 1.) for r in rows}
-                expected = {layer_name(i) for i in range(12, 16)} if missing is None and not shift else set()
+                expected = {layer_name(i) for i in range(12, 16)} if missing is None else set()
                 self.assertEqual(set(subspace_outliers(rows, spaces, 3., stats, directions)), expected)
 
     def test_change_of_primary_concept_does_not_corroborate_secondary_switch(self):
