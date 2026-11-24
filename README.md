@@ -283,11 +283,17 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      member–outsider pair must place the member space within the coherence radius of
      the other space's orthogonal complement and exceed the group's angular variation by
      the configured outlier factor. An intersecting pair retains a zero principal angle.
-     For a secondary-mode switch, the separately measured leading axes of the candidate
-     and majority must agree. Each boundary step in the leading direction must be
-     consistent with adjacent steps inside those two groups. For a single terminal boundary, the cohort must be uninterrupted
-     and even the second principal angle to every other group must exceed the separation
-     bound. An intentional secondary-direction change with the same geometry gives the same
+     A secondary-mode switch can also preserve one or more axes. When leading axes are
+     unresolved, the scanner estimates the shared space inside a candidate layer by
+     projecting it onto the participating layers. Each layer in the candidate, majority,
+     and boundary neighbors must retain that space within the measured angular resolution.
+     The smallest switched angle must exceed both shared-mode and within-group variation
+     by the outlier factor. The shared space must also stay stable at each observed
+     boundary. Any independently resolved leading axes must support that interpretation.
+     A separately resolved and stable leading edit can corroborate a secondary switch on
+     its own. At a single terminal boundary this requires separation even in the second
+     principal angle, or evidence of a higher-dimensional shared space. A terminal switch
+     always requires an uninterrupted cohort. An intentional change with the same geometry gives the same
      finding. For individual layer outliers, two adjacent peers can confirm a local plateau
      even at its edge. The leading-direction comparison checks both the axis and the resolved
      output space before accepting this evidence of a local editing regime.

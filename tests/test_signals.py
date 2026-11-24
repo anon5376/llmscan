@@ -577,7 +577,7 @@ class TestAnomalySignals(unittest.TestCase):
                         stats[r.name] = Measurements(1.6 if shifted and member else 1.5, 1.)
                     ranked = rank.rank_tensors(rows, stats, subspaces=spaces, directions=axes)
                     flagged = {r.layer for r in ranked if r.tier == "T3"}
-                    self.assertEqual(flagged, set() if min(minority) == 13 else minority)
+                    self.assertEqual(flagged, minority)
                     self.assertTrue(all("secondary subspace switch" in r.reason for r in ranked if r.tier == "T3"))
 
     def test_multiple_secondary_switches_need_stable_primary_axes_and_observed_boundaries(self):
@@ -784,12 +784,12 @@ class TestAnomalySignals(unittest.TestCase):
         self.assertTrue(all("whole output subspace switch in 6 layers" in why
                             for why in findings.values()))
 
-    def test_whole_space_switch_needs_each_mode_to_leave_and_an_abrupt_boundary(self):
+    def test_whole_and_shared_space_switches_need_an_abrupt_boundary(self):
         eye = np.eye(4)
         rows = [row(layer_name(i)) for i in range(24)]
         stats = {r.name: Measurements(2., 1.) for r in rows}
         minority = {r.layer for r in rows[-4:]}
-        for closest, drift, expected in [(0., False, set()), (50., False, set()),
+        for closest, drift, expected in [(0., False, minority), (50., False, set()),
                                          (80., False, minority), (90., True, set())]:
             with self.subTest(closest=closest, drift=drift):
                 spaces = {}
@@ -799,6 +799,94 @@ class TestAnomalySignals(unittest.TestCase):
                     spaces[r.name] = eye[:, :2] * np.cos(angles) + eye[:, 2:] * np.sin(angles)
                 ranked = rank.rank_tensors(rows, stats, subspaces=spaces)
                 self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
+
+    def test_unresolved_shared_space_with_rotated_bases_and_multiple_groups(self):
+        rows = [row(layer_name(i)) for i in range(32)]
+        eye = np.eye(12)
+        rng = np.random.default_rng(53)
+        groups = [{0, 1, 2}, {8, 11, 16}, {27, 28, 29, 30, 31}]
+        for k in (1, 2):
+            with self.subTest(k=k):
+                spaces = {}
+                for r in rows:
+                    rest = eye[:, 2:4]
+                    for j, group in enumerate(groups):
+                        if r.layer in group:
+                            rest = .5 * rest + np.sqrt(.75) * eye[:, 4+2*j:6+2*j]
+                    basis = np.column_stack((eye[:, :k], rest))
+                    rotation, _ = np.linalg.qr(rng.normal(size=(k+2, k+2)))
+                    spaces[r.name] = basis @ rotation
+                stats = {r.name: Measurements(2., 1.) for r in rows}
+                findings = subspace_outliers(rows[::-1], spaces, 3., stats)
+                self.assertEqual(set(findings), {layer_name(i) for i in set.union(*groups)})
+                self.assertTrue(all(f"shared output dimension {k}" in s for s in findings.values()))
+
+    def test_unresolved_shared_axis_with_rotating_or_wandering_peers(self):
+        n = 32
+        eye = np.eye(n + 3)
+        rows = [row(layer_name(i)) for i in range(n)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        group = {5, 11, 12, 13, 18}
+        for wandering, switched in product((False, True), repeat=2):
+            with self.subTest(wandering=wandering, switched=switched):
+                spaces = {}
+                secondary = eye[1]
+                for r in rows:
+                    if switched and r.layer in group:
+                        axis = .5 * eye[1] + np.sqrt(.75) * eye[-1]
+                    elif wandering:
+                        if r.layer:
+                            theta = np.radians(38 + r.layer % 3)
+                            secondary = np.cos(theta) * secondary + np.sin(theta) * eye[r.layer+1]
+                        axis = secondary
+                    else:
+                        theta = np.radians(2 * r.layer)
+                        axis = np.cos(theta) * eye[1] + np.sin(theta) * eye[2]
+                    spaces[r.name] = np.column_stack((eye[0], axis))
+                findings = subspace_outliers(rows, spaces, 3., stats)
+                expected = group if switched else set()
+                self.assertEqual(set(findings), {layer_name(i) for i in expected})
+
+    def test_pairwise_intersections_rotate_without_a_common_axis(self):
+        rows = [row(layer_name(i)) for i in range(32)]
+        eye = np.eye(3)
+        spaces = {}
+        for r in rows:
+            # Each background plane meets the minority plane in a line, but
+            # that line rotates across the majority. No common line survives.
+            theta = np.radians(3 * r.layer)
+            axis = np.cos(theta) * eye[0] + np.sin(theta) * eye[1]
+            spaces[r.name] = eye[:, :2] if 12 <= r.layer < 17 else np.column_stack((axis, eye[2]))
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        self.assertEqual(subspace_outliers(rows, spaces, 3., stats), {})
+
+    def test_nearly_shared_axis_also_changes_at_the_boundary(self):
+        rows = [row(layer_name(i)) for i in range(20)]
+        eye = np.eye(5)
+        spaces = {}
+        for r in rows:
+            member = r.layer >= 16
+            angle = np.radians(3 * member)
+            axis = np.cos(angle) * eye[0] + np.sin(angle) * eye[1]
+            step = np.radians(2 * (r.layer % 2))
+            secondary = np.cos(step) * eye[3 if member else 2] + np.sin(step) * eye[4]
+            spaces[r.name] = np.column_stack((axis, secondary))
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        self.assertEqual(subspace_outliers(rows, spaces, 3., stats), {})
+
+    def test_partially_resolved_leading_axes_can_contradict_shared_modes(self):
+        rows = [row(layer_name(i)) for i in range(20)]
+        eye = np.eye(5)
+        spaces = {r.name: eye[:, [0, 1, 3 if r.layer >= 16 else 2]] for r in rows}
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        for axis in (0, 1, 3):
+            with self.subTest(axis=axis):
+                # Some layers resolve a leading axis. A change inside the
+                # common plane and a change out of it both contradict stability.
+                directions = {r.name: eye[axis if r.layer >= 16 else 0] for r in rows if r.layer % 2}
+                findings = subspace_outliers(rows, spaces, 3., stats, directions)
+                expected = {layer_name(i) for i in range(16, 20)} if axis == 0 else set()
+                self.assertEqual(set(findings), expected)
 
     def test_recurring_clique_with_matched_rank_among_wandering_peers(self):
         rows = [row(layer_name(i)) for i in range(30)]
@@ -887,7 +975,7 @@ class TestAnomalySignals(unittest.TestCase):
                 result = subspace_outliers(rows, spaces, 3., stats, axes)
                 self.assertEqual(set(result), {layer_name(i) for i in expected})
 
-    def test_terminal_switch_needs_an_observed_boundary_and_resolved_primary(self):
+    def test_terminal_switch_needs_an_observed_boundary_and_stable_axis(self):
         eye = np.eye(4)
         for missing, resolved, shift in [(11, True, 0.), (5, True, 0.), (None, False, 0.), (None, True, .1)]:
             with self.subTest(missing=missing, resolved=resolved, shift=shift):
@@ -900,7 +988,8 @@ class TestAnomalySignals(unittest.TestCase):
                     if resolved:
                         directions[r.name] = primary
                 stats = {r.name: Measurements(1.5, 1.) for r in rows}
-                self.assertEqual(subspace_outliers(rows, spaces, 3., stats, directions), {})
+                expected = {layer_name(i) for i in range(12, 16)} if missing is None and not shift else set()
+                self.assertEqual(set(subspace_outliers(rows, spaces, 3., stats, directions)), expected)
 
     def test_change_of_primary_concept_does_not_corroborate_secondary_switch(self):
         # These edit spaces intersect in two axes. The dominant direction
@@ -916,7 +1005,7 @@ class TestAnomalySignals(unittest.TestCase):
         stats = {r.name: Measurements(1.5, 1.) for r in rows}
         self.assertEqual(subspace_outliers(rows, spaces, 3., stats, directions), {})
 
-    def test_recurring_subspace_requires_independent_spectral_corroboration(self):
+    def test_recurring_subspace_needs_a_switch_or_spectral_corroboration(self):
         rows = [row(layer_name(i)) for i in range(15)]
         axes = np.eye(17)
         for selected, background_shared, group_rank, expected in [
@@ -924,8 +1013,8 @@ class TestAnomalySignals(unittest.TestCase):
             ({0, 4, 8}, False, 1.7, {0, 4, 8}),
             ({0, 4, 8}, False, 1.5, set()),   # one concept recurs at typical strength
             ({0, 1, 2}, False, 1.3, set()),   # contiguous editing regime
-            ({0, 4, 8}, True, 1.5, set()),    # two recurring concepts
-            ({4, 5, 6}, True, 1.3, set()),    # one block uses a different concept and strength
+            ({0, 4, 8}, True, 1.5, {0, 4, 8}),  # observed switches under a shared axis
+            ({4, 5, 6}, True, 1.3, {4, 5, 6}),
             ({0, 4, 8}, True, 1.3, {0, 4, 8}),
         ]:
             with self.subTest(selected=selected, shared=background_shared, rank=group_rank):
@@ -1039,25 +1128,29 @@ class TestControlCheckpoints(unittest.TestCase):
             self.assertIn("inner product constraints", finding["reason"])
 
     def test_tied_modes_switch_output_space_through_cli(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            base, suspect = {}, {}
-            for i in range(16):
-                w = np.eye(8, dtype=np.float32)
-                edited = w.copy()
-                start = 2 if 5 <= i <= 8 else 0
-                edited[start:start + 2] = 0
-                base[layer_name(i)] = ("F32", w)
-                suspect[layer_name(i)] = ("F32", edited)
-            write_safetensors(tmp / "b.safetensors", base)
-            write_safetensors(tmp / "s.safetensors", suspect)
-            rc, out, err = run_cli("--base", str(tmp / "b.safetensors"), "--suspect", str(tmp / "s.safetensors"),
-                                   "--out", str(tmp / "out"), "-k", "1")
-            self.assertEqual(rc, 0, out + err)
-            with (tmp / "out" / "ranking.csv").open() as f:
-                rows = list(csv.DictReader(f))
-            self.assertEqual({r["name"] for r in rows if r["tier"] == "T3"}, {layer_name(i) for i in range(5, 9)})
-            self.assertTrue(all("whole output subspace switch" in r["reason"] for r in rows if r["tier"] == "T3"))
+        for shared in (False, True):
+            with self.subTest(shared=shared), tempfile.TemporaryDirectory() as tmp:
+                self._check_tied_modes_switch(Path(tmp), shared)
+
+    def _check_tied_modes_switch(self, tmp, shared):
+        base, suspect = {}, {}
+        for i in range(16):
+            w = np.eye(8, dtype=np.float32)
+            edited = w.copy()
+            modes = [0 if shared else 2, 3] if 5 <= i <= 8 else [0, 1]
+            edited[modes] = 0
+            base[layer_name(i)] = ("F32", w)
+            suspect[layer_name(i)] = ("F32", edited)
+        write_safetensors(tmp / "b.safetensors", base)
+        write_safetensors(tmp / "s.safetensors", suspect)
+        rc, out, err = run_cli("--base", str(tmp / "b.safetensors"), "--suspect", str(tmp / "s.safetensors"),
+                               "--out", str(tmp / "out"), "-k", "1")
+        self.assertEqual(rc, 0, out + err)
+        with (tmp / "out" / "ranking.csv").open() as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual({r["name"] for r in rows if r["tier"] == "T3"}, {layer_name(i) for i in range(5, 9)})
+        evidence = "shared output dimension 1" if shared else "whole output subspace switch"
+        self.assertTrue(all(evidence in r["reason"] for r in rows if r["tier"] == "T3"))
 
     def test_rank_three_shared_subspace_through_cli(self):
         # Both tied and separated spectra have the same output space except
