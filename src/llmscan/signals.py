@@ -347,21 +347,31 @@ def _isolated_cliques(ids: list[int], angles: np.ndarray, layer_count: int,
     return labels, np.asarray(diameters), "maximum within-clique angle"
 
 
-def _shared_primary(names: list[str], directions: dict[str, np.ndarray] | None, width: int,
-                    labels: np.ndarray, adjacent: np.ndarray, factor: float,
-                    floor: float) -> tuple[float, np.ndarray, float] | None:
-    """Measure leading-axis steps only when a common leading edit is independently resolved."""
-    if not directions or any(name not in directions or directions[name].shape != (width,) for name in names):
+def _primary_angles(names: list[str], directions: dict[str, np.ndarray] | None, width: int) -> np.ndarray | None:
+    if not directions:
         return None
-    same = labels[:, None] == labels
-    axes = np.stack([directions[name] for name in names])
-    primary = np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
-    if not (primary.max() <= math.acos(0.9)
-            and primary[~same].max() <= factor * max(floor, primary[same].max())):
+    axes = np.full((len(names), width), np.nan)
+    for i, name in enumerate(names):
+        if name in directions and directions[name].shape == (width,):
+            axes[i] = directions[name]
+    return np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.))
+
+
+def _shared_primary(primary: np.ndarray | None, members: np.ndarray, background: np.ndarray,
+                    adjacent: np.ndarray, factor: float, floor: float) -> float | None:
+    """Check this candidate against the majority and its observed boundary neighbors."""
+    if primary is None:
         return None
-    primary_steps = primary.diagonal(offset=1)
-    usual_step = primary_steps[adjacent & (labels[:-1] == labels[1:])].max(initial=floor)
-    return primary.max(), primary_steps, usual_step
+    within = (members[:, None] & members) | (background[:, None] & background)
+    spread = primary[within].max()
+    across = primary[np.ix_(members, background)].max()
+    if not (spread <= math.acos(0.9) and across <= min(math.acos(0.9), factor * max(spread, floor))):
+        return None
+    steps = primary.diagonal(offset=1)
+    usual = steps[adjacent & within.diagonal(offset=1)].max(initial=floor)
+    if np.all(steps[members[:-1] != members[1:]] <= factor * usual):
+        return max(spread, across)
+    return None
 
 
 def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angles: np.ndarray,
@@ -375,9 +385,9 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
     for i, (labels, widths, spread) in enumerate(_subspace_groups(ids, angles, layer_count, factor, floor)):
         # Secondary modes use the finest supported partition. A whole-space
         # switch can encompass several nearby subgroups within that partition.
-        primary = _shared_primary(names, directions, width, labels, adjacent, factor, floor) if i == 0 else None
-        found = _partition_switches(ids, names, angles, overlap, factor, floor, adjacent, primary,
-                                    labels, widths, spread)
+        primary = _primary_angles(names, directions, width) if i == 0 else None
+        found = _partition_switches(ids, names, angles, overlap, factor, floor, adjacent,
+                                    primary, labels, widths, spread)
         for name, reason in found.items():
             findings.setdefault(name, reason)
     return findings
@@ -385,9 +395,10 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
 
 def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, overlap: np.ndarray,
                         factor: float, floor: float, adjacent: np.ndarray,
-                        primary: tuple[float, np.ndarray, float] | None,
+                        primary: np.ndarray | None,
                         labels: np.ndarray, widths: np.ndarray, spread: str) -> dict[str, str]:
     sizes = np.bincount(labels)
+    background = labels == sizes.argmax()
     findings = {}
     for label in np.flatnonzero(sizes < sizes.max()):
         within = widths[label]
@@ -397,7 +408,8 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ov
             continue
         outside = members[:, None] & ~members
         limit = factor * max(floor, within)
-        if primary is None:
+        primary_angle = _shared_primary(primary, members, background, adjacent, factor, floor)
+        if primary_angle is None:
             # Even the closest mode must lie in the coherence cone of the
             # other space's orthogonal complement, across every pair.
             closest = math.acos(min(1., overlap[0][outside].max()))
@@ -407,9 +419,6 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ov
                       f"(smallest cross-group principal angle {math.degrees(closest):.2f} degrees, "
                       f"{spread} {math.degrees(within):.2f} degrees)")
         else:
-            primary_angle, steps, usual = primary
-            if steps[switches].max() > factor * usual:
-                continue
             boundary = ""
             if switches.sum() == 1:
                 secondary = math.acos(min(1., overlap[1][outside].max()))

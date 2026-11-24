@@ -278,13 +278,14 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
 
      Each minority group can produce a T3 finding when its boundaries are observed at
      consecutive layer IDs. Even with tied singular values, the scanner can identify
-     a switch of the entire output space. The smallest principal angle across every
+     a switch of the entire output space. It also checks coarser supported partitions
+     when a switched space contains nearby subgroups. The smallest principal angle across every
      member–outsider pair must place the member space within the coherence radius of
      the other space's orthogonal complement and exceed the group's angular variation by
      the configured outlier factor. An intersecting pair retains a zero principal angle.
-     For a secondary-mode switch, the separately measured leading axes must agree across groups,
-     and each boundary step in the leading direction must be consistent with adjacent steps
-     inside the groups. For a single terminal boundary, the cohort must be uninterrupted
+     For a secondary-mode switch, the separately measured leading axes of the candidate
+     and majority must agree. Each boundary step in the leading direction must be
+     consistent with adjacent steps inside those two groups. For a single terminal boundary, the cohort must be uninterrupted
      and even the second principal angle to every other group must exceed the separation
      bound. An intentional secondary-direction change with the same geometry gives the same
      finding. For individual layer outliers, two adjacent peers can confirm a local plateau

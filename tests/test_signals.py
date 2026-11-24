@@ -720,6 +720,32 @@ class TestAnomalySignals(unittest.TestCase):
                 self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
                 self.assertTrue(all("within-clique angle" in r.reason for r in ranked if r.tier == "T3"))
 
+    def test_recurring_leading_change_leaves_separate_secondary_run_visible(self):
+        n = 36
+        eye = np.eye(n + 4)
+        rows = [row(layer_name(i)) for i in range(n)]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        run = set(range(12, 16))
+        recurring = {4, 21, 32}
+        axes, spaces = {}, {}
+        walk = eye[1]
+        for r in rows:
+            axis = eye[0]
+            if r.layer in recurring:
+                axis = np.cos(.1) * axis + np.sin(.1) * eye[-1]
+                secondary = eye[-2]
+            elif r.layer in run:
+                secondary = eye[-3]
+            else:
+                if r.layer:
+                    step = np.radians(38 + r.layer % 4)
+                    walk = np.cos(step) * walk + np.sin(step) * eye[1 + r.layer]
+                secondary = walk
+            axes[r.name] = axis
+            spaces[r.name] = np.column_stack((axis, secondary))
+        findings = subspace_outliers(rows, spaces, 3., stats, axes)
+        self.assertEqual(set(findings), {layer_name(i) for i in run})
+
     def test_whole_space_switches_include_interior_terminal_and_recurring_groups(self):
         eye = np.eye(8)
         n = 29
