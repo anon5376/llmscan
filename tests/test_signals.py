@@ -800,6 +800,30 @@ class TestAnomalySignals(unittest.TestCase):
                 ranked = rank.rank_tensors(rows, stats, subspaces=spaces)
                 self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, set() if drift else minority)
 
+    def test_separate_switch_boundaries_are_excluded_from_ordinary_steps(self):
+        rows = [row(layer_name(i)) for i in range(14)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        eye = np.eye(6)
+        first, second = {1, 3, 5}, {7, 9, 11}
+        spaces = {}
+        for r in rows:
+            basis = eye[:, :2]
+            if r.layer in first:
+                basis = (basis + eye[:, 2:4]) / np.sqrt(2)
+            elif r.layer in second:
+                basis = eye[:, 4:]
+            spaces[r.name] = basis
+        found = subspace_outliers(rows, spaces, 3., stats)
+        self.assertEqual(set(found), {layer_name(i) for i in first | second})
+
+    def test_alternating_coherent_spaces_without_consecutive_outside_layers(self):
+        rows = [row(layer_name(i)) for i in range(15)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        eye = np.eye(4)
+        spaces = {r.name: eye[:, 2:] if r.layer % 2 else eye[:, :2] for r in rows}
+        found = subspace_outliers(rows, spaces, 3., stats)
+        self.assertEqual(set(found), {r.name for r in rows if r.layer % 2})
+
     def test_whole_space_switch_compares_weakest_boundary_mode_with_outside_steps(self):
         rows = [row(layer_name(i)) for i in range(32)]
         stats = {r.name: Measurements(2., 1.) for r in rows}

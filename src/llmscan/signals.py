@@ -473,7 +473,7 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
 
 
 def _whole_space_switch(geometry: _OutputGeometry, angles: np.ndarray, members: np.ndarray,
-                        background: np.ndarray, adjacent: np.ndarray, switches: np.ndarray,
+                        background: np.ndarray, same: np.ndarray, adjacent: np.ndarray, switches: np.ndarray,
                         limit: float, floor: float, factor: float) -> str | None:
     outside = members[:, None] & ~members
     closest = math.acos(min(1., geometry.cosines[0][outside].max()))
@@ -487,20 +487,25 @@ def _whole_space_switch(geometry: _OutputGeometry, angles: np.ndarray, members: 
         return None
     # Compare the weakest moving mode at each boundary with ordinary steps
     # outside the group. A large jump in one mode cannot vouch for the others.
-    steps = angles.diagonal(1)[adjacent & ~members[:-1] & ~members[1:]]
-    if not len(steps):
-        return None
+    steps = angles.diagonal(1)[adjacent & same.diagonal(1) & ~members[:-1]]
+    reference = "outside step limit"
     if len(steps) >= 8:
         peers = Peers.summarize(steps.tolist())
         step_limit = peers.median + max(floor, 6 * 1.4826 * peers.mad)
-    else:
+    elif len(steps):
         step_limit = steps.max() + floor
+    else:
+        # In an alternating partition every adjacent pair may switch groups.
+        # Use the full observed diameter of each outside regime as an upper
+        # bound on movement within it, even across nonconsecutive layers.
+        step_limit = angles[same & ~members[:, None]].max() + floor
+        reference = "outside within-regime diameter plus tolerance"
     boundary = math.acos(min(1., geometry.cosines[0].diagonal(1)[switches].max()))
     if boundary <= step_limit:
         return None
     return (f"smallest cross-group principal angle {math.degrees(closest):.2f} degrees, "
             f"minimum boundary angle {math.degrees(boundary):.2f} degrees "
-            f"vs outside step limit {math.degrees(step_limit):.2f} degrees")
+            f"vs {reference} {math.degrees(step_limit):.2f} degrees")
 
 
 def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, geometry: _OutputGeometry,
@@ -508,6 +513,7 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
                         labels: np.ndarray, widths: np.ndarray, spread: str, finest: bool) -> dict[str, str]:
     sizes = np.bincount(labels)
     background = labels == sizes.argmax()
+    same = labels[:, None] == labels
     findings = {}
     for label in np.flatnonzero(sizes < sizes.max()):
         within = widths[label]
@@ -517,7 +523,8 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
             continue
         outside = members[:, None] & ~members
         limit = factor * max(floor, within)
-        evidence = _whole_space_switch(geometry, angles, members, background, adjacent, switches, limit, floor, factor)
+        evidence = _whole_space_switch(geometry, angles, members, background, same, adjacent,
+                                       switches, limit, floor, factor)
         if evidence is not None:
             switch = "whole output subspace"
         else:

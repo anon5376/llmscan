@@ -283,8 +283,10 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      smallest principal angle across every member–outsider pair must exceed the group's
      angular variation by the configured outlier factor. At each boundary even that
      weakest-moving mode must exceed the usual largest step between consecutive outside
-     layers, allowing for their dispersion. With fewer than eight outside steps the
-     scanner compares against their maximum. A separately measured leading axis that
+     layers in the same regime, allowing for their dispersion. With fewer than eight
+     such steps the scanner compares against their maximum. If every observed pair
+     changes regime, it uses the largest within-regime diameter outside the candidate.
+     A separately measured leading axis that
      stays within the coherence radius and moves much less than the space as a whole
      is checked for stability as part of a secondary switch.
      A secondary-mode switch can also preserve one or more axes. When leading axes are
