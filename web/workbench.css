@@ -188,6 +188,7 @@ aside.detail { display: none; }
 .results { display: grid; gap: 10px; min-width: 0; }
 .count, .fine { color: var(--ink-2); font-size: 0.87rem; }
 .note { padding: 10px 14px; background: var(--wash); border: 1px solid var(--grid); border-radius: var(--radius); }
+.note.warning { background: color-mix(in srgb, var(--yellow) 12%, #fff); border-color: color-mix(in srgb, var(--yellow) 55%, #fff); border-left: 4px solid var(--yellow); }
 .section-title { margin-top: 6px; font-size: 1rem; }
 
 .empty { padding: 36px 20px; border: 1px dashed var(--axis); border-radius: var(--radius); text-align: center; }

@@ -92,6 +92,15 @@ test("an inventory-only report keeps its ranking and has no ΔW stats", () => {
   assert.deepEqual([model.deltaSummary.medianRank, model.deltaSummary.top], [null, null]);
 });
 
+test("a delta.csv left behind by an earlier run is flagged, not presented as this ranking's stats", () => {
+  const withoutStats = REPORT.ranking.map((r) => ({ ...r, effective_rank: "", sv_001: "" }));
+  assert.equal(buildWorkbench(REPORT).deltaUnranked, false);
+  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats }).deltaUnranked, true); // --inventory-only rerun
+  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats, delta: [] }).deltaUnranked, false);
+  const structural = { ...REPORT, ranking: REPORT.ranking.slice(0, 1) }; // only a T1 row: it never has stats
+  assert.equal(buildWorkbench(structural).deltaUnranked, false);
+});
+
 test("an empty report and an unknown tier or status are shown, not dropped", () => {
   const empty = buildWorkbench({ base: "a", suspect: "b", inventory: [], ranking: [], delta: [] });
   assert.deepEqual([empty.inventory.length, empty.ranking.length, empty.totalParams, empty.hasDelta], [0, 0, 0, false]);

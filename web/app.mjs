@@ -188,6 +188,15 @@ function emptyState(title, ...body) {
   return h('div', { class: 'empty' }, h('h3', null, title), body);
 }
 
+/** Shown wherever ΔW numbers appear when delta.csv is not the scan this ranking was computed from. */
+function staleDeltaNote(model) {
+  return model.deltaUnranked && h('p', { class: 'note warning' },
+    h('strong', null, 'delta.csv is not from the run that wrote this ranking. '),
+    'ranking.csv carries no ΔW stats, which is what ', h('code', null, '--inventory-only'), ' or a scan that stopped early writes, '
+    + 'and neither replaces a delta.csv left by an earlier run. The ΔW numbers shown may describe older weights; rerun llmscan without ',
+    h('code', null, '--inventory-only'), ' to refresh them.');
+}
+
 function tensorButton(t) {
   return h('button', {
     type: 'button', class: 'tensor-link', 'aria-current': String(t.name === state.selected),
@@ -308,6 +317,7 @@ function rankingView(model) {
   ];
   const columns = [COLUMNS.rank, COLUMNS.tier, COLUMNS.reason, COLUMNS.layer, COLUMNS.kind, COLUMNS.effectiveRank, COLUMNS.sv1];
   return [
+    staleDeltaNote(model),
     !model.hasDelta && h('p', { class: 'note' },
       h('strong', null, 'No ΔW stats. '),
       'delta.csv is missing or lists no tensor, so no row here has singular values behind it: '
@@ -443,6 +453,7 @@ function deltaView(model) {
   const listed = model.delta.filter((t) => t.status !== 'identical');
   const columns = [COLUMNS.name, COLUMNS.layer, COLUMNS.kind, COLUMNS.tier, COLUMNS.shape, COLUMNS.effectiveRank, COLUMNS.sv1, COLUMNS.gap];
   return [
+    staleDeltaNote(model),
     tiles,
     charts?.box ?? emptyState('No changed 2-D tensor to plot',
       h('p', null, 'delta.csv lists tensors, but none carries a usable effective rank: every scanned tensor is identical to base, or its stats are unusable.')),
@@ -490,6 +501,7 @@ function deltaFacts(model, t) {
   const ratio = kind && t.effectiveRank > 0 ? t.effectiveRank / kind.median : null;
   const peers = model.measured.filter((p) => p.kind === t.kind && p !== t && p.spectrum.length);
   return [
+    staleDeltaNote(model),
     h('dl', { class: 'facts' },
       fact('Effective rank', formatNumber(t.effectiveRank)),
       fact('σ₁', formatNumber(t.sv1)),

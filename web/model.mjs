@@ -144,6 +144,11 @@ export function buildWorkbench(report) {
     return t;
   });
 
+  // Every run rewrites ranking.csv, but only a completed scan rewrites delta.csv. A ranking without a single
+  // stat next to a delta.csv with stats for its tensors means the two come from different runs.
+  const rankedWithStats = (report.ranking ?? []).some((row) => (row.effective_rank ?? '') !== '' || (row.sv_001 ?? '') !== '');
+  const deltaUnranked = !rankedWithStats && ranking.some((t) => t.scanned && (t.effectiveRank != null || t.sv1 != null));
+
   const tierCounts = new Map(TIERS.map((t) => [t.id, 0]));
   for (const t of ranking) tierCounts.set(t.tier, (tierCounts.get(t.tier) ?? 0) + 1);
 
@@ -176,7 +181,7 @@ export function buildWorkbench(report) {
     base: report.base ?? '', suspect: report.suspect ?? '',
     baseName: shortName(report.base) || 'base', suspectName: shortName(report.suspect) || 'suspect',
     tensors, inventory, ranking, delta,
-    hasDelta: delta.length > 0,
+    hasDelta: delta.length > 0, deltaUnranked,
     tierCounts, statusCounts, statuses,
     kinds: [...kinds.values()].sort((a, b) => changedOf(b) - changedOf(a) || naturalCompare(a.kind, b.kind)),
     totalParams, identicalParams,
