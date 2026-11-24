@@ -401,6 +401,7 @@ class _OutputGeometry(NamedTuple):
     cosines: np.ndarray
     leading_axes: np.ndarray
     leading_angles: np.ndarray
+    extent: tuple[int, int]
 
 
 def _shared_space_switch(geometry: _OutputGeometry, members: np.ndarray,
@@ -455,7 +456,7 @@ def _shared_space_switch(geometry: _OutputGeometry, members: np.ndarray,
 
 def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angles: np.ndarray,
                        overlap: np.ndarray, directions: dict[str, np.ndarray] | None,
-                       bases: list[np.ndarray], factor: float) -> dict[str, str]:
+                       bases: list[np.ndarray], factor: float, extent: tuple[int, int]) -> dict[str, str]:
     """Locate isolated changes in all modes or in the complement of a stable edit space."""
     width = bases[0].shape[0]
     floor = math.sqrt(2 * width * math.ulp(1.))
@@ -466,7 +467,7 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
     for i, name in enumerate(names):
         if directions and name in directions and directions[name].shape == (width,):
             axes[i] = directions[name]
-    geometry = _OutputGeometry(bases, overlap, axes, np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.)))
+    geometry = _OutputGeometry(bases, overlap, axes, np.arccos(np.clip(np.abs(axes @ axes.T), 0., 1.)), extent)
     for i, (labels, widths, spread) in enumerate(_subspace_groups(ids, angles, layer_count, factor, floor)):
         # A resolved leading axis uses the finest partition. A coarser one
         # can establish a collective switch by separating every changing mode.
@@ -529,6 +530,9 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
     for label in np.flatnonzero(sizes < sizes.max()):
         within = widths[label]
         members = labels == label
+        # A run touching a filtered endpoint has an unmeasured outer boundary.
+        if (members[0] and ids[0] > geometry.extent[0]) or (members[-1] and ids[-1] < geometry.extent[1]):
+            continue
         switches = members[:-1] != members[1:]
         if not adjacent[switches].all() or (switches.sum() == 1 and not adjacent.all()):
             continue
@@ -591,7 +595,8 @@ def _subspace_cohorts(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
         if ranks.max() == 1 and directions and all(n in directions for n in names):
             continue  # The direction signal already calibrates this pure leading-axis cohort.
         overlap = _principal_cosines(bases)
-        yield ids, names, bases, overlap, len(layers), True
+        extent = min(layers), max(layers)
+        yield ids, names, bases, overlap, len(layers), extent, True
         # Containment agrees only on the paired modes. A line inside two
         # distinct planes supplies no vote about their secondary directions.
         # Retain physical layer IDs so missing modes cannot invent a boundary.
@@ -601,7 +606,7 @@ def _subspace_cohorts(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
                 break
             count = sum(any(subspaces[n].shape[1] >= rank for n in group) for group in layers.values())
             yield ([ids[i] for i in keep], [names[i] for i in keep], [bases[i] for i in keep],
-                   overlap[:, keep[:, None], keep], count, False)
+                   overlap[:, keep[:, None], keep], count, extent, False)
 
 
 def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float,
@@ -611,7 +616,7 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
     """Refine leading-axis findings using the resolved spaces in the same output coordinates."""
     leading = dict(direction_flags or {})
     findings = {}
-    for ids, names, bases, overlap, layer_count, full in _subspace_cohorts(rows, subspaces, directions):
+    for ids, names, bases, overlap, layer_count, extent, full in _subspace_cohorts(rows, subspaces, directions):
         width = bases[0].shape[0]
         ranks = np.array([q.shape[1] for q in bases])
         angles = np.arccos(np.clip(np.nanmin(overlap, axis=0), 0., 1.))
@@ -619,7 +624,7 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
         agreement = angles <= math.acos(0.9)
         if len(overlap) > 1:
             findings.update(_subspace_switches(ids, names, layer_count, angles, overlap,
-                                               directions, bases, factor))
+                                               directions, bases, factor, extent))
         supporters = agreement[np.argmax(agreement.sum(axis=1))]
         if supporters.sum() <= layer_count / 2:
             # A repeated space can itself be exceptional among otherwise

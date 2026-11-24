@@ -836,6 +836,25 @@ class TestAnomalySignals(unittest.TestCase):
                 flagged = {r.layer for r in ranked if r.tier == "T3" and r.layer in terminal}
                 self.assertEqual(flagged, terminal if measured else set())
 
+    def test_cohort_endpoints_require_observations_of_the_switched_modes(self):
+        rows = [row(layer_name(i)) for i in range(21)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        eye = np.eye(6)
+        for reverse, measured in product([True, False], repeat=2):
+            with self.subTest(reverse=reverse, measured=measured):
+                spaces, run = {}, set()
+                for r in rows:
+                    i = len(rows) - 1 - r.layer if reverse else r.layer
+                    modes = [0, 1]
+                    if 13 <= i < 18:
+                        modes = [0, 2]
+                        run.add(r.layer)
+                    elif i >= 18 and not measured:
+                        modes = [0]
+                    spaces[r.name] = eye[:, modes]
+                found = subspace_outliers(rows, spaces, 3., stats)
+                self.assertEqual(set(found), {layer_name(i) for i in run} if measured else set())
+
     def test_two_moving_modes_with_an_intermittently_resolved_shared_mode(self):
         rows = [row(layer_name(i)) for i in range(19)]
         run = set(range(6, 11))
