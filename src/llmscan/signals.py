@@ -708,14 +708,15 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
         reference = bases[peers[widths.argmin()]]
         yield [reference if a <= radius else None for a in angles[:, peers].max(axis=1)], "majority space"
 
-    # A gap between two minority runs does not supply an ordinary one-layer
-    # rate. Compare the average rate across each gap to the observed rates.
+    # Directly observed steps may accelerate. Only an unobserved span needs
+    # its average speed checked against ordinary motion.
     gaps = np.diff(np.asarray(ids)[peers])
     rates = within.diagonal(1) / gaps
     consecutive = rates[gaps == 1]
     floor = math.sqrt(2 * bases[0].shape[0] * math.ulp(1.))
-    if (not len(consecutive) or widths.min() <= floor
-            or rates.max() > min(radius, factor * max(floor, _ordinary_step(consecutive)))):
+    if not len(consecutive) or widths.min() <= floor or rates.max() > radius:
+        return
+    if np.any(rates[gaps > 1] > factor * max(floor, _ordinary_step(consecutive))):
         return
 
     references = []

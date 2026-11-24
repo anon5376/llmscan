@@ -974,6 +974,24 @@ class TestAnomalySignals(unittest.TestCase):
                 findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
                 self.assertEqual(set(findings), {layer_name(i) for i in range(9, 23)} if abrupt else set())
 
+    def test_observed_acceleration_away_from_an_expansion_preserves_its_reference(self):
+        eye = np.eye(4)
+        rows = [row(layer_name(i)) for i in range(36)]
+        for reverse in [False, True]:
+            with self.subTest(reverse=reverse):
+                spaces, spectra, expected = {}, {}, set()
+                for r in rows:
+                    depth = 35 - r.layer if reverse else r.layer
+                    angle = np.radians(depth + 0.25 * max(0, depth - 24)**2)
+                    axis = np.cos(angle) * eye[0] + np.sin(angle) * eye[1]
+                    expanded = 9 <= depth < 14
+                    spaces[r.name] = np.column_stack((axis, eye[2])) if expanded else axis[:, None]
+                    values = [10., 5.] if expanded else [10.]
+                    spectra[r.name] = core.OutputSpectrum(np.array(values), 0., 1., 1.)
+                    if expanded:
+                        expected.add(r.name)
+                self.assertEqual(set(subspace_outliers(rows, spaces, 3., spectra=spectra)), expected)
+
     def test_an_abrupt_change_between_majority_regimes_is_not_a_drifting_reference(self):
         eye = np.eye(5)
         rows = [row(layer_name(i)) for i in range(30)]
