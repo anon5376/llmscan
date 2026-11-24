@@ -286,8 +286,8 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      layers in the same regime, allowing for their dispersion. With fewer than eight
      such steps the scanner compares against their maximum. If every observed pair
      changes regime, it uses the largest within-regime diameter outside the candidate.
-     A separately measured leading axis that
-     stays within the coherence radius and moves much less than the space as a whole
+     A separately measured leading axis that stays within the coherence radius and
+     moves much less than the space as a whole across a single observed switch
      is checked for stability as part of a secondary switch.
      A secondary-mode switch can also preserve one or more axes. When leading axes are
      unresolved, the scanner estimates the shared space inside a candidate layer by

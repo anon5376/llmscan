@@ -473,7 +473,7 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
 
 
 def _whole_space_switch(geometry: _OutputGeometry, angles: np.ndarray, members: np.ndarray,
-                        background: np.ndarray, same: np.ndarray, adjacent: np.ndarray, switches: np.ndarray,
+                        same: np.ndarray, adjacent: np.ndarray, switches: np.ndarray,
                         limit: float, floor: float, factor: float) -> str | None:
     outside = members[:, None] & ~members
     closest = math.acos(min(1., geometry.cosines[0][outside].max()))
@@ -481,9 +481,14 @@ def _whole_space_switch(geometry: _OutputGeometry, angles: np.ndarray, members: 
         return None
     # A nearly shared, independently measured leading edit can move at the
     # same boundary as a much larger secondary change. Retain the stability
-    # check for that leading axis, including when some measurements are absent.
-    near_primary = geometry.leading_angles <= np.minimum(math.acos(0.9), angles / factor)
-    if near_primary[np.ix_(members, background)].any() or near_primary.diagonal(1)[switches].any():
+    # check when consecutive leading-axis observations bracket one switch.
+    sampled = np.flatnonzero(np.isfinite(geometry.leading_angles.diagonal()))
+    runs = np.r_[0, np.cumsum(switches)]
+    left, right = sampled[:-1], sampled[1:]
+    crossing = runs[right] - runs[left] == 1
+    left, right = left[crossing], right[crossing]
+    tolerance = np.minimum(math.acos(0.9), angles[left, right] / factor)
+    if np.any(geometry.leading_angles[left, right] <= tolerance):
         return None
     # Compare the weakest moving mode at each boundary with ordinary steps
     # outside the group. A large jump in one mode cannot vouch for the others.
@@ -523,7 +528,7 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
             continue
         outside = members[:, None] & ~members
         limit = factor * max(floor, within)
-        evidence = _whole_space_switch(geometry, angles, members, background, same, adjacent,
+        evidence = _whole_space_switch(geometry, angles, members, same, adjacent,
                                        switches, limit, floor, factor)
         if evidence is not None:
             switch = "whole output subspace"

@@ -824,6 +824,21 @@ class TestAnomalySignals(unittest.TestCase):
         found = subspace_outliers(rows, spaces, 3., stats)
         self.assertEqual(set(found), {r.name for r in rows if r.layer % 2})
 
+    def test_distant_similar_leading_axes_with_orthogonal_boundary_axes(self):
+        rows = [row(layer_name(i)) for i in range(20)]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        eye = np.eye(4)
+        group = set(range(7, 12))
+        rotation = np.radians([16., 80.])
+        changed = eye[:, :2] * np.cos(rotation) + eye[:, 2:] * np.sin(rotation)
+        spaces = {r.name: changed if r.layer in group else eye[:, :2] for r in rows}
+        axes = {r.name: spaces[r.name][:, int(r.layer in (6, 12))] for r in rows}
+        for observed, expected in [(range(20), group), ([3, 6, 9, 12, 18], group), ([4, 9, 15], set())]:
+            with self.subTest(observed=observed):
+                samples = {layer_name(i): axes[layer_name(i)] for i in observed}
+                found = subspace_outliers(rows, spaces, 3., stats, samples)
+                self.assertEqual(set(found), {layer_name(i) for i in expected})
+
     def test_whole_space_switch_compares_weakest_boundary_mode_with_outside_steps(self):
         rows = [row(layer_name(i)) for i in range(32)]
         stats = {r.name: Measurements(2., 1.) for r in rows}
