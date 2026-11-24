@@ -56,6 +56,21 @@ class OutputSpectrum(NamedTuple):
         # Retained and omitted terms act on orthogonal right singular spaces.
         return lower, math.hypot(lower, self.omitted), unpaired
 
+    def outside_continuation(self, anchor: np.ndarray, basis: np.ndarray, angle: float) -> float:
+        """Strength guaranteed outside any anchor-rank plane within the angular allowance."""
+        rank = anchor.shape[1]
+        best_rank_residual = np.partition(self.retained, -rank-1)[-rank-1]
+        if angle >= math.pi / 2:
+            return float(best_rank_residual)
+        residual = basis - anchor @ (anchor.T @ basis)
+        outside = np.linalg.norm(residual * self.retained, ord=2)
+        # On the input attaining this norm, the parallel response is bounded
+        # by Pythagoras. Rotating the plane toward that response by 'angle'
+        # still leaves this much outside it. Any rank-p fit also leaves s[p].
+        largest = self.retained.max()
+        parallel = math.sqrt(max(0., (largest - outside) * (largest + outside)))
+        return float(max(best_rank_residual, math.cos(angle) * outside - math.sin(angle) * parallel))
+
 
 class DeltaStats(NamedTuple):
     singular_values: np.ndarray

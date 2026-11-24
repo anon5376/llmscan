@@ -289,6 +289,10 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      spaces. Each step must retain the incoming plane within the ordinary
      angular step allowance. The incoming plane measures complement strength
      before its projection into the layer supplies the next reference.
+     In both cases, an independent majority observation bounds how much
+     strength could come from a turn hidden inside the measured space.
+     The angular allowance covers ordinary motion over that distance and
+     the largest majority turn observed at the same distance.
      In a short segment a single resolved amplitude jump can separate two levels
      when every remaining step is smaller by the outlier factor and those steps
      form a strict majority. Repeated amplitude changes still set the step scale.

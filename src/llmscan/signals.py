@@ -702,6 +702,7 @@ class _ExpansionReference(NamedTuple):
     basis: np.ndarray
     # Relative operator-norm allowance from the held-out endpoint forecasts.
     uncertainty: float = 0.
+    supported_strength: float = math.inf
 
 
 def _majority_envelope(bases: list[np.ndarray], peers: np.ndarray, tolerance: float,
@@ -734,6 +735,10 @@ def _majority_envelope(bases: list[np.ndarray], peers: np.ndarray, tolerance: fl
         cosines = np.linalg.svd(frame.T @ basis, compute_uv=False)
         paired = min(p, basis.shape[1])
         references.append(_ExpansionReference(frame) if cosines[paired-1] >= math.cos(radius) else None)
+    for i in peers:
+        overlap = frames[i].T @ bases[i]
+        if np.linalg.svd(overlap, compute_uv=False).min() < math.cos(tolerance):
+            return None
     return references
 
 
@@ -811,7 +816,8 @@ def _endpoint_references(ids: list[int], bases: list[np.ndarray], peers: np.ndar
 
 
 def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.ndarray,
-                          peers: np.ndarray, factor: float) -> Iterator[tuple[list[_ExpansionReference | None], str]]:
+                          peers: np.ndarray, factor: float, spectra: list[OutputSpectrum | None]
+                          ) -> Iterator[tuple[list[_ExpansionReference | None], str]]:
     """Compare a common plane and a locally predicted trajectory of the majority rank."""
     radius = math.acos(0.9)
     within = angles[np.ix_(peers, peers)]
@@ -838,10 +844,26 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     # supplies no independent evidence for tracking rather than jitter.
     if widths.min() > np.median(consecutive) + floor:
         limit = min(radius, factor * ordinary)
-        yield _tracked_references(ids, bases, peers, angles, limit), "tracked majority space"
-        envelope = _majority_envelope(bases, peers, max(floor, min(radius, ordinary) / factor), radius)
-        if envelope is not None:
-            yield envelope, "majority ambient span"
+        frames = _majority_envelope(bases, peers, max(floor, min(radius, ordinary) / factor), radius)
+        description = "majority ambient span"
+        if frames is None:
+            frames = _tracked_references(ids, bases, peers, angles, limit)
+            description = "tracked majority space"
+        # A measured superset can hide ordinary rotation *inside* it. Bound
+        # the evidence against continuations from an independent majority
+        # observation, even if the projected path itself appears stationary.
+        p = bases[peers[0]].shape[1]
+        horizons = np.abs(depths[peers, None] - depths[peers])
+        for i, (basis, spectrum) in enumerate(zip(bases, spectra)):
+            if basis.shape[1] <= p or spectrum is None or frames[i] is None:
+                continue
+            distances = abs(depths[peers] - ids[i])
+            depth = distances.min()
+            motion = max(depth * ordinary, within[horizons == depth].max(initial=0.))
+            strength = min(spectrum.outside_continuation(bases[j], basis, motion)
+                           for j in peers[distances == depth])
+            frames[i] = frames[i]._replace(supported_strength=strength)
+        yield frames, description
 
     references = []
     errors = []
@@ -912,6 +934,7 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
         ratio = spectrum.scale / scale
         reference = references[i]
         lo, hi, unpaired = spectrum.outside_bounds(reference.basis, bases[i], p)
+        unpaired = min(unpaired, reference.supported_strength)
         margin = reference.uncertainty * spectrum.retained.max()
         lower[i], upper[i], extra[i], noise[i] = ratio * np.array(
             [max(0., lo - margin), hi + margin, max(0., unpaired - margin), spectrum.noise])
@@ -974,7 +997,8 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
         return {}
     factor = max(1., factor)
     findings = {}
-    for references, description in _expansion_references(ids, bases, angles, peers, factor):
+    for references, description in _expansion_references(ids, bases, angles, peers, factor,
+                                                         [spectra.get(n) for n in names]):
         findings.update(_expansions_against(ids, names, bases, ranks, p, references, description,
                                              layer_count, extent, spectra, factor))
     return findings

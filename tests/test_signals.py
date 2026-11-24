@@ -1044,6 +1044,29 @@ class TestAnomalySignals(unittest.TestCase):
         self.assertAlmostEqual(spectrum.outside_bounds(eye[:, :3], basis, 2)[2], 3.)
         self.assertAlmostEqual(spectrum.outside_bounds(eye[:, :4], basis, 2)[2], 0.)
 
+    def test_unresolved_constant_axis_becomes_visible_during_an_ordinary_turn(self):
+        rows = [row(layer_name(i)) for i in range(31)]
+        eye = np.eye(34)
+        for path, reverse in product(["in span", "wandering"], [False, True]):
+            wandering = path == "wandering"
+            with self.subTest(path=path, reverse=reverse):
+                axes = self.wandering_axes(eye, len(rows), wandering)
+                spaces, spectra = {}, {}
+                for r in rows:
+                    i = 30 - r.layer if reverse else r.layer
+                    axis = axes[min(i, 24)]
+                    # The singular values stay constant as the strong axis
+                    # takes two ordinary steps toward the newly resolved one.
+                    turn = np.radians(7. * max(0, min(2, i - 24)))
+                    direction = eye[-1] if wandering else -axis[1] * eye[0] + axis[0] * eye[1]
+                    a = np.cos(turn) * axis + np.sin(turn) * direction
+                    b = -np.sin(turn) * axis + np.cos(turn) * direction
+                    edit = 50. * np.outer(a, a) + 2. * np.outer(b, b)
+                    m = core.analyze_delta(0. * eye, edit, 1, 2.1 if i < 25 else .25)
+                    spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+                self.assertEqual({s.shape[1] for s in spaces.values()}, {1, 2})
+                self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
+
     def test_endpoint_forecast_error_at_the_same_physical_horizon(self):
         ids = [*range(11), 11, 14, 22]
         eye = np.eye(3)
