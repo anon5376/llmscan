@@ -483,9 +483,9 @@ def _whole_space_switch(geometry: _OutputGeometry, angles: np.ndarray, members: 
     # same boundary as a much larger secondary change. Retain the stability
     # check when consecutive leading-axis observations bracket one switch.
     sampled = np.flatnonzero(np.isfinite(geometry.leading_angles.diagonal()))
-    runs = np.r_[0, np.cumsum(switches)]
+    runs = np.r_[0, np.cumsum(~(adjacent & same.diagonal(1)))]
     left, right = sampled[:-1], sampled[1:]
-    crossing = runs[right] - runs[left] == 1
+    crossing = (runs[right] - runs[left] == 1) & (members[left] != members[right])
     left, right = left[crossing], right[crossing]
     tolerance = np.minimum(math.acos(0.9), angles[left, right] / factor)
     if np.any(geometry.leading_angles[left, right] <= tolerance):

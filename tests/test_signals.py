@@ -839,6 +839,24 @@ class TestAnomalySignals(unittest.TestCase):
                 found = subspace_outliers(rows, spaces, 3., stats, samples)
                 self.assertEqual(set(found), {layer_name(i) for i in expected})
 
+    def test_sparse_leading_samples_must_span_a_single_partition_boundary(self):
+        rows = [row(layer_name(i)) for i in range(24)]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        eye = np.eye(6)
+        rotation = np.radians([16., 80.])
+        second = eye[:, :2] * np.cos(rotation) + eye[:, 2:4] * np.sin(rotation)
+        first_run = {4, 5, 6}
+        for start, detected in [(7, False), (12, True)]:
+            with self.subTest(start=start):
+                second_run = set(range(start, start + 3))
+                spaces = {r.name: eye[:, 4:] for r in rows}
+                spaces.update({layer_name(i): eye[:, :2] for i in first_run})
+                spaces.update({layer_name(i): second for i in second_run})
+                axes = {layer_name(5): eye[:, 0], layer_name(start + 1): second[:, 0]}
+                found = subspace_outliers(rows, spaces, 3., stats, axes)
+                expected = first_run | second_run if detected else set()
+                self.assertEqual(set(found), {layer_name(i) for i in expected})
+
     def test_whole_space_switch_compares_weakest_boundary_mode_with_outside_steps(self):
         rows = [row(layer_name(i)) for i in range(32)]
         stats = {r.name: Measurements(2., 1.) for r in rows}
