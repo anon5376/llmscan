@@ -160,8 +160,9 @@ your own run, choose **Import report folder** and pick `out/<suspect>-vs-<base>/
 page, or pick its files.
 
 - **Ranking:** `ranking.csv`, most suspicious first, filtered by tier or text. Selecting a tensor shows its
-  reason, what its tier means, the base and suspect shape and dtype, and its singular values drawn over the
-  other changed tensors of the same kind.
+  reason, what its tier means, the base and suspect shape and dtype, the median the ranking judged it by, and
+  its singular values drawn over the other changed tensors of its kind. Kinds are grouped as the ranking
+  groups them: MoE expert and shared-expert down projections count as one.
 - **Inventory:** every tensor by status and kind, with a kind-by-status table that filters the list.
 - **ΔW stats:** effective rank by layer and singular values by kind, in the colours of `effective_rank.png`
   and `spectra.png`, above a sortable table of `delta.csv`. A folder written with `--inventory-only` has no

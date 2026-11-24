@@ -141,7 +141,15 @@ main[aria-busy="true"] { opacity: 0.6; }
 
 /* ---------------------------------------------------------------- tabs and workspace */
 
-.tabs { display: flex; gap: 4px; margin-top: 24px; border-bottom: 1px solid var(--grid); overflow-x: auto; scrollbar-width: none; }
+/* The strip scrolls when it is too narrow for its tabs; a shadow on an edge says there is a tab beyond it. */
+.tabs {
+  display: flex; gap: 4px; margin-top: 24px; border-bottom: 1px solid var(--grid); overflow-x: auto; scrollbar-width: none;
+  background:
+    linear-gradient(var(--surface), var(--surface)) left / 20px 100% no-repeat local,
+    linear-gradient(var(--surface), var(--surface)) right / 20px 100% no-repeat local,
+    linear-gradient(to right, rgb(11 11 11 / 0.22), transparent) left / 14px 100% no-repeat scroll,
+    linear-gradient(to left, rgb(11 11 11 / 0.22), transparent) right / 14px 100% no-repeat scroll;
+}
 .tabs [role="tab"] {
   display: inline-flex; align-items: center; gap: 8px; flex: none; padding: 10px 14px; cursor: pointer;
   background: none; border: 0; border-bottom: 3px solid transparent; color: var(--ink-2); font-weight: 600;
@@ -231,6 +239,13 @@ table.compact tbody th { font-weight: 400; }
 
 .matrix { background: var(--card); border: 1px solid var(--grid); border-radius: var(--radius); }
 .matrix summary { padding: 9px 14px; font-weight: 600; cursor: pointer; }
+.matrix .picked {
+  position: sticky; top: 57px; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  padding: 8px 14px; background: var(--wash); border-top: 1px solid var(--grid); font-size: 0.92rem;
+}
+.matrix .picked span { flex: 1 1 14rem; }
+.matrix .picked .button { min-height: 32px; padding: 3px 10px; font-size: 0.87rem; }
+.count:focus { outline: none; }
 .matrix .table-wrap { border: 0; border-top: 1px solid var(--grid); border-radius: 0 0 var(--radius) var(--radius); }
 
 .pager { display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--ink-2); font-size: 0.9rem; }
@@ -240,6 +255,7 @@ table.compact tbody th { font-weight: 400; }
 }
 @media (max-width: 760px) {
   .topbar { position: static; }
+  .matrix .picked { top: 0; }
   .tabs [role="tab"] { padding: 10px 8px; gap: 5px; }
   .tier-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .optional { display: none; }
@@ -247,6 +263,13 @@ table.compact tbody th { font-weight: 400; }
   .grow { min-width: 0; }
   .field input { width: 100%; }
   .field { flex: 1 1 100%; }
+}
+@media (max-width: 400px) {
+  .tabs { gap: 0; }
+  .tabs [role="tab"] { padding: 10px 6px; gap: 4px; font-size: 0.9rem; }
+}
+@media (pointer: coarse) {
+  .button { min-height: 44px; }
 }
 
 /* ---------------------------------------------------------------- charts */
@@ -271,14 +294,15 @@ table.compact tbody th { font-weight: 400; }
 
 .detail-body { display: grid; gap: 14px; padding: 16px; }
 .detail-bar { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+dialog.detail .detail-steps {
+  position: sticky; top: 0; z-index: 1; justify-content: flex-end; margin: -16px -16px 0; padding: 8px 16px;
+  background: var(--card); border-bottom: 1px solid var(--grid);
+}
+dialog.detail .detail-steps .button { min-height: 44px; }
 .detail-rank { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; color: var(--ink-2); font-size: 0.87rem; }
 .detail-rank .tier { flex-wrap: wrap; white-space: normal; }
 .detail-steps { display: flex; flex: none; gap: 6px; } /* stays put while stepping, whatever the tier label's length */
 .detail-steps .button { min-height: 32px; padding: 3px 10px; font-size: 0.87rem; }
-@media (max-width: 760px) { /* the controls get their own row above the tier and rank */
-  .detail-bar { flex-direction: column-reverse; align-items: stretch; }
-  .detail-steps { justify-content: flex-end; }
-}
 .tensor-name { font-size: 1rem; line-height: 1.4; overflow-wrap: anywhere; }
 .tensor-name:focus { outline: none; }
 .detail section { display: grid; gap: 6px; padding-top: 12px; border-top: 1px solid var(--grid); }
@@ -290,7 +314,8 @@ table.compact tbody th { font-weight: 400; }
 .placeholder { padding: 24px 8px; color: var(--ink-2); text-align: center; }
 
 dialog.detail {
-  width: min(640px, calc(100vw - 16px)); max-height: calc(100vh - 32px); padding: 0;
+  width: min(640px, calc(100vw - 16px)); max-width: none; max-height: calc(100vh - 32px); padding: 0;
   background: var(--card); color: var(--ink); border: 1px solid var(--axis); border-radius: 14px;
 }
+dialog.detail:focus { outline: none; }
 dialog.detail::backdrop { background: rgb(11 11 11 / 0.45); }

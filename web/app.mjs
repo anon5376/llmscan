@@ -3,7 +3,7 @@ import { readReport } from './report.mjs';
 import { h } from './dom.mjs';
 import {
   MIN_GROUP, TIERS, buildWorkbench, canonicalKind, filterTensors, formatCount, formatNumber, formatPercent, formatShape,
-  pageOf, plural, sortTensors, statusLabel, tierInfo,
+  pageOf, plural, shapeCount, sortTensors, statusLabel, tierInfo,
 } from './model.mjs';
 import {
   extent, kindOrder, kindSpectraChart, layerGradient, PALETTE, rankByLayerChart, spectrumDomain, spectrumRuns, tensorSpectrumChart,
@@ -53,6 +53,7 @@ function showNotice(title, message) {
 
 async function load(source, getFiles) {
   const controls = document.querySelectorAll('[data-action]');
+  const trigger = document.activeElement;
   controls.forEach((b) => { b.disabled = true; });
   main.setAttribute('aria-busy', 'true');
   announce(`Reading ${source.label}…`);
@@ -72,6 +73,8 @@ async function load(source, getFiles) {
   } finally {
     controls.forEach((b) => { b.disabled = false; });
     main.removeAttribute('aria-busy');
+    // disabling the button that started the load took the focus off it
+    if (trigger !== document.body && document.activeElement === document.body) (trigger.isConnected ? trigger : main).focus();
   }
 }
 
@@ -86,8 +89,14 @@ async function demoFiles() {
 
 const openDemo = () => load({ demo: true, label: 'Demo report' }, demoFiles);
 
+/** Reached only by a confirmed choice: a cancelled picker fires no change event, so it stays silent. */
 function importFiles(files, folder) {
-  if (!files.length) return;
+  if (!files.length) {
+    showNotice('Nothing to import', `${folder ? `The folder ${folder}` : 'The folder or selection you chose'} holds no files, so there is no report to read.`
+      + (state.model ? ' The report on screen is unchanged.' : ''));
+    announce('Nothing to import: no files were chosen.');
+    return;
+  }
   const label = folder ? `Folder ${folder}` : `${files.length} selected file${files.length === 1 ? '' : 's'}`;
   load({ demo: false, label }, () => files);
 }
@@ -258,6 +267,10 @@ function pager(page, total, onPage) {
     step('Next', page.page + 1, page.page < page.pages - 1));
 }
 
+// inventory.csv has one numel per tensor, the base's; a tensor reshaped between the models has two counts
+const reshaped = (t) => t.baseDtype !== '' && t.suspectDtype !== '' && t.baseShape !== t.suspectShape;
+const parameterSides = (t) => [t.baseShape, t.suspectShape].map((shape) => formatCount(shapeCount(shape)));
+
 const SORT_NAMES = { tier: 'tier', name: 'tensor name', layer: 'layer', kind: 'kind', effectiveRank: 'effective rank', sv1: 'σ₁' };
 
 const COLUMNS = {
@@ -273,7 +286,7 @@ const COLUMNS = {
     cell: (t) => (t.suspectShape && t.baseShape && t.suspectShape !== t.baseShape
       ? `${formatShape(t.baseShape)} → ${formatShape(t.suspectShape)}` : formatShape(t.baseShape || t.suspectShape)),
   },
-  numel: { key: 'numel', label: 'Parameters', class: 'num optional', first: 'desc', cell: (t) => formatCount(t.numel) },
+  numel: { key: 'numel', label: 'Parameters', class: 'num optional nowrap', first: 'desc', cell: (t) => (reshaped(t) ? parameterSides(t).join(' → ') : formatCount(t.numel)) },
   effectiveRank: { key: 'effectiveRank', label: 'Eff. rank', class: 'num', first: 'desc', cell: (t) => formatNumber(t.effectiveRank) },
   sv1: { key: 'sv1', label: 'σ₁', class: 'num optional', first: 'desc', cell: (t) => formatNumber(t.sv1) },
   gap: { key: 'gap', label: 'σ₁ / σ₂', class: 'num optional', first: 'desc', cell: (t) => formatNumber(t.gap) },
@@ -366,7 +379,7 @@ function rankingView(model) {
   ];
 }
 
-function kindMatrix(model, view, rerender) {
+function kindMatrix(model, view, rerender, picked) {
   const cell = (k, status) => {
     const count = k.counts.get(status) ?? 0;
     if (!count) return h('td', { class: 'num zero' }, '0');
@@ -380,6 +393,7 @@ function kindMatrix(model, view, rerender) {
   view.matrixOpen ??= wide.matches;
   return h('details', { class: 'matrix', open: view.matrixOpen, ontoggle: (event) => { view.matrixOpen = event.target.open; } },
     h('summary', null, 'Tensors by kind and status'),
+    picked,
     h('div', { class: 'table-wrap' }, h('table', { class: 'compact' },
       h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Kind'),
         model.statuses.map((s) => h('th', { scope: 'col', class: 'num' }, statusLabel(s))), h('th', { scope: 'col', class: 'num' }, 'Total'))),
@@ -403,14 +417,29 @@ function inventoryView(model) {
     kindSelect('inventory-kind', model.kinds.map((k) => k.kind), view.kind, (kind) => { view.kind = kind; view.page = 0; rerender(); }),
     searchBox('inventory-filter', view.query, (query) => { view.query = query; view.page = 0; state.refresh(); }),
   ];
+  // A count picked in the grid filters a list that starts below the fold: say so next to the grid, with a way there.
+  const picked = h('p', { class: 'picked', role: 'status' });
+  const cellPicked = () => view.kind !== '' && view.statuses.size === 1;
+  const toList = () => {
+    const count = document.getElementById('inventory-count');
+    count.scrollIntoView({ block: 'center' });
+    count.focus();
+  };
   return [
-    kindMatrix(model, view, rerender),
+    kindMatrix(model, view, rerender, picked),
     listing({
       controls,
       results: () => {
         const rows = filterTensors(model.inventory, view);
+        picked.hidden = !cellPicked();
+        picked.replaceChildren(...(cellPicked() ? [
+          h('span', null, 'The list below shows ', h('strong', null, plural(rows.length, 'tensor')), ': ', statusLabel([...view.statuses][0]), ' ', h('code', null, view.kind),
+            view.query && ` matching “${view.query}”`, '.'),
+          h('button', { type: 'button', class: 'button quiet', 'data-key': 'picked:list', onclick: toList }, 'Go to the list'),
+          h('button', { type: 'button', class: 'button quiet', 'data-key': 'picked:clear', onclick: () => { Object.assign(view, { statuses: new Set(), kind: '' }); rerender(); } }, 'Clear'),
+        ] : []));
         return [
-          h('p', { class: 'count', role: 'status' }, `${formatCount(rows.length)} of ${formatCount(model.inventory.length)} tensors`),
+          h('p', { class: 'count', role: 'status', id: 'inventory-count', tabindex: '-1' }, `${formatCount(rows.length)} of ${formatCount(model.inventory.length)} tensors`),
           resultsFor(view, rows, (pageRows, onSort) => tensorTable({ caption: 'Tensor inventory', columns, rows: pageRows, sort: view.sort, onSort }), {
             empty: 'No tensor has this combination of status, kind and text.',
             onClear: () => { Object.assign(view, { statuses: new Set(), kind: '', query: '' }); rerender(); },
@@ -441,7 +470,8 @@ function deltaCharts(model) {
     box.replaceChildren(
       h('figure', { class: 'card' },
         h('figcaption', null, h('h3', null, 'Effective rank of ΔW by layer'),
-          h('p', null, 'One line per matrix kind, side by side within a layer. A rank-1 edit scores 1; r equal directions score r. Select a point to open its tensor.')),
+          h('p', null, 'One line per matrix kind, side by side within a layer. A rank-1 edit scores 1; r equal directions score r. '
+            + 'Select a point to open its tensor; the table below opens the same tensors from the keyboard.')),
         byLayer ? [byLayer.chart, h('ul', { class: 'legend' }, byLayer.legend.map(({ kind, color }) =>
           h('li', null, h('span', { class: 'swatch', style: { background: color } }), h('code', null, kind))))]
           : h('p', { class: 'note' }, 'No changed tensor in this report belongs to a numbered layer.'),
@@ -483,9 +513,18 @@ function deltaView(model) {
   state.redrawCharts = charts?.draw ?? null;
   const listed = model.delta.filter((t) => t.status !== 'identical');
   const columns = [COLUMNS.name, COLUMNS.layer, COLUMNS.kind, COLUMNS.tier, COLUMNS.shape, COLUMNS.effectiveRank, COLUMNS.sv1, COLUMNS.gap];
+  const unscanned = model.inventory.filter((t) => !t.scanned);
+  const structural = unscanned.filter(isStructural).length;
   return [
     staleDeltaNote(model),
     tiles,
+    unscanned.length > 0 && h('p', { class: 'note' },
+      h('strong', null, `${plural(unscanned.length, 'tensor')} of the ${formatCount(model.inventory.length)} compared ${unscanned.length === 1 ? 'is' : 'are'} not in delta.csv. `),
+      'The scan covers 2-D float tensors that both models have with the same shape, so '
+      + [structural > 0 && `${formatCount(structural)} structural ${structural === 1 ? 'mismatch' : 'mismatches'} (missing, added, reshaped or retyped)`,
+        unscanned.length > structural && `${plural(unscanned.length - structural, 'tensor')} that ${unscanned.length - structural === 1 ? 'is not a 2-D float matrix' : 'are not 2-D float matrices'}`,
+      ].filter(Boolean).join(' and ')
+      + ' have no ΔW stats. The Ranking and Inventory tabs still list them.'),
     charts?.box ?? emptyState('No changed 2-D tensor to plot',
       h('p', null, 'delta.csv lists tensors, but none carries a usable effective rank: every scanned tensor is identical to base, or its stats are unusable.')),
     listed.length > 0 && h('h3', { class: 'section-title' }, 'Changed tensors in delta.csv'),
@@ -558,16 +597,21 @@ function detailContent(model, t, { modal }) {
   const index = state.rows.indexOf(t);
   const step = (label, direction, to) => h('button', {
     type: 'button', class: 'button quiet', 'data-step': direction, disabled: to == null,
-    onclick: () => { select(to.name, { open: true }); document.querySelector(`${modal ? '#detail-dialog' : '#detail'} [data-step="${direction}"]`)?.focus(); },
+    onclick: () => {
+      select(to.name, { open: true });
+      // the panel was redrawn: stay on this control, or at the end of the list on the one that still leads somewhere
+      const scope = modal ? dialog : document.getElementById('detail');
+      (scope.querySelector(`[data-step="${direction}"]:enabled`) ?? scope.querySelector('[data-step]:enabled') ?? scope.querySelector('.tensor-name')).focus();
+    },
   }, label);
   const tier = t.tier ? tierInfo(t.tier) : null;
+  const rank = h('p', { class: 'detail-rank' }, tierBadge(t.tier, { full: true }),
+    t.rank != null && h('span', { class: 'nowrap' }, `Rank ${formatCount(t.rank)} of ${formatCount(model.ranking.length)}`));
+  const steps = h('div', { class: 'detail-steps' },
+    index >= 0 && [step('Previous', 'previous', state.rows[index - 1]), step('Next', 'next', state.rows[index + 1])],
+    modal && h('button', { type: 'button', class: 'button quiet', onclick: () => dialog.close() }, 'Close'));
   return [
-    h('div', { class: 'detail-bar' },
-      h('p', { class: 'detail-rank' }, tierBadge(t.tier, { full: true }),
-        t.rank != null && h('span', { class: 'nowrap' }, `Rank ${formatCount(t.rank)} of ${formatCount(model.ranking.length)}`)),
-      h('div', { class: 'detail-steps' },
-        index >= 0 && [step('Previous', 'previous', state.rows[index - 1]), step('Next', 'next', state.rows[index + 1])],
-        modal && h('button', { type: 'button', class: 'button quiet', onclick: () => dialog.close() }, 'Close'))),
+    modal ? [steps, rank] : h('div', { class: 'detail-bar' }, rank, steps), // in the dialog the controls are a bar that stays in reach while scrolling
     h('h2', { class: 'tensor-name', id: modal ? 'detail-dialog-title' : 'detail-title', tabindex: '-1' }, breakable(t.name)),
     h('section', null,
       h('h3', null, t.tier ? 'Why it is ranked here' : 'Not ranked'),
@@ -584,10 +628,12 @@ function detailContent(model, t, { modal }) {
         fact('Layer', t.layer == null ? 'outside the layer stack' : String(t.layer)),
         fact('Shape', sides(t.baseShape, t.suspectShape, formatShape)),
         fact('Dtype', sides(t.baseDtype, t.suspectDtype)),
-        fact('Parameters', formatCount(t.numel)))),
+        fact('Parameters', reshaped(t) ? sides(...parameterSides(t)) : formatCount(t.numel)))),
     h('section', null, h('h3', null, 'ΔW = W suspect − W base'), deltaFacts(model, t)),
   ];
 }
+
+let openedFromRow = false;
 
 function renderDetail({ open = false } = {}) {
   const aside = document.getElementById('detail');
@@ -597,7 +643,10 @@ function renderDetail({ open = false } = {}) {
     : h('p', { class: 'placeholder' }, 'Select a tensor to see why it is ranked where it is, its shapes and its ΔW spectrum.')));
   if (wide.matches || !t || !(open || dialog.open)) return;
   dialog.replaceChildren(h('div', { class: 'detail-body' }, detailContent(state.model, t, { modal: true })));
-  if (!dialog.open) dialog.showModal();
+  if (dialog.open) return;
+  openedFromRow = document.activeElement.closest('tr[data-tensor]') != null;
+  dialog.showModal();
+  dialog.focus(); // the dialog, named by the tensor, not its first button
 }
 
 function select(name, { open = false } = {}) {
@@ -619,6 +668,13 @@ function select(name, { open = false } = {}) {
 
 // ---------------------------------------------------------------- page
 
+/** Scroll a tab strip that is too narrow for its tabs sideways, and only sideways, until `tab` is inside it. */
+function showInStrip(tab) {
+  const strip = tab.parentElement;
+  const at = tab.getBoundingClientRect(), within = strip.getBoundingClientRect();
+  strip.scrollLeft += Math.max(0, at.right - within.right) - Math.max(0, within.left - at.left);
+}
+
 function renderPanel() {
   const panel = document.getElementById('panel');
   state.refresh = null;
@@ -629,6 +685,7 @@ function renderPanel() {
     const active = tab.id === `tab-${state.tab}`;
     tab.setAttribute('aria-selected', String(active));
     tab.tabIndex = active ? 0 : -1;
+    if (active) showInStrip(tab);
   }
   renderDetail();
 }
@@ -640,8 +697,10 @@ function showTab(id, { focus = false } = {}) {
   if (focus) document.getElementById(`tab-${id}`).focus();
 }
 
+const isStructural = (t) => !['identical', 'changed'].includes(t.status);
+
 function summary(model, source) {
-  const structural = model.inventory.filter((t) => !['identical', 'changed'].includes(t.status)).length;
+  const structural = model.inventory.filter(isStructural).length;
   return h('section', { class: 'summary', 'aria-labelledby': 'pair-title' },
     h('div', { class: 'pair' },
       h('p', { class: 'eyebrow' }, h('span', { class: source.demo ? 'source demo' : 'source' }, source.demo ? 'Demo' : 'Imported'), source.label),
@@ -705,6 +764,17 @@ wide.addEventListener('change', () => {
   if (state.model) renderDetail();
 });
 dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+// Closing hands focus back to the row that opened the dialog; after Previous or Next the tensor shown is another row.
+dialog.addEventListener('close', () => { if (openedFromRow) main.querySelector('tr.selected .tensor-link')?.focus(); });
+// Tab moves round the dialog's controls instead of out to the browser's own, where Escape no longer reaches the dialog.
+dialog.addEventListener('keydown', (event) => {
+  if (event.key !== 'Tab') return;
+  const stops = [...dialog.querySelectorAll('button:enabled')];
+  const at = stops.indexOf(document.activeElement);
+  if (event.shiftKey ? at > 0 : at < stops.length - 1) return;
+  event.preventDefault();
+  stops.at(event.shiftKey ? -1 : 0)?.focus();
+});
 window.addEventListener('hashchange', () => {
   const id = location.hash.slice(1);
   if (state.model && id !== state.tab && TABS.some((tab) => tab.id === id)) showTab(id);

@@ -124,7 +124,7 @@ export function distanceToPath([px, py], points) {
   return nearest;
 }
 
-const REACH = 18; // CSS px around the pointer or fingertip in which a mark can be picked
+const REACH = 22; // CSS px around the pointer or fingertip in which a mark can be picked: a 44px touch target
 
 /**
  * A click picks the tensor of the mark nearest the pointer, and hovering shows which one that is, so a thin

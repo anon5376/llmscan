@@ -9,7 +9,7 @@ import {
 } from "../../web/charts.mjs";
 import {
   buildWorkbench, canonicalKind, filterTensors, formatNumber, formatPercent, median, naturalCompare, pageOf, parseNumber,
-  plural, shortName, sortTensors, tierInfo,
+  plural, shapeCount, shortName, sortTensors, tierInfo,
 } from "../../web/model.mjs";
 
 const WEB = new URL("../../web/", import.meta.url);
@@ -265,6 +265,8 @@ test("a pointer picks the nearest mark, and every panel of a report shares its a
   assert.deepEqual(domain.x.domain, [1, 4]);
   assert.deepEqual(domain.y.domain, [2e-6 / 1.6, 8 * 1.6]);
   assert.deepEqual([plural(1, "tensor"), plural(0, "kind"), plural(1200, "changed o_proj tensor")], ["1 tensor", "0 kinds", "1,200 changed o_proj tensors"]);
+  // inventory.csv carries the base's numel only: a reshaped tensor's two counts come from its two shapes
+  assert.deepEqual(["128x32", "130x32", "8", ""].map(shapeCount), [4096, 4160, 8, 1]);
 });
 
 test("the bundled demo loads through readReport into a complete workbench", async () => {

@@ -286,6 +286,11 @@ export function formatPercent(part, whole) {
   return whole > 0 ? `${(100 * part / whole).toFixed(2)}%` : '–';
 }
 
+/** Elements in a `128x32` shape; a scalar's shape is blank. */
+export function shapeCount(shape) {
+  return shape.split('x').filter(Boolean).reduce((count, size) => count * Number(size), 1);
+}
+
 export function formatShape(shape) {
   return shape ? shape.replaceAll('x', ' × ') : '–';
 }
