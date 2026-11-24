@@ -82,6 +82,34 @@ class TestCheckpointLayout(unittest.TestCase):
             self.assertEqual([f.name for f in c.files], ["model.safetensors"])
             np.testing.assert_array_equal(c.to_float32("x"), 1)
 
+    def test_prefers_primary_index_over_auxiliary_index(self):
+        primary = {"x": ("F32", np.ones((2, 2), np.float32))}
+        base = self.tmp / "base.safetensors"
+        suspect = self.tmp / "suspect"
+        write_safetensors(base, primary)
+        write_sharded(suspect, [primary])
+        write_safetensors(suspect / "adapter.safetensors", {"x": ("F32", np.zeros((2, 2), np.float32))})
+        (suspect / "adapter.safetensors.index.json").write_text('{"weight_map": {"x": "adapter.safetensors"}}')
+
+        out = self.tmp / "out"
+        code, _, err = run_cli("--base", str(base), "--suspect", str(suspect), "--out", str(out), "--inventory-only")
+        self.assertEqual(code, 0, err)
+        with (out / "inventory.csv").open() as f:
+            self.assertEqual([(r["name"], r["status"]) for r in csv.DictReader(f)], [("x", "identical")])
+
+    def test_uses_nonstandard_index_without_primary_index(self):
+        write_sharded(self.tmp, [{"x": ("F32", np.ones((2, 2), np.float32))}])
+        (self.tmp / "model.safetensors.index.json").rename(self.tmp / "custom.safetensors.index.json")
+        write_safetensors(self.tmp / "extra.safetensors", {"extra": ("F32", np.zeros(1, np.float32))})
+        with Checkpoint(self.tmp) as c:
+            self.assertEqual(set(c.tensors), {"x"})
+
+    def test_uses_loose_shards_without_index(self):
+        for name in ("x", "y"):
+            write_safetensors(self.tmp / f"{name}.safetensors", {name: ("F32", np.ones(1, np.float32))})
+        with Checkpoint(self.tmp) as c:
+            self.assertEqual(set(c.tensors), {"x", "y"})
+
     def test_tied_lm_head_is_set_aside(self):
         t = {"model.embed_tokens.weight": ("F32", np.ones((4, 2), np.float32)), "lm_head.weight": ("F32", np.ones((4, 2), np.float32))}
         write_safetensors(self.tmp / "model.safetensors", t)
