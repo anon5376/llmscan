@@ -209,7 +209,8 @@ tbody tr.selected, tbody tr.selected:hover { background: color-mix(in srgb, var(
 .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .narrow { width: 1%; }
 .nowrap { white-space: nowrap; }
-.grow { min-width: 15rem; }
+.grow { width: 99%; min-width: 15rem; } /* the name column takes the room the short columns leave */
+td:not(.grow) code { white-space: nowrap; }
 .zero { color: var(--muted); }
 table.compact th, table.compact td { padding: 5px 12px; }
 table.compact tbody th { font-weight: 400; }
@@ -269,9 +270,10 @@ circle.pick:hover { stroke: var(--ink); stroke-width: 2; }
 /* ---------------------------------------------------------------- tensor detail */
 
 .detail-body { display: grid; gap: 14px; padding: 16px; }
-.detail-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
-.detail-rank { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--ink-2); font-size: 0.87rem; }
-.detail-steps { display: flex; gap: 6px; }
+.detail-bar { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.detail-rank { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; color: var(--ink-2); font-size: 0.87rem; }
+.detail-rank .tier { flex-wrap: wrap; white-space: normal; }
+.detail-steps { display: flex; flex: none; gap: 6px; } /* stays put while stepping, whatever the tier label's length */
 .detail-steps .button { min-height: 32px; padding: 3px 10px; font-size: 0.87rem; }
 .tensor-name { font-size: 1rem; line-height: 1.4; overflow-wrap: anywhere; }
 .tensor-name:focus { outline: none; }

@@ -197,11 +197,16 @@ function staleDeltaNote(model) {
     h('code', null, '--inventory-only'), ' to refresh them.');
 }
 
+/** A tensor name that wraps after a dot, slash or underscore instead of in the middle of a word. */
+function breakable(name) {
+  return name.split(/(?<=[./_])/).flatMap((part, i) => (i ? [h('wbr'), part] : [part]));
+}
+
 function tensorButton(t) {
   return h('button', {
     type: 'button', class: 'tensor-link', 'aria-current': String(t.name === state.selected),
     onclick: (event) => { event.stopPropagation(); select(t.name, { open: true }); },
-  }, t.name);
+  }, breakable(t.name));
 }
 
 /** A sortable table of tensors. Clicking a row, or its name button, opens the tensor's detail. */
@@ -241,7 +246,7 @@ const COLUMNS = {
   tier: { key: 'tier', label: 'Tier', cell: (t) => tierBadge(t.tier) },
   reason: { key: 'name', label: 'Tensor and reason', class: 'grow', cell: (t) => [tensorButton(t), h('p', { class: 'reason' }, t.reason)] },
   name: { key: 'name', label: 'Tensor', class: 'grow', cell: tensorButton },
-  layer: { key: 'layer', label: 'Layer', class: 'num optional', cell: (t) => (t.layer == null ? '–' : String(t.layer)) },
+  layer: { key: 'layer', label: 'Layer', class: 'num roomy', cell: (t) => (t.layer == null ? '–' : String(t.layer)) },
   kind: { key: 'kind', label: 'Kind', class: 'optional', cell: (t) => h('code', null, t.kind || '–') },
   status: { key: 'status', label: 'Status', cell: (t) => statusBadge(t.status) },
   shape: {
@@ -506,7 +511,7 @@ function deltaFacts(model, t) {
       fact('Effective rank', formatNumber(t.effectiveRank)),
       fact('σ₁', formatNumber(t.sv1)),
       fact('σ₁ / σ₂', formatNumber(t.gap)),
-      kind && fact(['Median of ', formatCount(kind.count), ' changed ', h('code', null, t.kind)],
+      kind?.count > 1 && fact(['Median of ', formatCount(kind.count), ' changed ', h('code', null, t.kind)],
         [formatNumber(kind.median), ratio != null && Number.isFinite(ratio) && h('p', { class: 'fine' }, `this tensor is ${formatNumber(ratio)}× that`)])),
     t.spectrum.length > 0 && h('figure', null, tensorSpectrumChart(t, peers, PALETTE.ink),
       h('figcaption', { class: 'fine' }, `Top ${t.spectrum.length === 1 ? 'singular value' : `${t.spectrum.length} singular values`} of ΔW`
@@ -528,7 +533,7 @@ function detailContent(model, t, { modal }) {
       h('div', { class: 'detail-steps' },
         index >= 0 && [step('Previous', 'previous', state.rows[index - 1]), step('Next', 'next', state.rows[index + 1])],
         modal && h('button', { type: 'button', class: 'button quiet', onclick: () => dialog.close() }, 'Close'))),
-    h('h2', { class: 'tensor-name', id: modal ? 'detail-dialog-title' : 'detail-title', tabindex: '-1' }, t.name),
+    h('h2', { class: 'tensor-name', id: modal ? 'detail-dialog-title' : 'detail-title', tabindex: '-1' }, breakable(t.name)),
     h('section', null,
       h('h3', null, t.tier ? 'Why it is ranked here' : 'Not ranked'),
       t.tier
