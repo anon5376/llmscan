@@ -1,0 +1,2 @@
+base: synthetic/tiny-llama
+suspect: synthetic/tiny-llama-abliterated-tampered

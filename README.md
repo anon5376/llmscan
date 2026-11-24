@@ -146,6 +146,36 @@ scores a ranking against an answer key of planted tensor names; it rejects a ran
 `--outlier-factor` must be a finite number above 0. `ranking.csv` is written only into an `--out` that is new, empty
 or already marked for the same pair by `pair.txt`; llmscan never deletes or overwrites a `ranking.csv` it did not write.
 
+## Workbench
+
+`web/` is a local page for reading a finished comparison: the ranking with the reason behind every row, the
+tensor inventory, and the ΔW stats as tables and charts. From a clone:
+
+```sh
+python3 -m http.server 8000 --bind 127.0.0.1 --directory web   # then open http://127.0.0.1:8000/
+```
+
+It opens on a demo. `web/demo/` holds the output of a real llmscan run on two tiny synthetic checkpoints: an
+honest abliteration with six planted changes on top (`python web/demo/generate.py` regenerates it). To read
+your own run, choose **Import report folder** and pick `out/<suspect>-vs-<base>/`, drop that folder on the
+page, or pick its files.
+
+- **Ranking:** `ranking.csv`, most suspicious first, filtered by tier or text. Selecting a tensor shows its
+  reason, what its tier means, the base and suspect shape and dtype, the median the ranking judged it by, and
+  its singular values drawn over the other changed tensors of its kind. Kinds are grouped as the ranking
+  groups them: MoE expert and shared-expert down projections count as one.
+- **Inventory:** every tensor by status and kind, with a kind-by-status table that filters the list.
+- **ΔW stats:** effective rank by layer and singular values by kind, in the colours of `effective_rank.png`
+  and `spectra.png`, above a sortable table of `delta.csv`. A folder written with `--inventory-only` has no
+  `delta.csv`; the page says so and still shows the ranking and inventory.
+
+The page reads `pair.txt`, `inventory.csv`, `ranking.csv` and `delta.csv` inside your browser tab and opens
+no other file of the folder. Nothing is uploaded: there is no server-side code, and the page's content
+security policy only allows requests to its own origin. There is no build step and no dependency; the HTTP
+server is needed only because browsers do not load ES modules from `file://`. Like the command line, the
+workbench ranks suspicion and never certifies a model clean. Its tests (`tests/web/`) run with the unit
+tests when Node 20 or newer is installed.
+
 ## Safety
 
 Backdoors planted for this research only ever target localhost sinks. Their weights stay local or
