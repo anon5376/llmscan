@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
+from matplotlib.figure import Figure
 
 from helpers import tiny_llama, write_safetensors, write_sharded
 from llmscan import cli, core, inventory
@@ -195,6 +196,17 @@ class TestInventoryAndCli(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("analyze_delta is not written yet", err)
         self.assertTrue((self.tmp / "out" / "inventory.csv").exists())
+
+    def test_rank_caption_limits_value_equality_to_scanned_matrices(self):
+        with mock.patch.object(Figure, "savefig", autospec=True) as save:
+            code, _, err = run_cli("--base", str(self.tmp / "base.safetensors"), "--suspect", str(self.tmp / "suspect"),
+                                   "--out", str(self.tmp / "out"))
+        self.assertEqual(code, 0, err)
+        fig, = (fig for (fig, path), _ in save.call_args_list if path.name == "effective_rank.png")
+        # q_proj includes a float re-save; up_proj and v_proj each have a layer the scan skips.
+        self.assertEqual([t.get_text() for t in fig.axes[0].texts], [
+            "Values match base in scanned matrices: embed_tokens, gate_proj, q_proj, up_proj, v_proj",
+        ])
 
     def test_cli_end_to_end_with_stand_in_core(self):
         fake_analyze.calls = []
