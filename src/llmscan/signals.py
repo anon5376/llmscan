@@ -714,7 +714,7 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
             continue
         limit = max(1., factor) * max(outside_step, steps[run[:-1]].max(initial=0.))
         boundaries = [(run[0], run[0]-1), (run[-1], run[-1]+1)]
-        if any(extra[i] - upper[j] <= max(limit, noise[i] + noise[j])
+        if any(lower[i] - upper[j] <= max(limit, noise[i] + noise[j])
                for i, j in boundaries if 0 <= j < len(names)):
             continue
         unit = noise[measured].max()

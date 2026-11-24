@@ -922,6 +922,26 @@ class TestAnomalySignals(unittest.TestCase):
         self.assertAlmostEqual(upper, lower)
         self.assertAlmostEqual(unpaired, 1.1)
 
+    def test_expansion_boundary_and_ordinary_steps_use_the_same_complement(self):
+        rows = [row(layer_name(i)) for i in range(19)]
+        eye = np.eye(8)
+        run = set(range(6, 11))
+        for tilt_strength in (5., 12.):
+            with self.subTest(tilt_strength=tilt_strength):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    basis, weights = eye[:, :1], [100.]
+                    if r.layer in run:
+                        sine = (tilt_strength + 2 * (r.layer % 2)) / 100.
+                        tilt = np.sqrt(1. - sine**2) * eye[0] + sine * eye[1]
+                        basis, weights = np.column_stack((tilt, eye[r.layer - 4])), [100., 4.]
+                    spaces[r.name] = basis
+                    spectra[r.name] = core.OutputSpectrum(np.array(weights), 0., 1., 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                expanded = {name for name, reason in findings.items() if "subspace expansion" in reason}
+                expected = {layer_name(i) for i in run} if tilt_strength > 6 else set()
+                self.assertEqual(expanded, expected)
+
     def test_expansion_compares_absolute_strength_when_layer_budgets_differ(self):
         rows = [row(layer_name(i)) for i in range(17)]
         for scale, extra, run in product([1e-220, 1., 1e220], [4., 30.], [set(range(6, 11)), {4, 9, 10}]):
