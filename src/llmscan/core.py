@@ -62,14 +62,15 @@ class OutputSpectrum(NamedTuple):
         best_rank_residual = np.partition(self.retained, -rank-1)[-rank-1]
         if angle >= math.pi / 2:
             return float(best_rank_residual)
-        residual = basis - anchor @ (anchor.T @ basis)
-        outside = np.linalg.norm(residual * self.retained, ord=2)
-        # On the input attaining this norm, the parallel response is bounded
-        # by Pythagoras. Rotating the plane toward that response by 'angle'
-        # still leaves this much outside it. Any rank-p fit also leaves s[p].
-        largest = self.retained.max()
-        parallel = math.sqrt(max(0., (largest - outside) * (largest + outside)))
-        return float(max(best_rank_residual, math.cos(angle) * outside - math.sin(angle) * parallel))
+        coordinates = anchor.T @ basis
+        residual = (basis - anchor @ coordinates) * self.retained
+        _, outside, inputs = np.linalg.svd(residual, full_matrices=False)
+        # Each residual singular value has a unit input that attains it.
+        # Only the parallel response to that same input can be recovered by
+        # rotating the plane. A dominant response on another input cannot.
+        parallel = np.linalg.norm((coordinates * self.retained) @ inputs.T, axis=0)
+        remaining = math.cos(angle) * outside - math.sin(angle) * parallel
+        return float(max(best_rank_residual, remaining.max()))
 
 
 class DeltaStats(NamedTuple):

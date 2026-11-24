@@ -1123,6 +1123,26 @@ class TestAnomalySignals(unittest.TestCase):
                 expanded = {n for n, why in findings.items() if "subspace expansion" in why}
                 self.assertEqual(expanded, {layer_name(i) for i in run} if extra > 1. else set())
 
+    def test_aligned_dominant_mode_cannot_mask_a_secondary_expansion(self):
+        rows = [row(layer_name(i)) for i in range(30)]
+        eye = np.eye(5)
+        run = range(12, 18)
+        spaces, spectra = {}, {}
+        for r in rows:
+            resolved = r.layer in run
+            angle = np.radians(65. if resolved else 0.)
+            second = np.cos(angle) * eye[1] + np.sin(angle) * eye[2]
+            third = -np.sin(angle) * eye[1] + np.cos(angle) * eye[2]
+            strength = 35. if resolved else 3.
+            edit = (1000. * np.outer(eye[0], eye[0]) + strength * np.outer(second, second)
+                    + np.outer(third, third))
+            budget = .25 if resolved else (2. if r.layer % 2 else 4.)
+            m = core.analyze_delta(0. * eye, edit, 1, budget)
+            spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+        findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+        self.assertEqual(set(findings), {layer_name(i) for i in run})
+        self.assertTrue(all("against the majority space" in why for why in findings.values()))
+
     def test_honest_mixed_rank_planes_and_gradual_rank_ramps(self):
         rows = [row(layer_name(i)) for i in range(36)]
         eye = np.eye(5)
