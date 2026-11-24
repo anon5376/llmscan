@@ -330,7 +330,9 @@ def _isolated_cliques(ids: list[int], angles: np.ndarray, layer_count: int, fact
         observed = _observed_runs(ids, members, adjacent, extent)
         if not observed.any():
             continue
-        boundaries = observed[:-1] != observed[1:]
+        # A missing boundary prevents reporting that run, but an ordinary
+        # step at its measured end is still evidence about the same clique.
+        boundaries = adjacent & (members[:-1] != members[1:])
         background = steps[adjacent & ~members[:-1] & ~members[1:]]
         if len(background) < 8:
             continue
@@ -372,7 +374,7 @@ def _stable_angles(angles: np.ndarray, members: np.ndarray, background: np.ndarr
         return None
     a, b = ids[:-1], ids[1:]
     same_run = runs[a] == runs[b]
-    boundary = (b == a + 1) & (members[a] != members[b])
+    boundary = (b == a + 1) & adjacent[a] & (members[a] != members[b])
     boundary_limit = min(math.acos(0.9), max_boundary_step)
     if sampled is None or same_run.any():
         rates = angles[a[same_run], b[same_run]] / (b - a)[same_run]
@@ -552,7 +554,7 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
         observed = _observed_runs(ids, members, adjacent, geometry.extent)
         if not observed.any():
             continue
-        switches = observed[:-1] != observed[1:]
+        switches = adjacent & (members[:-1] != members[1:])
         outside = members[:, None] & ~members
         limit = factor * max(floor, within)
         # A stable primary or intersection gives a more specific attribution.
@@ -560,7 +562,8 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
         # certify movement that changing a single leading axis cannot explain.
         switch = "secondary subspace"
         primary = _stable_angles(geometry.leading_angles, members, background, adjacent, factor, floor)
-        terminal = switches.sum() == 1
+        reported_boundaries = observed[:-1] != observed[1:]
+        terminal = reported_boundaries.sum() == 1
         second = geometry.cosines[1]
         secondary = None
         if np.isfinite(second.diagonal(1)[switches]).all():
@@ -572,7 +575,7 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
             evidence = (f"minimum between-group angle {math.degrees(across):.2f} degrees, "
                         f"leading axes within {math.degrees(primary):.2f} degrees")
             if terminal:
-                i = int(np.flatnonzero(switches)[0])
+                i = int(np.flatnonzero(reported_boundaries)[0])
                 evidence += (f", minimum secondary angle {math.degrees(secondary):.2f} degrees "
                              f"at boundary {ids[i]}–{ids[i+1]}")
         else:

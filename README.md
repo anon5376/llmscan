@@ -279,7 +279,10 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      layers. Each observed boundary must exceed that usual step by more than the run's
      diameter and six robust standard deviations. At least eight outside steps must be
      available for comparison, and a strict majority of layers must remain outside the
-     isolated groups.
+     isolated groups. A group needs at least one run with complete boundary coverage.
+     All measured boundary steps contribute to the comparison, including the measured
+     end of an incomplete run. All layers whose spaces belong to a qualifying group
+     count toward its size. Only runs with complete boundary coverage receive findings.
 
      Each minority group can produce a T3 finding when its boundaries are observed at
      consecutive layer IDs. Even with tied singular values, the scanner can identify

@@ -703,19 +703,47 @@ class TestAnomalySignals(unittest.TestCase):
             walk[i] = np.cos(angle) * walk[i - 1] + np.sin(angle) * walk[i]
         rows = [row(layer_name(i)) for i in range(n)]
         stats = {r.name: Measurements(1.5, 1.) for r in rows}
-        for line in [0, 9]:
-            with self.subTest(line=line):
+        first = set(range(1, 9))
+        second = set(range(17, 25))
+        # If both cliques qualify, sixteen of the thirty-two measured planes
+        # belong to them. A missing boundary cannot turn a member into a peer.
+        split = set(range(1, 5)) | set(range(11, 15))
+        for line, group, expected in [(0, first, second), (9, first, second), (0, split, set())]:
+            with self.subTest(line=line, group=group):
                 spaces = {}
                 for r in rows:
                     i = r.layer
                     secondary = walk[i]
-                    if 1 <= i <= 8:
+                    if i in group:
                         secondary = eye[-1]
-                    if 17 <= i <= 24:
+                    if i in second:
                         secondary = eye[-2]
                     spaces[r.name] = eye[:, :1] if i == line else np.column_stack((eye[0], secondary))
                 ranked = rank.rank_tensors(rows, stats, subspaces=spaces)
-                self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, set(range(17, 25)))
+                self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, expected)
+
+    def test_measured_end_of_incomplete_run_can_contradict_a_recurring_switch(self):
+        n = 30
+        eye = np.eye(n + 3)
+        walk = eye[1:n + 1].copy()
+        step = np.radians(40.)
+        for i in range(1, n):
+            walk[i] = np.cos(step) * walk[i - 1] + np.sin(step) * walk[i]
+        rows = [row(layer_name(i)) for i in range(n)]
+        stats = {r.name: Measurements(1.5, 1.) for r in rows}
+        complete = set(range(16, 20))
+        for degrees, expected in [(39, set()), (80, complete)]:
+            with self.subTest(degrees=degrees):
+                spaces = {}
+                for r in rows:
+                    i = r.layer
+                    secondary = eye[-1] if 1 <= i <= 4 or i in complete else walk[i]
+                    if i == 5:
+                        angle = np.radians(degrees)
+                        secondary = np.cos(angle) * eye[-1] + np.sin(angle) * walk[i]
+                    spaces[r.name] = eye[:, :1] if i == 0 else np.column_stack((eye[0], secondary))
+                ranked = rank.rank_tensors(rows, stats, subspaces=spaces)
+                self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, expected)
 
     def test_isolated_secondary_runs_under_a_shared_leading_axis(self):
         n = 30
