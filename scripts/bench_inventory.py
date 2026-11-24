@@ -1,4 +1,4 @@
-"""Compare two source trees on the same checkpoints. Usage: python tests/bench_inventory.py BASELINE_SRC"""
+"""Compare two source trees on the same checkpoints. Usage: python scripts/bench_inventory.py BASELINE_SRC"""
 
 import argparse
 import csv
@@ -13,6 +13,8 @@ from pathlib import Path
 
 import numpy as np
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
 from helpers import tiny_llama, write_sharded
 
 
@@ -49,7 +51,7 @@ with open_checkpoint(sys.argv[1]) as a, open_checkpoint(sys.argv[2]) as b:
 
 
 def benchmark(root, baseline, pairs):
-    sources = [baseline, Path(__file__).resolve().parents[1] / "src"]
+    sources = [baseline, ROOT / "src"]
     for src in sources:
         if not (src / "llmscan" / "inventory.py").is_file():
             raise ValueError(f"{src} is not a llmscan source tree")
