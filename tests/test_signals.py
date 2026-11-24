@@ -874,6 +874,22 @@ class TestAnomalySignals(unittest.TestCase):
         stats = {r.name: Measurements(2., 1.) for r in rows}
         self.assertEqual(subspace_outliers(rows, spaces, 3., stats), {})
 
+    def test_separation_must_exceed_reconstructed_shared_space_spread(self):
+        rows = [row(layer_name(i)) for i in range(16)]
+        eye = np.eye(3)
+        spaces = {}
+        tilt = np.radians(20.)
+        for r in rows:
+            # Each pair intersects exactly. The estimated common line varies
+            # by 8 degrees as the background planes turn around their cone.
+            azimuth = np.radians(12.) * np.sin(2 * np.pi * r.layer / 11)
+            line = np.cos(azimuth) * eye[0] + np.sin(azimuth) * eye[1]
+            perp = -np.sin(azimuth) * eye[0] + np.cos(azimuth) * eye[1]
+            basis = np.column_stack((line, np.cos(tilt) * perp + np.sin(tilt) * eye[2]))
+            spaces[r.name] = basis if r.layer < 12 else eye[:, :2]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        self.assertEqual(subspace_outliers(rows, spaces, 3., stats), {})
+
     def test_partially_resolved_leading_axes_can_contradict_shared_modes(self):
         rows = [row(layer_name(i)) for i in range(20)]
         eye = np.eye(5)

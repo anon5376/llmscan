@@ -413,7 +413,7 @@ def _shared_space_switch(geometry: _OutputGeometry, members: np.ndarray,
     common = [q @ coords for q, coords in zip(bases, coordinates)]
     shared_angles = np.arccos(np.clip(_principal_cosines(common)[-1], 0., 1.))
     width = _stable_angles(shared_angles, members, background, adjacent, factor, floor)
-    if width is None:
+    if width is None or separation <= factor * width:
         return None
     # Independently resolved axes must lie in the common space and must not
     # contradict its stability. Missing measurements supply no veto or vote.
