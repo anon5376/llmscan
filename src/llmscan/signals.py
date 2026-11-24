@@ -348,18 +348,37 @@ def _isolated_cliques(ids: list[int], angles: np.ndarray, layer_count: int,
 
 
 def _stable_angles(angles: np.ndarray, members: np.ndarray, background: np.ndarray,
-                   adjacent: np.ndarray, factor: float, floor: float) -> float | None:
+                   adjacent: np.ndarray, factor: float, floor: float,
+                   sampled: np.ndarray | None = None) -> float | None:
     """Check this candidate against the majority and its observed boundary neighbors."""
     within = (members[:, None] & members) | (background[:, None] & background)
-    spread = angles[within].max()
-    across = angles[np.ix_(members, background)].max()
-    if not (spread <= math.acos(0.9) and across <= min(math.acos(0.9), factor * max(spread, floor))):
+    cross = members[:, None] & background
+    # Consecutive sampled axes can be several layers apart. Only measure a
+    # within-regime rate if every intervening layer belongs to the same run.
+    runs = np.r_[0, np.cumsum(~(adjacent & within.diagonal(offset=1)))]
+    if sampled is None:
+        ids = np.arange(len(angles))
+    else:
+        pairs = sampled[:, None] & sampled
+        within &= pairs
+        cross &= pairs
+        ids = np.flatnonzero(sampled)
+    spread = angles[within].max(initial=0.)
+    across = angles[cross].max(initial=0.)
+    if not (spread <= math.acos(0.9) and across <= math.acos(0.9)):
         return None
-    steps = angles.diagonal(offset=1)
-    usual = steps[adjacent & within.diagonal(offset=1)].max(initial=floor)
-    if np.all(steps[members[:-1] != members[1:]] <= factor * usual):
-        return max(spread, across)
-    return None
+    if np.any(np.triu(within, k=1)) and across > factor * max(spread, floor):
+        return None
+    a, b = ids[:-1], ids[1:]
+    same_run = runs[a] == runs[b]
+    boundary = (b == a + 1) & (members[a] != members[b])
+    boundary_limit = math.acos(0.9)
+    if sampled is None or same_run.any():
+        rates = angles[a[same_run], b[same_run]] / (b - a)[same_run]
+        boundary_limit = min(boundary_limit, factor * rates.max(initial=floor))
+    if not np.all(angles[a[boundary], b[boundary]] <= boundary_limit):
+        return None
+    return max(spread, across)
 
 
 def _principal_cosines(bases: list[np.ndarray]) -> np.ndarray:
@@ -420,9 +439,9 @@ def _shared_space_switch(geometry: _OutputGeometry, members: np.ndarray,
     known = relevant & np.isfinite(geometry.leading_angles.diagonal())
     if known.any():
         alignment = min(np.linalg.norm(common[i].T @ geometry.leading_axes[i]) for i in np.flatnonzero(known))
-        observed = np.nan_to_num(geometry.leading_angles, nan=0.)
         if (math.acos(min(1., alignment)) > tolerance
-                or _stable_angles(observed, members, background, adjacent, factor, floor) is None):
+                or _stable_angles(geometry.leading_angles, members, background, adjacent,
+                                  factor, floor, sampled=known) is None):
             return None
     return (f"shared output dimension {k}, maximum shared-space angle {math.degrees(width):.2f} degrees, "
             f"minimum switched angle {math.degrees(separation):.2f} degrees")

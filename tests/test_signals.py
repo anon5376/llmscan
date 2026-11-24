@@ -904,6 +904,21 @@ class TestAnomalySignals(unittest.TestCase):
                 expected = {layer_name(i) for i in range(16, 20)} if axis == 0 else set()
                 self.assertEqual(set(findings), expected)
 
+    def test_sparse_leading_measurements_use_observed_within_group_drift(self):
+        rows = [row(layer_name(i)) for i in range(20)]
+        eye = np.eye(5)
+        spaces = {r.name: eye[:, [0, 1, 3 if r.layer >= 14 else 2]] for r in rows}
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        for jump in (0, 6):
+            with self.subTest(jump=jump):
+                directions = {}
+                for i in [2, 6, 10, 13, 14, 18]:
+                    theta = np.radians(i + (jump if i >= 14 else 0))
+                    directions[layer_name(i)] = np.cos(theta) * eye[0] + np.sin(theta) * eye[1]
+                findings = subspace_outliers(rows, spaces, 3., stats, directions)
+                expected = {layer_name(i) for i in range(14, 20)} if jump == 0 else set()
+                self.assertEqual(set(findings), expected)
+
     def test_recurring_clique_with_matched_rank_among_wandering_peers(self):
         rows = [row(layer_name(i)) for i in range(30)]
         stats = {r.name: Measurements(2., 1.) for r in rows}

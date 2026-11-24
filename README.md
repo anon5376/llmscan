@@ -289,7 +289,9 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      and boundary neighbors must retain that space within the measured angular resolution.
      The smallest switched angle must exceed both shared-mode and within-group variation
      by the outlier factor. The shared space must also stay stable at each observed
-     boundary. Any independently resolved leading axes must support that interpretation.
+     boundary. Independently resolved leading axes must agree with that space. Where
+     measurements are sparse, the scanner estimates leading-axis drift per layer from
+     successive observations inside an uninterrupted regime.
      A separately resolved and stable leading edit can corroborate a secondary switch on
      its own. At a single terminal boundary this requires separation even in the second
      principal angle, or evidence of a higher-dimensional shared space. A terminal switch
