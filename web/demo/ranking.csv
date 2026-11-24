@@ -1,0 +1,28 @@
+rank,tier,name,layer,kind,status,effective_rank,sv_001,reason
+1,T1,lm_head.weight,,lm_head,shape_mismatch,,,shape differs: base 128x32 vs suspect 130x32
+2,T1,model.embed_tokens.weight,,embed_tokens,shape_mismatch,,,shape differs: base 128x32 vs suspect 130x32
+3,T1,model.layers.8.mlp.down_proj.bias,8,down_proj.bias,only_suspect,,,in suspect but not in base: a tensor the base does not have
+4,T2,model.layers.8.self_attn.q_proj.weight,8,q_proj,changed,3.55548,0.372757,"changed q_proj: outside expected kinds (attn_output, down_proj, embed_tokens, ffn_down, o_proj, token_embd)"
+5,T2,model.layers.8.self_attn.v_proj.weight,8,v_proj,changed,2.55302,0.500964,"changed v_proj: outside expected kinds (attn_output, down_proj, embed_tokens, ffn_down, o_proj, token_embd)"
+6,T3,model.layers.8.mlp.down_proj.weight,8,down_proj,changed,5.91867,0.730039,effective_rank 5.919 is 5.9x the median 1 of changed down_proj tensors (threshold 3x)
+7,T4,model.layers.10.self_attn.o_proj.weight,10,o_proj,changed,1.00026,0.229133,"changed o_proj, consistent with abliteration"
+8,T4,model.layers.3.mlp.down_proj.weight,3,down_proj,changed,1.00024,0.33071,"changed down_proj, consistent with abliteration"
+9,T4,model.layers.5.mlp.down_proj.weight,5,down_proj,changed,1.00024,0.322034,"changed down_proj, consistent with abliteration"
+10,T4,model.layers.8.self_attn.o_proj.weight,8,o_proj,changed,1.00023,0.242041,"changed o_proj, consistent with abliteration"
+11,T4,model.layers.7.mlp.down_proj.weight,7,down_proj,changed,1.00019,0.374861,"changed down_proj, consistent with abliteration"
+12,T4,model.layers.6.self_attn.o_proj.weight,6,o_proj,changed,1.00019,0.244733,"changed o_proj, consistent with abliteration"
+13,T4,model.layers.10.mlp.down_proj.weight,10,down_proj,changed,1.00017,0.398362,"changed down_proj, consistent with abliteration"
+14,T4,model.layers.9.self_attn.o_proj.weight,9,o_proj,changed,1.00017,0.26411,"changed o_proj, consistent with abliteration"
+15,T4,model.layers.2.mlp.down_proj.weight,2,down_proj,changed,1.00016,0.408085,"changed down_proj, consistent with abliteration"
+16,T4,model.layers.6.mlp.down_proj.weight,6,down_proj,changed,1.00016,0.399125,"changed down_proj, consistent with abliteration"
+17,T4,model.layers.11.mlp.down_proj.weight,11,down_proj,changed,1.00016,0.395265,"changed down_proj, consistent with abliteration"
+18,T4,model.layers.4.mlp.down_proj.weight,4,down_proj,changed,1.00016,0.392198,"changed down_proj, consistent with abliteration"
+19,T4,model.layers.2.self_attn.o_proj.weight,2,o_proj,changed,1.00016,0.28583,"changed o_proj, consistent with abliteration"
+20,T4,model.layers.9.mlp.down_proj.weight,9,down_proj,changed,1.00014,0.438803,"changed down_proj, consistent with abliteration"
+21,T4,model.layers.1.self_attn.o_proj.weight,1,o_proj,changed,1.00014,0.310946,"changed o_proj, consistent with abliteration"
+22,T4,model.layers.3.self_attn.o_proj.weight,3,o_proj,changed,1.00014,0.310125,"changed o_proj, consistent with abliteration"
+23,T4,model.layers.5.self_attn.o_proj.weight,5,o_proj,changed,1.00014,0.307381,"changed o_proj, consistent with abliteration"
+24,T4,model.layers.1.mlp.down_proj.weight,1,down_proj,changed,1.00013,0.45462,"changed down_proj, consistent with abliteration"
+25,T4,model.layers.7.self_attn.o_proj.weight,7,o_proj,changed,1.00012,0.328181,"changed o_proj, consistent with abliteration"
+26,T4,model.layers.11.self_attn.o_proj.weight,11,o_proj,changed,1.00012,0.318172,"changed o_proj, consistent with abliteration"
+27,T4,model.layers.4.self_attn.o_proj.weight,4,o_proj,changed,1.00011,0.324076,"changed o_proj, consistent with abliteration"
