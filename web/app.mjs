@@ -434,18 +434,16 @@ function deltaView(model) {
     tile('Median effective rank', formatNumber(s.medianRank)),
     tile('Highest effective rank', formatNumber(s.top?.effectiveRank ?? null), s.top && tensorButton(s.top)),
     tile('Median σ₁ / σ₂', formatNumber(s.medianGap), 'gap between the first two directions'));
-  if (!model.measured.length) {
-    return [tiles, emptyState('No changed 2-D tensor to plot',
-      h('p', null, 'delta.csv lists tensors, but none carries a usable effective rank: every scanned tensor is identical to base, or its stats are unusable.'))];
-  }
-  const charts = deltaCharts(model);
-  state.redrawCharts = charts.draw;
+  const charts = model.measured.length ? deltaCharts(model) : null;
+  state.redrawCharts = charts?.draw ?? null;
   const listed = model.delta.filter((t) => t.status !== 'identical');
   const columns = [COLUMNS.name, COLUMNS.layer, COLUMNS.kind, COLUMNS.tier, COLUMNS.shape, COLUMNS.effectiveRank, COLUMNS.sv1, COLUMNS.gap];
   return [
-    tiles, charts.box,
-    h('h3', { class: 'section-title' }, 'Changed tensors in delta.csv'),
-    listing({
+    tiles,
+    charts?.box ?? emptyState('No changed 2-D tensor to plot',
+      h('p', null, 'delta.csv lists tensors, but none carries a usable effective rank: every scanned tensor is identical to base, or its stats are unusable.')),
+    listed.length > 0 && h('h3', { class: 'section-title' }, 'Changed tensors in delta.csv'),
+    listed.length > 0 && listing({
       controls: [
         kindSelect('delta-kind', kindOrder(listed.map((t) => t.kind)), view.kind, (kind) => { view.kind = kind; view.page = 0; state.refresh(); }),
         searchBox('delta-filter', view.query, (query) => { view.query = query; view.page = 0; state.refresh(); }),
