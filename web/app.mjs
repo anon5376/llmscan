@@ -309,8 +309,9 @@ function rankingView(model) {
   const columns = [COLUMNS.rank, COLUMNS.tier, COLUMNS.reason, COLUMNS.layer, COLUMNS.kind, COLUMNS.effectiveRank, COLUMNS.sv1];
   return [
     !model.hasDelta && h('p', { class: 'note' },
-      h('strong', null, 'Inventory-only ranking. '),
-      'This report has no ΔW stats, so tensors were ranked on structure and location alone and no outlier check (T3) ran.'),
+      h('strong', null, 'No ΔW stats. '),
+      'delta.csv is missing or lists no tensor, so no row here has singular values behind it: '
+      + 'this ranking rests on structure and location and cannot tell a rank-1 edit from a diffuse one.'),
     listing({
       controls,
       results: () => {
@@ -425,10 +426,10 @@ function deltaView(model) {
   state.rows = [];
   if (!model.hasDelta) {
     return emptyState('No ΔW stats in this report',
-      h('p', null, 'The folder has no delta.csv. That is what ', h('code', null, 'llmscan --inventory-only'),
-        ' writes, and what remains when the ΔW scan stops early.'),
-      h('p', null, 'The ranking and inventory are complete, but without singular values the outlier check (T3) did not run. '
-        + 'Rerun llmscan without ', h('code', null, '--inventory-only'), ' on the same pair to add them.'));
+      h('p', null, 'delta.csv is missing or lists no tensor. ', h('code', null, 'llmscan --inventory-only'),
+        ' and a scan that stops early write no delta.csv; a scan that finds no 2-D float tensor to analyse writes an empty one.'),
+      h('p', null, 'The ranking and inventory are complete, but no tensor has singular values to compare with the others of its kind. '
+        + 'If the run was inventory-only, rerun llmscan without ', h('code', null, '--inventory-only'), ' on the same pair to add them.'));
   }
   const s = model.deltaSummary;
   const tiles = h('dl', { class: 'tiles' },
@@ -480,7 +481,7 @@ function sides(base, suspect, format = (v) => v) {
 }
 
 function deltaFacts(model, t) {
-  if (!model.hasDelta) return h('p', null, 'This report has no delta.csv, so no tensor has ΔW stats.');
+  if (!model.hasDelta) return h('p', null, 'delta.csv is missing or lists no tensor, so no tensor in this report has ΔW stats.');
   if (!t.scanned) return h('p', null, 'Not in delta.csv. The scan covers 2-D float tensors that exist in both models with the same shape.');
   if (!t.spectrum.length && t.effectiveRank == null) {
     return h('p', null, t.status === 'identical' ? 'ΔW = 0: identical tensors are listed in delta.csv without stats.' : 'delta.csv lists this tensor without stats.');
