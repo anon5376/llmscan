@@ -1149,6 +1149,18 @@ class TestAnomalySignals(unittest.TestCase):
         findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
         self.assertFalse(any("subspace expansion" in why for why in findings.values()), findings)
 
+    def test_identical_majority_planes_do_not_require_an_ambient_fit(self):
+        rows = [row(layer_name(i)) for i in range(28)]
+        eye = np.eye(70)
+        spaces, spectra = {}, {}
+        for r in rows:
+            rank = 65 if 10 <= r.layer < 16 else 64
+            spaces[r.name] = eye[:, :rank]
+            spectra[r.name] = core.OutputSpectrum(np.full(rank, 8.), 0., .5, 1.)
+        with patch("llmscan.signals._ambient_frame", side_effect=AssertionError("redundant factorization")):
+            findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+        self.assertEqual(set(findings), {layer_name(i) for i in range(10, 16)})
+
     def test_mixed_rank_references_require_containment_and_measured_strength(self):
         rows = [row(layer_name(i)) for i in range(25)]
         eye = np.eye(5)

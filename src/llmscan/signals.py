@@ -894,7 +894,12 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     containment = angles[np.ix_(peers, background)]
     widths = containment.max(axis=1)
     fixed_plane = len(peers) >= 2 and within.max() <= radius and widths.min() <= radius
-    envelope = _majority_envelope(bases, ranks, p, radius / factor, radius, spectra, fixed_plane)
+    floor = math.sqrt(2 * bases[0].shape[0] * math.ulp(1.))
+    envelope = None
+    # An observed ceiling-rank anchor already contains every background
+    # writer to numerical precision. Their union cannot identify a wider span.
+    if not fixed_plane or widths.min() > floor:
+        envelope = _majority_envelope(bases, ranks, p, radius / factor, radius, spectra, fixed_plane)
     if envelope is not None:
         yield envelope, "majority ambient span"
     if len(peers) < 2:
@@ -925,7 +930,6 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
         rates[k] = max(rates[k], np.max(angles[a, inner] / (depths[inner] - depths[a])),
                        np.max(angles[b, inner] / (depths[b] - depths[inner])))
     consecutive = rates[observed]
-    floor = math.sqrt(2 * bases[0].shape[0] * math.ulp(1.))
     if not len(consecutive) or widths.min() <= floor or rates.max() > radius:
         return
     ordinary = max(floor, _ordinary_step(consecutive))
