@@ -119,7 +119,7 @@ def summarize(rows: list[InventoryRow]) -> str:
     recast = [r for r in rows if r.status in (IDENTICAL, CHANGED) and r.base_dtype != r.suspect_dtype]
     lines = [
         f"tensors: {len(rows)}  " + "  ".join(f"{s}={n}" for s, n in counts.items() if n),
-        f"parameters identical to base: {identical_params / max(total_params, 1):.2%}",
+        f"parameters in unchanged tensors: {identical_params / max(total_params, 1):.2%}",
     ]
     if recast:
         pairs = sorted({f"{r.base_dtype}->{r.suspect_dtype}" for r in recast})

@@ -130,6 +130,22 @@ class TestNames(unittest.TestCase):
         self.assertEqual(kind_of("lm_head.weight"), "lm_head")
 
 
+class TestInventorySummary(unittest.TestCase):
+    def test_percentage_counts_parameters_in_unchanged_tensors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            weights = np.zeros((10, 10), np.float32)
+            tensors = {"weight": ("F32", weights), "bias": ("F32", np.zeros(25, np.float32))}
+            write_safetensors(tmp / "base.safetensors", tensors)
+            weights[0, 0] = 1
+            write_safetensors(tmp / "suspect.safetensors", tensors)
+
+            code, out, err = run_cli("--base", str(tmp / "base.safetensors"), "--suspect", str(tmp / "suspect.safetensors"),
+                                     "--out", str(tmp / "out"), "--inventory-only")
+            self.assertEqual(code, 0, err)
+            self.assertIn("parameters in unchanged tensors: 20.00%", out.splitlines())
+
+
 class TestInventoryAndCli(unittest.TestCase):
     """A base and a suspect that differs in known places."""
 
