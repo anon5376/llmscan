@@ -30,10 +30,11 @@ def checkpoints(root):
 def outputs(out):
     result = {p.name: p.read_bytes() for p in out.iterdir() if p.name != "delta.csv"}
     with (out / "delta.csv").open(newline="") as f:
-        rows = list(csv.DictReader(f))
-    for row in rows:
-        del row["seconds"]
-    return result, rows
+        reader = csv.reader(f)
+        header = next(reader)
+        seconds = header.index("seconds")
+        rows = [row[:seconds] + row[seconds + 1:] for row in reader]
+    return result, header, rows
 
 
 INVENTORY = """
