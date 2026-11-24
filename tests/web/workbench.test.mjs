@@ -102,8 +102,10 @@ test("a delta.csv left behind by an earlier run is flagged, not presented as thi
   // the suspect was replaced before the rerun: what the old scan measured is identical now, so no longer ranked
   const moved = REPORT.ranking.slice(0, 1); // only a T1 row: it never has stats
   assert.equal(buildWorkbench({ ...REPORT, ranking: moved }).deltaUnranked, true);
-  const unmeasured = REPORT.delta.map((r) => ({ ...r, effective_rank: "", sv_001: "" }));
-  assert.equal(buildWorkbench({ ...REPORT, ranking: moved, delta: unmeasured }).deltaUnranked, false);
+  // the earlier scan compared identical weights: no stats to miss, but its rows call changed tensors identical
+  const identical = REPORT.delta.map((r) => ({ ...r, status: "identical", effective_rank: "", sv_001: "" }));
+  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats, delta: identical }).deltaUnranked, true);
+  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats, delta: identical.slice(-1) }).deltaUnranked, false);
 });
 
 test("a scan that had nothing to analyse keeps its T3 rows and is not called stale", () => {

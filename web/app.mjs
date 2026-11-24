@@ -205,9 +205,10 @@ function emptyState(title, ...body) {
 function staleDeltaNote(model) {
   return model.deltaUnranked && h('p', { class: 'note warning' },
     h('strong', null, 'This ranking was not computed from this delta.csv. '),
-    'delta.csv has ΔW stats that ranking.csv does not carry. That is what is left when the last run was ',
+    'delta.csv has ΔW stats that ranking.csv does not carry, or gives a tensor another status than inventory.csv. '
+    + 'That is what is left when the last run was ',
     h('code', null, '--inventory-only'), ', which keeps the delta.csv of an earlier run, or stopped during its scan. '
-    + 'The ΔW numbers shown may describe older weights, including for tensors the inventory now lists as identical; rerun llmscan without ',
+    + 'The ΔW numbers shown, and the tensors listed as scanned with ΔW = 0, may describe older weights; rerun llmscan without ',
     h('code', null, '--inventory-only'), ' to refresh them.');
 }
 
