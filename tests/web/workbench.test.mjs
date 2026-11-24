@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { readReport } from "../../web/report.mjs";
-import { kindColors, kindOrder, layerColor, linearTicks, logTicks, scale } from "../../web/charts.mjs";
+import { extent, kindColors, kindOrder, layerColor, linearTicks, logTicks, scale } from "../../web/charts.mjs";
 import {
   buildWorkbench, filterTensors, formatNumber, formatPercent, median, naturalCompare, pageOf, parseNumber,
   shortName, sortTensors, tierInfo,
@@ -161,6 +161,9 @@ test("chart colours follow the CLI figures and scales stay inside the plot", () 
   assert.deepEqual(linearTicks(0, 27, 12), [0, 5, 10, 15, 20, 25]);
   assert.deepEqual(linearTicks(3, 3), [3]);
   assert.deepEqual(logTicks(2e-5, 0.7), [1e-4, 1e-3, 1e-2, 1e-1]);
+  // 64 tensors with 2,048 singular values each: more values than Math.min(...values) accepts as arguments
+  assert.deepEqual(extent(Array.from({ length: 64 * 2048 }, (_, i) => 1 + (i * 7919) % 1000)), [1, 1000]);
+  assert.deepEqual(extent([]), [Infinity, -Infinity]);
   const y = scale([1e-4, 1], [200, 0], true);
   assert.deepEqual([y(1e-4), y(1e-2), y(1), y(0)].map(Math.round), [200, 100, 0, 200]);
 });

@@ -35,6 +35,16 @@ export function layerColor(t) {
 
 export const layerGradient = `linear-gradient(to right, ${LAYER_STOPS.join(', ')})`;
 
+/** [min, max] by iteration: `Math.min(...values)` throws once a report holds more values than a call takes arguments. */
+export function extent(values) {
+  let lo = Infinity, hi = -Infinity;
+  for (const v of values) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  return [lo, hi];
+}
+
 /** About `count` round ticks covering [lo, hi]. */
 export function linearTicks(lo, hi, count = 5) {
   if (!(hi > lo)) return [lo];
@@ -105,13 +115,14 @@ export function rankByLayerChart(tensors, { selected, onPick }) {
   const points = tensors.filter((t) => t.layer != null);
   const kinds = kindOrder(points.map((t) => t.kind));
   const colors = kindColors(kinds);
-  const layers = points.map((t) => t.layer), ranks = points.map((t) => t.effectiveRank);
-  const log = Math.max(...ranks) / Math.min(...ranks) > 30;
-  const x = { domain: padded(Math.min(...layers), Math.max(...layers)) };
-  const y = { domain: padded(Math.min(...ranks), Math.max(...ranks), log), log };
+  const [firstLayer, lastLayer] = extent(points.map((t) => t.layer));
+  const [lowRank, highRank] = extent(points.map((t) => t.effectiveRank));
+  const log = highRank / lowRank > 30;
+  const x = { domain: padded(firstLayer, lastLayer) };
+  const y = { domain: padded(lowRank, highRank, log), log };
   const { root, sx, sy } = frame({
     width: 720, height: 300, x, y, xLabel: 'layer', yLabel: 'effective rank of ΔW',
-    xTicks: integerTicks(Math.min(...layers), Math.max(...layers), 12),
+    xTicks: integerTicks(firstLayer, lastLayer, 12),
     label: `Effective rank of ΔW by layer for ${points.length} changed tensors of ${kinds.length} kinds. The table below lists the same values.`,
   });
   // kinds sit side by side inside a layer, so two kinds with the same rank do not hide each other
@@ -136,10 +147,10 @@ function spectrumPath(t, sx, sy) {
 
 function spectrumDomain(tensors) {
   const values = tensors.flatMap((t) => t.spectrum).filter((v) => Number.isFinite(v) && v > 0);
-  const longest = Math.max(2, ...tensors.map((t) => t.spectrum.length));
+  const longest = Math.max(2, extent(tensors.map((t) => t.spectrum.length))[1]);
   return {
     x: { domain: [1, longest] },
-    y: { domain: values.length ? padded(Math.min(...values), Math.max(...values), true) : [0.1, 10], log: true },
+    y: { domain: values.length ? padded(...extent(values), true) : [0.1, 10], log: true },
     xTicks: integerTicks(1, longest, 6),
   };
 }

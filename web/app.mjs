@@ -5,7 +5,7 @@ import {
   TIERS, buildWorkbench, filterTensors, formatCount, formatNumber, formatPercent, formatShape,
   pageOf, sortTensors, statusLabel, tierInfo,
 } from './model.mjs';
-import { kindOrder, kindSpectraChart, layerGradient, PALETTE, rankByLayerChart, tensorSpectrumChart } from './charts.mjs';
+import { extent, kindOrder, kindSpectraChart, layerGradient, PALETTE, rankByLayerChart, tensorSpectrumChart } from './charts.mjs';
 
 const PAGE_SIZE = 100;
 const DEMO_FILES = ['pair.txt', 'inventory.csv', 'ranking.csv', 'delta.csv'];
@@ -392,8 +392,7 @@ function deltaCharts(model) {
     const withLayer = model.measured.filter((t) => t.layer != null);
     const spectra = (kind) => model.measured.filter((t) => t.kind === kind && t.spectrum.length);
     const kinds = kindOrder(model.measured.filter((t) => t.spectrum.length).map((t) => t.kind));
-    const layers = withLayer.map((t) => t.layer);
-    const layerRange = [Math.min(...layers), Math.max(...layers)];
+    const layerRange = extent(withLayer.map((t) => t.layer));
     const byLayer = withLayer.length ? rankByLayerChart(withLayer, options) : null;
     const offStack = model.measured.length - withLayer.length;
     box.replaceChildren(
