@@ -303,8 +303,10 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      from either side through consecutive measured spaces. This can resolve a
      boundary obscured by ordinary motion in the shared span. For a tracked run,
      each reference compares boundary jumps with steps measured in its own
-     coordinates. The ambient comparison contributes wherever it covers both
-     endpoints of a step. The scanner also checks both continuation bounds.
+     coordinates. Complement strength stays measurable as the tracked plane
+     leaves the span, so those layers still calibrate ordinary motion. The
+     ambient span tests a boundary when it matches both boundary layers.
+     The scanner also checks both continuation bounds.
      Each step must retain the incoming plane within the ordinary
      angular step allowance. The incoming plane measures complement strength
      before its projection into the layer supplies the next reference. At a

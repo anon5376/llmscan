@@ -1390,8 +1390,8 @@ class TestAnomalySignals(unittest.TestCase):
         rows = [row(layer_name(i)) for i in range(29)]
         eye = np.eye(6)
         axes = self.wandering_axes(eye, len(rows), False)
-        for reverse in [False, True]:
-            with self.subTest(reverse=reverse):
+        for reverse, initial_angle, ramp in product([False, True], [8., 20.], [False, True]):
+            with self.subTest(reverse=reverse, initial_angle=initial_angle, ramp=ramp):
                 spaces, spectra, expected = {}, {}, set()
                 for r in rows:
                     i = 28 - r.layer if reverse else r.layer
@@ -1399,11 +1399,12 @@ class TestAnomalySignals(unittest.TestCase):
                     directions, values = [axis], [10.]
                     if i > 24:
                         tangent = -axis[1] * eye[0] + axis[0] * eye[1]
-                        angle = np.radians(8. * (i - 24))
+                        angle = np.radians(initial_angle + 8. * (i - 25))
                         directions = [np.cos(angle) * axis + np.sin(angle) * eye[2],
                                       np.cos(angle) * tangent + np.sin(angle) * eye[3], eye[4]]
-                        values = [10., 23., 9.]
-                        expected.add(r.name)
+                        values = [10., 23., 3. * (i - 24) if ramp else 9.]
+                        if not ramp:
+                            expected.add(r.name)
                     spaces[r.name] = np.column_stack(directions)
                     spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .25, 1.)
                 findings = subspace_outliers(rows, spaces, 3., spectra=spectra)

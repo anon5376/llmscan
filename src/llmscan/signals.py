@@ -736,8 +736,9 @@ class _ExpansionReference(NamedTuple):
     uncertainty: float = 0.
     supported_strength: float = math.inf
     paired_rank: int | None = None
-    # Independently measured in the validated ambient frame, when covered.
+    # Independently measured in the validated ambient frame.
     ambient_bounds: tuple[float, float] | None = None
+    ambient_aligned: bool = True
 
 
 def _ambient_frame(planes: list[np.ndarray], tolerance: float) -> np.ndarray:
@@ -759,7 +760,7 @@ def _ambient_frame(planes: list[np.ndarray], tolerance: float) -> np.ndarray:
 
 
 def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, tolerance: float, radius: float,
-                       spectra: list[OutputSpectrum | None], fixed_plane: bool) -> list[_ExpansionReference | None] | None:
+                       spectra: list[OutputSpectrum | None], fixed_plane: bool) -> list[_ExpansionReference] | None:
     """Fit an ambient span independent of depth and validate it on every held-out writer."""
     background = np.flatnonzero(ranks <= p)
     # Work in lossless thin-QR coordinates. Holding out a writer removes
@@ -787,20 +788,21 @@ def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, toler
         paired = min(p, basis.shape[1])
         if ranks[i] <= p and cosines[paired-1] < math.cos(tolerance):
             return None
-        if cosines[paired-1] < math.cos(radius):
-            references.append(None)
-            continue
+        # Alignment determines whether this span can certify a continuation.
+        # Its complement is still measurable when the continued axes leave it.
+        aligned = cosines[paired-1] >= math.cos(radius)
         if common.shape[1] == p:
-            references.append(_ExpansionReference(frame))
+            references.append(_ExpansionReference(frame, ambient_aligned=aligned))
             continue
         # More than p axes can be supported by a wider hull. A weak axis
         # inside it must not push a slightly tilted strong axis into the
         # extra set. Only axes near the orthogonal complement are eligible.
-        supported = int(np.count_nonzero(cosines > math.sin(radius)))
+        supported = max(paired, int(np.count_nonzero(cosines > math.sin(radius))))
         strength = math.inf
-        if ranks[i] > p and spectra[i] is not None:
+        if aligned and ranks[i] > p and spectra[i] is not None:
             strength = spectra[i].outside_continuation(frame, basis, radius)
-        references.append(_ExpansionReference(frame, supported_strength=strength, paired_rank=supported))
+        references.append(_ExpansionReference(frame, supported_strength=strength, paired_rank=supported,
+                                              ambient_aligned=aligned))
     return references
 
 
@@ -903,7 +905,7 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     if not fixed_plane or widths.min() > floor:
         envelope = _majority_envelope(bases, ranks, p, radius / factor, radius, spectra, fixed_plane)
     if envelope is not None:
-        yield envelope, "majority ambient span"
+        yield [frame if frame.ambient_aligned else None for frame in envelope], "majority ambient span"
     if len(peers) < 2:
         return
     if fixed_plane:
@@ -963,14 +965,17 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
                 if tracked[i] is None or spectra[i] is None:
                     continue
                 frame = envelope[i] if envelope is not None else None
-                ambient_bounds = None
                 if frame is not None:
                     lo, hi, extra = spectra[i].outside_bounds(frame.basis, bases[i], frame.paired_rank)
                     ambient_bounds = (lo, hi)
                     if ranks[i] > p:
+                        # Measure ordinary motion in the same ambient frame
+                        # through the full run. An unaligned layer can inform
+                        # that calibration without supplying a strength cap.
                         ambient_bounds = (extra, math.hypot(extra, spectra[i].omitted))
-                        caps[i] = min(caps[i], extra, frame.supported_strength)
-                tracked[i] = tracked[i]._replace(ambient_bounds=ambient_bounds)
+                        if frame.ambient_aligned:
+                            caps[i] = min(caps[i], extra, frame.supported_strength)
+                    tracked[i] = tracked[i]._replace(ambient_bounds=ambient_bounds, ambient_aligned=frame.ambient_aligned)
                 if ranks[i] > p:
                     tracked[i] = tracked[i]._replace(supported_strength=caps[i])
             yield tracked, "tracked majority space"
@@ -1039,7 +1044,7 @@ def _expansion_step(links: np.ndarray, steps: np.ndarray, lower: np.ndarray, upp
 
 def _abrupt_expansion_runs(ids: list[int], background: np.ndarray, adjacent: np.ndarray, extent: tuple[int, int],
                            strong: np.ndarray, elevated: np.ndarray, steps: np.ndarray, lower: np.ndarray,
-                           upper: np.ndarray, noise: np.ndarray, factor: float) -> set[tuple[int, int]]:
+                           upper: np.ndarray, noise: np.ndarray, factor: float, covered: np.ndarray) -> set[tuple[int, int]]:
     """Test boundaries and ordinary steps in one reference's measurement coordinates."""
     measured = np.isfinite(lower)
     outside_step = _ordinary_step(steps[adjacent & background[:-1] & background[1:] & np.isfinite(steps)])
@@ -1064,7 +1069,7 @@ def _abrupt_expansion_runs(ids: list[int], background: np.ndarray, adjacent: np.
             limit = factor * max(outside_step, inside_step)
             if any(lower[i] - upper[j] <= max(limit, factor * outer_motion[j], noise[i] + noise[j])
                    for i, j in ((start, start-1), (end, end+1))
-                   if 0 <= j < len(ids) and measured[i] and measured[j]):
+                   if 0 <= j < len(ids) and covered[i] and covered[j]):
                 continue
             confirmed.add((start, end))
     return confirmed
@@ -1116,13 +1121,14 @@ def _expansions_against(ids: list[int], names: list[str], bases: list[np.ndarray
                                mode_upper[1:] - mode_lower[:-1], mode_upper[:-1] - mode_lower[1:]))
     unit = noise[measured].max()
     confirmed = _abrupt_expansion_runs(ids, background, adjacent, extent, strong, elevated,
-                                       steps, mode_lower, upper, noise, factor)
+                                       steps, mode_lower, upper, noise, factor, measured)
     if confirmed and np.isfinite(ambient_lower).any():
         # Test the same runs in ambient coordinates on covered links. Never
         # subtract a tracked measurement from an ambient measurement.
         ambient_steps = np.maximum(ambient_upper[1:] - ambient_lower[:-1], ambient_upper[:-1] - ambient_lower[1:])
+        covered = measured & np.array([ref is not None and ref.ambient_aligned for ref in references])
         confirmed &= _abrupt_expansion_runs(ids, background, adjacent, extent, strong, elevated,
-                                            ambient_steps, ambient_lower, ambient_upper, noise, factor)
+                                            ambient_steps, ambient_lower, ambient_upper, noise, factor, covered)
     # A terminal candidate needs continuity or a disjoint confirmed run.
     # Test coverage before unioning overlapping core and extended candidates:
     # the interior core may have two boundaries even if its extension has one.
