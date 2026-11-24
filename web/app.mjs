@@ -259,7 +259,10 @@ function keepFocus(container, redraw) {
 /** Controls stay mounted while typing; only the results below them are redrawn. */
 function listing({ controls, results }) {
   const region = h('div', { class: 'results' });
-  state.refresh = () => keepFocus(region, () => region.replaceChildren(...[results()].flat(Infinity).filter(Boolean)));
+  state.refresh = () => {
+    keepFocus(region, () => region.replaceChildren(...[results()].flat(Infinity).filter(Boolean)));
+    renderDetail(); // Previous and Next follow the list as it is now filtered and sorted
+  };
   state.refresh();
   return [h('div', { class: 'controls' }, controls), region];
 }
