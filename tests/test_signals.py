@@ -855,6 +855,23 @@ class TestAnomalySignals(unittest.TestCase):
                 found = subspace_outliers(rows, spaces, 3., stats)
                 self.assertEqual(set(found), {layer_name(i) for i in run} if measured else set())
 
+    def test_higher_rank_outlier_needs_departure_in_its_additional_modes(self):
+        rows = [row(layer_name(i)) for i in range(21)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        eye = np.eye(6)
+        for secondary in (2, 3):
+            with self.subTest(secondary=secondary):
+                spaces, axes = {}, {}
+                for r in rows:
+                    modes = [0] if r.layer < 12 else [1, 2]
+                    if r.layer == 20:
+                        modes = [0, secondary]
+                    spaces[r.name] = eye[:, modes]
+                    axes[r.name] = eye[:, modes[0]]
+                ranked = rank.rank_tensors(rows, stats, directions=axes, subspaces=spaces)
+                last = next(r for r in ranked if r.layer == 20)
+                self.assertEqual(last.tier, "T4" if secondary == 2 else "T3")
+
     def test_two_moving_modes_with_an_intermittently_resolved_shared_mode(self):
         rows = [row(layer_name(i)) for i in range(19)]
         run = set(range(6, 11))

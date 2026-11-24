@@ -609,6 +609,27 @@ def _subspace_cohorts(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
                    overlap[:, keep[:, None], keep], count, extent, False)
 
 
+def _secondary_departures(angles: np.ndarray, names: list[str], bases: list[np.ndarray],
+                          directions: dict[str, np.ndarray]) -> np.ndarray:
+    """Which pairwise departures persist when accounting for resolved primary axes?"""
+    secondary = []
+    for name, q in zip(names, bases):
+        axis = directions.get(name)
+        if axis is None or axis.shape != (q.shape[0],):
+            secondary.append(q)
+            continue
+        coordinates = q.T @ axis
+        if np.linalg.norm(coordinates) < 0.9:
+            secondary.append(q)
+            continue
+        rotation, _ = np.linalg.qr(coordinates[:, None], mode="complete")
+        secondary.append(q @ rotation[:, 1:])
+    if all(a is b for a, b in zip(secondary, bases)):
+        return angles
+    cosines = np.nanmin(_principal_cosines(secondary), axis=0)
+    return np.minimum(angles, np.arccos(np.clip(cosines, 0., 1.)))
+
+
 def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float,
                       stats: dict[str, Measurements] | None = None,
                       directions: dict[str, np.ndarray] | None = None,
@@ -621,10 +642,14 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
         ranks = np.array([q.shape[1] for q in bases])
         angles = np.arccos(np.clip(np.nanmin(overlap, axis=0), 0., 1.))
         np.fill_diagonal(angles, 0.)
-        agreement = angles <= math.acos(0.9)
         if len(overlap) > 1:
             findings.update(_subspace_switches(ids, names, layer_count, angles, overlap,
                                                directions, bases, factor, extent))
+        if not full and directions:
+            # Dropping lower ranks changes the leading-axis reference population.
+            # Require the higher-rank outlier to differ in its additional modes.
+            angles = _secondary_departures(angles, names, bases, directions)
+        agreement = angles <= math.acos(0.9)
         supporters = agreement[np.argmax(agreement.sum(axis=1))]
         if supporters.sum() <= layer_count / 2:
             # A repeated space can itself be exceptional among otherwise
