@@ -286,9 +286,13 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      layers in the same regime, allowing for their dispersion. With fewer than eight
      such steps the scanner compares against their maximum. If every observed pair
      changes regime, it uses the largest within-regime diameter outside the candidate.
-     A separately measured leading axis that stays within the coherence radius and
-     moves much less than the space as a whole across a single observed switch
-     is checked for stability as part of a secondary switch.
+     The same angular resolution determines which output modes could be shared and
+     whether every mode has moved. A single measured pair of leading axes cannot
+     establish a separate dominant edit in each regime. For that explanation, each
+     endpoint needs another measured leading axis in its regime. Their boundary jump
+     must exceed the observed leading-axis variation on both sides and be smaller than
+     the full-space step, each by the configured outlier factor. An unchanged layer
+     between edited depth bands supplies no edit direction for a boundary comparison.
      A secondary-mode switch can also preserve one or more axes. When leading axes are
      unresolved, the scanner estimates the shared space inside a candidate layer by
      projecting it onto the participating layers. Each layer in the candidate, majority,

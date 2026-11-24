@@ -403,19 +403,18 @@ class _OutputGeometry(NamedTuple):
 
 def _shared_space_switch(geometry: _OutputGeometry, members: np.ndarray,
                          background: np.ndarray, adjacent: np.ndarray,
-                         within: float, factor: float, floor: float) -> str | None:
+                         resolution: float, factor: float, floor: float) -> str | None:
     """Confirm a common intersection and a separated complement at the observed boundaries."""
     neighbors = np.r_[False, members[:-1]] | np.r_[members[1:], False]
     reference = (background | neighbors) & ~members
     relevant = members | reference
     cross = geometry.cosines[:, members][:, :, reference]
     widest = np.arccos(np.clip(cross.min(axis=(1, 2)), 0., 1.))
-    tolerance = min(math.acos(0.9), factor * max(floor, within))
-    k = int(np.count_nonzero(widest <= tolerance))
+    k = int(np.count_nonzero(widest <= resolution))
     if k == 0 or k == len(widest):
         return None
     separation = math.acos(min(1., cross[k].max()))
-    if separation <= factor * max(floor, within, widest[k - 1]):
+    if separation <= max(resolution, factor * widest[k - 1]):
         return None
 
     # Pairwise intersections can point in different directions. Within one
@@ -427,7 +426,7 @@ def _shared_space_switch(geometry: _OutputGeometry, members: np.ndarray,
     active = maps[relevant]
     _, vectors = np.linalg.eigh((active.transpose(0, 2, 1) @ active).sum(axis=0))
     coordinates, cosines, _ = np.linalg.svd(maps @ vectors[:, -k:], full_matrices=False)
-    if math.acos(min(1., cosines[relevant, -1].min())) > tolerance:
+    if math.acos(min(1., cosines[relevant, -1].min())) > resolution:
         return None
     common = [q @ coords for q, coords in zip(bases, coordinates)]
     shared_angles = np.arccos(np.clip(_principal_cosines(common)[-1], 0., 1.))
@@ -439,7 +438,7 @@ def _shared_space_switch(geometry: _OutputGeometry, members: np.ndarray,
     known = relevant & np.isfinite(geometry.leading_angles.diagonal())
     if known.any():
         alignment = min(np.linalg.norm(common[i].T @ geometry.leading_axes[i]) for i in np.flatnonzero(known))
-        if (math.acos(min(1., alignment)) > tolerance
+        if (math.acos(min(1., alignment)) > min(resolution, math.acos(0.9))
                 or _stable_angles(geometry.leading_angles, members, background, adjacent,
                                   factor, floor, sampled=known, max_boundary_step=separation / factor) is None):
             return None
@@ -472,23 +471,34 @@ def _subspace_switches(ids: list[int], names: list[str], layer_count: int, angle
     return findings
 
 
+def _leading_regime_change(leading: np.ndarray, angles: np.ndarray, members: np.ndarray,
+                           same: np.ndarray, adjacent: np.ndarray, floor: float, factor: float) -> bool:
+    """Require independent support on both sides for a smaller change of dominant edit."""
+    sampled = np.flatnonzero(np.isfinite(leading.diagonal()))
+    runs = np.r_[0, np.cumsum(~(adjacent & same.diagonal(1)))]
+    left, right = sampled[:-1], sampled[1:]
+    crossing = (runs[right] - runs[left] == 1) & (members[left] != members[right])
+    left, right = left[crossing], right[crossing]
+    if not len(left):
+        return False
+    # Estimate the spread about each endpoint from other resolved axes in
+    # its regime. One measurement cannot establish a characteristic axis.
+    peers = same & np.isfinite(leading)
+    np.fill_diagonal(peers, False)
+    widths = np.where(peers, leading, 0.).max(axis=1)
+    widths[~peers.any(axis=1)] = np.inf
+    noise = np.maximum(floor, np.maximum(widths[left], widths[right]))
+    jump = leading[left, right]
+    return bool(np.any((jump > factor * noise) & (factor * jump < angles[left, right])))
+
+
 def _whole_space_switch(geometry: _OutputGeometry, angles: np.ndarray, members: np.ndarray,
                         same: np.ndarray, adjacent: np.ndarray, switches: np.ndarray,
                         limit: float, floor: float, factor: float) -> str | None:
     outside = members[:, None] & ~members
     closest = math.acos(min(1., geometry.cosines[0][outside].max()))
-    if closest <= limit:
-        return None
-    # A nearly shared, independently measured leading edit can move at the
-    # same boundary as a much larger secondary change. Retain the stability
-    # check when consecutive leading-axis observations bracket one switch.
-    sampled = np.flatnonzero(np.isfinite(geometry.leading_angles.diagonal()))
-    runs = np.r_[0, np.cumsum(~(adjacent & same.diagonal(1)))]
-    left, right = sampled[:-1], sampled[1:]
-    crossing = (runs[right] - runs[left] == 1) & (members[left] != members[right])
-    left, right = left[crossing], right[crossing]
-    tolerance = np.minimum(math.acos(0.9), angles[left, right] / factor)
-    if np.any(geometry.leading_angles[left, right] <= tolerance):
+    if closest <= limit or _leading_regime_change(geometry.leading_angles, angles, members,
+                                                  same, adjacent, floor, factor):
         return None
     # Compare the weakest moving mode at each boundary with ordinary steps
     # outside the group. A large jump in one mode cannot vouch for the others.
@@ -546,7 +556,7 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
                     evidence += (f", minimum secondary angle {math.degrees(secondary):.2f} degrees "
                                  f"at boundary {ids[i]}–{ids[i+1]}")
             else:
-                evidence = _shared_space_switch(geometry, members, background, adjacent, within, factor, floor)
+                evidence = _shared_space_switch(geometry, members, background, adjacent, limit, factor, floor)
                 if evidence is None:
                     continue
         reason = (f"abrupt {switch} switch in {sizes[label]} layers "

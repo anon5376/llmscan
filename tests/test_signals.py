@@ -833,7 +833,8 @@ class TestAnomalySignals(unittest.TestCase):
         changed = eye[:, :2] * np.cos(rotation) + eye[:, 2:] * np.sin(rotation)
         spaces = {r.name: changed if r.layer in group else eye[:, :2] for r in rows}
         axes = {r.name: spaces[r.name][:, int(r.layer in (6, 12))] for r in rows}
-        for observed, expected in [(range(20), group), ([3, 6, 9, 12, 18], group), ([4, 9, 15], set())]:
+        for observed, expected in [(range(20), group), ([3, 6, 9, 12, 18], group),
+                                   ([4, 9, 15], group), ([4, 8, 9, 15], set())]:
             with self.subTest(observed=observed):
                 samples = {layer_name(i): axes[layer_name(i)] for i in observed}
                 found = subspace_outliers(rows, spaces, 3., stats, samples)
@@ -852,10 +853,47 @@ class TestAnomalySignals(unittest.TestCase):
                 spaces = {r.name: eye[:, 4:] for r in rows}
                 spaces.update({layer_name(i): eye[:, :2] for i in first_run})
                 spaces.update({layer_name(i): second for i in second_run})
-                axes = {layer_name(5): eye[:, 0], layer_name(start + 1): second[:, 0]}
+                axes = {layer_name(i): spaces[layer_name(i)][:, 0]
+                        for i in (4, 5, start + 1, start + 2)}
                 found = subspace_outliers(rows, spaces, 3., stats, axes)
                 expected = first_run | second_run if detected else set()
                 self.assertEqual(set(found), {layer_name(i) for i in expected})
+
+    def test_sparse_boundary_axes_use_the_resolution_of_the_output_spaces(self):
+        rows = [row(layer_name(i)) for i in range(22)]
+        stats = {r.name: Measurements(1.6, 1.) for r in rows}
+        group = set(range(9, 14))
+        eye = np.eye(4)
+        for weak, strong, distinct_leading_edit in [(8., 50., True), (18., 72., True), (32., 80., False)]:
+            angles = np.radians([weak, strong])
+            rotated = eye[:, :2] * np.cos(angles) + eye[:, 2:] * np.sin(angles)
+            spaces = {r.name: rotated if r.layer in group else eye[:, :2] for r in rows}
+            # With repeated, consistent dominant axes on both sides, a smaller
+            # dominant-axis change corroborates a separate editing regime.
+            for samples in [(8, 9), (7, 8, 9), (7, 8, 9, 10)]:
+                with self.subTest(weak=weak, strong=strong, samples=samples):
+                    axes = {layer_name(i): spaces[layer_name(i)][:, 0] for i in samples}
+                    ranked = rank.rank_tensors(rows, stats, directions=axes, subspaces=spaces)
+                    expected = set() if len(samples) == 4 and distinct_leading_edit else group
+                    self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
+
+    def test_separate_edit_bands_have_no_observed_subspace_boundary(self):
+        # Independently edited depth bands can have distinct, constant planes.
+        # Identical weights between bands supply no edit-space observations.
+        rows = [row(layer_name(i), status="identical" if i in (6, 13) else "changed")
+                for i in range(23)]
+        edited = [r for r in rows if r.status == "changed"]
+        stats = {r.name: Measurements(1.6, 1.) for r in edited}
+        eye = np.eye(4)
+        for rotation in [(0., 65.), (18., 75.), (90., 90.)]:
+            with self.subTest(rotation=rotation):
+                angles = np.radians(rotation)
+                band = eye[:, :2] * np.cos(angles) + eye[:, 2:] * np.sin(angles)
+                spaces = {r.name: band if 6 < r.layer < 13 else eye[:, :2] for r in edited}
+                axes = {layer_name(i): spaces[layer_name(i)][:, 0] for i in (5, 7)}
+                ranked = rank.rank_tensors(rows, stats, directions=axes, subspaces=spaces)
+                self.assertEqual(len(ranked), len(edited))
+                self.assertTrue(all(r.tier == "T4" for r in ranked))
 
     def test_whole_space_switch_compares_weakest_boundary_mode_with_outside_steps(self):
         rows = [row(layer_name(i)) for i in range(32)]
