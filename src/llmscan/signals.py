@@ -11,6 +11,7 @@ from typing import NamedTuple
 
 import numpy as np
 
+from llmscan.core import OutputSpectrum
 from llmscan.inventory import InventoryRow
 from llmscan.names import RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind, stack_of
 
@@ -673,10 +674,74 @@ def _secondary_departures(angles: np.ndarray, names: list[str], bases: list[np.n
     return np.minimum(angles, np.arccos(np.clip(cosines, 0., 1.)))
 
 
+def _expansion_evidence(probe: np.ndarray, bases: list[np.ndarray], names: list[str],
+                        spectra: dict[str, OutputSpectrum], run: np.ndarray, background: np.ndarray,
+                        adjacent: np.ndarray, factor: float) -> str | None:
+    """Compare edit strength along the same extra directions on both sides of a boundary."""
+    members = np.zeros(len(names), dtype=bool)
+    members[run] = True
+    lower, upper = np.full((2, len(names)), np.nan)
+    for i in np.flatnonzero(background | members):
+        if names[i] not in spectra:
+            return None
+        lower[i], upper[i] = spectra[names[i]].projected_bounds(probe, bases[i])
+    # Each observed operator norm can differ from its latent value by one
+    # noise unit. Require disjoint intervals over the entire reference group.
+    strength, reference = lower[run].min(), upper[background].max()
+    if strength <= reference + 2:
+        return None
+    ordinary = adjacent & ((background[:-1] & background[1:]) | (members[:-1] & members[1:]))
+    steps = np.maximum(upper[1:] - lower[:-1], upper[:-1] - lower[1:])
+    limit = max(1., factor) * steps[ordinary].max(initial=0.)
+    boundaries = adjacent & (members[:-1] != members[1:])
+    gaps = np.where(members[:-1], lower[:-1] - upper[1:], lower[1:] - upper[:-1])
+    if not np.all(gaps[boundaries] > limit):
+        return None
+    return (f"extra-mode strength at least {strength:.2f} noise units "
+            f"vs at most {reference:.2f} in the majority")
+
+
+def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarray], ranks: np.ndarray,
+                         angles: np.ndarray, layer_count: int, extent: tuple[int, int],
+                         spectra: dict[str, OutputSpectrum], factor: float) -> dict[str, str]:
+    """Find observed higher-rank runs containing a coherent lower-rank majority space."""
+    p = np.bincount(ranks).argmax()
+    background = ranks == p
+    if background.sum() < 8 or background.sum() <= layer_count / 2 or not np.any(ranks > p):
+        return {}
+    radius = math.acos(0.9)
+    peers = np.flatnonzero(background)
+    within = angles[np.ix_(peers, peers)]
+    if within.max() > radius:
+        return {}
+    reference = bases[peers[within.max(axis=1).argmin()]]
+    adjacent = np.diff(ids) == 1
+    observed = np.flatnonzero(_observed_runs(ids, ranks > p, adjacent, extent))
+    findings = {}
+    for run in np.split(observed, np.flatnonzero(np.diff(np.asarray(ids)[observed]) > 1) + 1):
+        if len(run) < 3:
+            continue
+        if (run[0] and not background[run[0]-1]) or (run[-1]+1 < len(ids) and not background[run[-1]+1]):
+            continue
+        if angles[np.ix_(run, peers)].max() > radius or angles[np.ix_(run, run)].max() > radius:
+            continue
+        # The right null space of U.T @ W gives exactly the unpaired modes
+        # of W. Rotations of either basis leave this probe space unchanged.
+        anchor = bases[run[ranks[run].argmin()]]
+        _, _, right = np.linalg.svd(reference.T @ anchor, full_matrices=True)
+        probe = anchor @ right[p:].T
+        evidence = _expansion_evidence(probe, bases, names, spectra, run, background, adjacent, factor)
+        if evidence:
+            reason = f"abrupt output subspace expansion beyond rank {p} in {len(run)} layers ({evidence})"
+            findings.update((names[i], reason) for i in run)
+    return findings
+
+
 def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float,
                       stats: dict[str, Measurements] | None = None,
                       directions: dict[str, np.ndarray] | None = None,
-                      direction_flags: dict[str, str] | None = None) -> dict[str, str]:
+                      direction_flags: dict[str, str] | None = None,
+                      spectra: dict[str, OutputSpectrum] | None = None) -> dict[str, str]:
     """Refine leading-axis findings using the resolved spaces in the same output coordinates."""
     leading = dict(direction_flags or {})
     findings = {}
@@ -685,6 +750,9 @@ def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray]
         ranks = np.array([q.shape[1] for q in bases])
         angles = np.arccos(np.clip(np.nanmin(overlap, axis=0), 0., 1.))
         np.fill_diagonal(angles, 0.)
+        if full and spectra:
+            findings.update(_subspace_expansions(ids, names, bases, ranks, angles, layer_count,
+                                                 extent, spectra, factor))
         if len(overlap) > 1:
             findings.update(_subspace_switches(ids, names, layer_count, angles, overlap,
                                                directions, bases, factor, extent))

@@ -26,6 +26,18 @@ from .removal import joint_excess, promising_symmetric_response, skew_probe
 _ROWS_PER_BLOCK = 4096
 
 
+class OutputSpectrum(NamedTuple):
+    """Singular values in basis-column order and the largest omitted value, in noise units."""
+    retained: np.ndarray
+    omitted: float
+
+    def projected_bounds(self, probe: np.ndarray, basis: np.ndarray) -> tuple[float, float]:
+        """Bound the operator norm of the edit projected onto an orthonormal probe."""
+        lower = float(np.linalg.norm((probe.T @ basis) * self.retained, ord=2))
+        # Retained and omitted terms act on orthogonal right singular spaces.
+        return lower, math.hypot(lower, self.omitted)
+
+
 class DeltaStats(NamedTuple):
     singular_values: np.ndarray
     effective_rank: float
@@ -40,6 +52,7 @@ class DeltaStats(NamedTuple):
     fit_residual: np.ndarray | None = None
     base_probe: np.ndarray | None = None
     output_subspace: np.ndarray | None = None
+    output_spectrum: OutputSpectrum | None = None
 
     def tail_excess(self, rounding_budget: float) -> float | None:
         total = self.frobenius
@@ -477,6 +490,11 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int, subspace_bu
         else:
             output_subspace = small.copy()
 
+    spectrum = None
+    if output_subspace is not None and noise is not None:
+        floor = max(noise, math.sqrt(math.ulp(1.) * sum(w_suspect.shape) * total))
+        spectrum = OutputSpectrum(np.sqrt(energy[:dim][::-1]) / floor,
+                                  math.sqrt(energy[dim]) / floor if dim < len(energy) else 0.)
     return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),
                       fraction, second_share, direction, gain, projection_error, column_spike, tail_norm_fraction,
-                      fit_residual, base_probe, output_subspace)
+                      fit_residual, base_probe, output_subspace, spectrum)

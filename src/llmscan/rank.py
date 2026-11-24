@@ -32,6 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
+from llmscan.core import OutputSpectrum
 from llmscan.delta import EXTRA_FIELDS, sv_field
 from llmscan.inventory import CHANGED, IDENTICAL, ONLY_BASE, ONLY_SUSPECT, SHAPE_MISMATCH, InventoryRow, natural_key
 from llmscan.names import EMBEDDINGS, RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind
@@ -139,6 +140,7 @@ def rank_tensors(
     factor: float = DEFAULT_OUTLIER_FACTOR,
     directions: dict[str, np.ndarray] | None = None,
     subspaces: dict[str, np.ndarray] | None = None,
+    spectra: dict[str, OutputSpectrum] | None = None,
 ) -> list[RankedRow]:
     check_factor(factor)
     scanned = delta is not None  # an empty mapping is a scan that produced no rows, not "no scan"
@@ -153,7 +155,7 @@ def rank_tensors(
     other_tokens = [r for r in rows if r.status == CHANGED and r.kind in other_token_kinds and not bad[r.name]]
     cosines = direction_cosines(usable + other_tokens, directions or {})
     direction_flags = direction_outliers(usable, directions or {}, cosines, factor, subspaces)
-    direction_flags = subspace_outliers(usable, subspaces or {}, factor, stats, directions, direction_flags)
+    direction_flags = subspace_outliers(usable, subspaces or {}, factor, stats, directions, direction_flags, spectra)
 
     ranked: list[tuple[str, InventoryRow, str]] = []
     unusable: set[str] = set()

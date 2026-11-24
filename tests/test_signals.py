@@ -833,6 +833,52 @@ class TestAnomalySignals(unittest.TestCase):
                 ranked = rank.rank_tensors(rows, stats, directions=axes, subspaces=spaces)
                 self.assertTrue(all(r.tier == "T4" for r in ranked))
 
+    def test_expansion_uses_edit_strength_in_the_unpaired_directions(self):
+        rows = [row(layer_name(i)) for i in range(17)]
+        run = set(range(7, 11))
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        rng = np.random.default_rng(128)
+        axes, _ = np.linalg.qr(rng.normal(size=(7, 7)))
+        for (p, q), extra, subset, tall in product([(1, 2), (2, 3), (2, 4)], [1.1, 4., 12.],
+                                                   [False, True], [False, True]):
+            with self.subTest(ranks=(p, q), extra=extra, subset=subset, tall=tall):
+                # Keep only one singular value for CSV output. The projection
+                # still needs every resolved mode in the original output space.
+                spaces, spectra = {}, {}
+                right = np.eye(6 if tall else 9)
+                for r in rows:
+                    wide = (r.layer in run) != subset
+                    strengths = [8.] * p + ([extra] * (q-p) if wide else [])
+                    d = len(strengths)
+                    edit = (axes[:, :d] * strengths) @ right[:d]
+                    m = core.analyze_delta(np.zeros_like(edit), edit, 1, 1.)
+                    self.assertEqual(m.output_subspace.shape, (7, d))
+                    spaces[r.name], spectra[r.name] = m.output_subspace, m.output_spectrum
+                findings = subspace_outliers(rows, spaces, 3., stats, spectra=spectra)
+                expected = run if not subset and extra > 2 else set()
+                self.assertEqual(set(findings), {layer_name(i) for i in expected})
+                self.assertTrue(all("subspace expansion" in reason for reason in findings.values()))
+
+    def test_expansion_requires_an_abrupt_measured_boundary(self):
+        rows = [row(layer_name(i)) for i in range(17)]
+        run = set(range(4, 10))
+        for gradual, missing, omitted in product([False, True], [False, True], [0., 3.]):
+            with self.subTest(gradual=gradual, missing=missing, omitted=omitted):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    if missing and r.layer == 3:
+                        continue
+                    if r.layer in run:
+                        strength = 4. + (r.layer - min(run)) * 2. if gradual else 4.
+                        weights = [8., strength]
+                    else:
+                        weights = [8.]
+                    spaces[r.name] = np.eye(5)[:, :len(weights)]
+                    spectra[r.name] = core.OutputSpectrum(np.array(weights), omitted)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                expected = run if not (gradual or missing or omitted) else set()
+                self.assertEqual(set(findings), {layer_name(i) for i in expected})
+
     def test_mixed_ranks_share_an_intersection_and_count_independent_moving_modes(self):
         rows = [row(layer_name(i)) for i in range(21)]
         stats = {r.name: Measurements(2., 1.) for r in rows}

@@ -83,10 +83,10 @@ def _slug(spec: str) -> str:
     return spec.rstrip("/\\").replace("\\", "/").split("/")[-1]
 
 
-def _rank(args, rows, out: Path, delta_csv: Path | None = None, directions=None, subspaces=None) -> str:
+def _rank(args, rows, out: Path, delta_csv: Path | None = None, directions=None, subspaces=None, spectra=None) -> str:
     """Write ranking.csv (with ΔW stats when delta_csv is given); return the top-N text."""
     ranked = rank.rank_tensors(rows, rank.read_delta_csv(delta_csv) if delta_csv else None,
-                               args.expected_kinds, args.outlier_factor, directions, subspaces)
+                               args.expected_kinds, args.outlier_factor, directions, subspaces, spectra)
     atomic.write(out / "ranking.csv", lambda tmp: rank.write_csv(ranked, tmp))
     return rank.summarize(ranked, args.top)
 
@@ -157,8 +157,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             directions = {}
             subspaces = {}
+            spectra = {}
             atomic.write(out / "delta.csv", lambda tmp: delta.scan(base, suspect, rows, tmp, k=args.k,
-                                                                   directions=directions, subspaces=subspaces),
+                                                                   directions=directions, subspaces=subspaces,
+                                                                   spectra=spectra),
                          keep_partial=True)
         except NotImplementedError as e:
             print(f"ΔW scan stopped: {e}", file=sys.stderr)
@@ -166,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"wrote {out / 'inventory.csv'}\nwrote {out / 'ranking.csv'}")
             return 2
 
-    print(_rank(args, rows, out, out / "delta.csv", directions, subspaces) + "\n")
+    print(_rank(args, rows, out, out / "delta.csv", directions, subspaces, spectra) + "\n")
     from llmscan import plots  # matplotlib import is slow; only needed from here on
 
     drows = plots.read_rows(out / "delta.csv")
