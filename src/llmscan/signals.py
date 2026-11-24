@@ -737,7 +737,7 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
     steps = np.maximum(upper[1:] - lower[:-1], upper[:-1] - lower[1:])
     outside_step = _ordinary_step(steps[adjacent & background[:-1] & background[1:]])
     unit = noise[measured].max()
-    accepted = np.zeros_like(strong)
+    confirmed = []
     for members in ([strong, elevated] if np.any(elevated != strong) else [strong]):
         for start, end in _bounded_runs(ids, members, adjacent, extent):
             run = np.arange(start, end + 1)
@@ -752,10 +752,19 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
             if any(lower[i] - upper[j] <= max(limit, noise[i] + noise[j])
                    for i, j in boundaries if 0 <= j < len(names)):
                 continue
-            accepted[run] = True
-    # Only confirmed expansions can corroborate another terminal transition.
+            confirmed.append((start, end))
+    # A terminal candidate needs continuity or a disjoint confirmed run.
+    # Test coverage before unioning overlapping core and extended candidates:
+    # the interior core may have two boundaries even if its extension has one.
+    accepted = np.zeros_like(strong)
+    continuous = adjacent.all()
+    for start, end in confirmed:
+        if not continuous and (start == 0 or end == len(ids) - 1):
+            if not any(b < start or a > end for a, b in confirmed):
+                continue
+        accepted[start:end + 1] = True
     findings = {}
-    for i in np.flatnonzero(_observed_runs(ids, accepted, adjacent, extent)):
+    for i in np.flatnonzero(accepted):
         votes = np.searchsorted(bounds, resolved[i])
         findings[names[i]] = (f"abrupt output subspace expansion beyond rank {p} "
                               f"(unpaired strength at least {resolved[i]/unit:.2f} exceeds "

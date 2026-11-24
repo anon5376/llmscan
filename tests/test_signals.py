@@ -1085,6 +1085,23 @@ class TestAnomalySignals(unittest.TestCase):
                 expected = {8, 21, 22, 23} if strength == 6. else set()
                 self.assertEqual(set(findings), {layer_name(i) for i in expected})
 
+    def test_interior_core_survives_an_unsupported_terminal_extension(self):
+        rows = [row(layer_name(i)) for i in range(24)]
+        for gap, reverse in product([False, True], [False, True]):
+            with self.subTest(gap=gap, reverse=reverse):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    depth = 23 - r.layer if reverse else r.layer
+                    extra = {2: 1.1, 20: 6., 21: 6., 22: 2.5, 23: 2.5}.get(depth)
+                    strengths = [10.] if extra is None else [10., extra]
+                    spaces[r.name] = np.eye(4)[:, :len(strengths)]
+                    if not gap or depth != 2:
+                        noise = 2. if depth == 0 else 1.
+                        spectra[r.name] = core.OutputSpectrum(np.array(strengths), 0., noise, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                expected = range(20, 22 if gap else 24)
+                self.assertEqual(set(findings), {layer_name(23 - i if reverse else i) for i in expected})
+
     def test_mixed_ranks_share_an_intersection_and_count_independent_moving_modes(self):
         rows = [row(layer_name(i)) for i in range(21)]
         stats = {r.name: Measurements(2., 1.) for r in rows}
