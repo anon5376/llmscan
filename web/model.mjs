@@ -144,10 +144,12 @@ export function buildWorkbench(report) {
     return t;
   });
 
-  // Every run rewrites ranking.csv, but only a completed scan rewrites delta.csv. A ranking without a single
-  // stat next to a delta.csv with stats for its tensors means the two come from different runs.
-  const rankedWithStats = (report.ranking ?? []).some((row) => (row.effective_rank ?? '') !== '' || (row.sv_001 ?? '') !== '');
-  const deltaUnranked = !rankedWithStats && ranking.some((t) => t.scanned && (t.effectiveRank != null || t.sv1 != null));
+  // Every run rewrites ranking.csv, but only a scan rewrites delta.csv. A ranking computed from a delta.csv lists
+  // every tensor that file has stats for, with them (only tensors that differ get stats, and all of those are
+  // ranked), so a stat the ranking lacks means this delta.csv is not the one the ranking was computed from.
+  const hasStats = (row) => (row.effective_rank ?? '') !== '' || (row.sv_001 ?? '') !== '';
+  const rankedWithStats = new Set((report.ranking ?? []).filter(hasStats).map((row) => row.name));
+  const deltaUnranked = (report.delta ?? []).some((row) => hasStats(row) && !rankedWithStats.has(row.name));
 
   const tierCounts = new Map(TIERS.map((t) => [t.id, 0]));
   for (const t of ranking) tierCounts.set(t.tier, (tierCounts.get(t.tier) ?? 0) + 1);

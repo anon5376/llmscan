@@ -99,8 +99,24 @@ test("a delta.csv left behind by an earlier run is flagged, not presented as thi
   assert.equal(buildWorkbench(REPORT).deltaUnranked, false);
   assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats }).deltaUnranked, true); // --inventory-only rerun
   assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats, delta: [] }).deltaUnranked, false);
-  const structural = { ...REPORT, ranking: REPORT.ranking.slice(0, 1) }; // only a T1 row: it never has stats
-  assert.equal(buildWorkbench(structural).deltaUnranked, false);
+  // the suspect was replaced before the rerun: what the old scan measured is identical now, so no longer ranked
+  const moved = REPORT.ranking.slice(0, 1); // only a T1 row: it never has stats
+  assert.equal(buildWorkbench({ ...REPORT, ranking: moved }).deltaUnranked, true);
+  const unmeasured = REPORT.delta.map((r) => ({ ...r, effective_rank: "", sv_001: "" }));
+  assert.equal(buildWorkbench({ ...REPORT, ranking: moved, delta: unmeasured }).deltaUnranked, false);
+});
+
+test("a scan that had nothing to analyse keeps its T3 rows and is not called stale", () => {
+  // what the CLI writes for changed conv-shaped down_proj weights: a header-only delta.csv and "not scanned" T3 rows
+  const name = "model.layers.0.mlp.down_proj.weight";
+  const reason = "stats unusable: not scanned (shape 32x64x1 is not 2-D); cannot be judged consistent with abliteration";
+  const model = buildWorkbench({
+    base: "b", suspect: "s", delta: [],
+    inventory: [{ name, layer: "0", kind: "down_proj", status: "changed", base_dtype: "F32", suspect_dtype: "F32", base_shape: "32x64x1", suspect_shape: "32x64x1", numel: "2048" }],
+    ranking: [{ rank: "1", tier: "T3", name, layer: "0", kind: "down_proj", status: "changed", effective_rank: "", sv_001: "", reason }],
+  });
+  assert.deepEqual([model.hasDelta, model.deltaUnranked, model.tierCounts.get("T3")], [false, false, 1]);
+  assert.deepEqual([model.ranking[0].tier, model.ranking[0].reason, model.ranking[0].scanned], ["T3", reason, false]);
 });
 
 test("an empty report and an unknown tier or status are shown, not dropped", () => {
