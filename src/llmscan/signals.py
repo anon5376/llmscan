@@ -475,7 +475,8 @@ def _leading_regime_change(leading: np.ndarray, angles: np.ndarray, members: np.
                            same: np.ndarray, adjacent: np.ndarray, floor: float, factor: float) -> bool:
     """Require independent support on both sides for a smaller change of dominant edit."""
     sampled = np.flatnonzero(np.isfinite(leading.diagonal()))
-    runs = np.r_[0, np.cumsum(~(adjacent & same.diagonal(1)))]
+    breaks = ~(adjacent & same.diagonal(1))
+    runs = np.r_[0, np.cumsum(breaks)]
     left, right = sampled[:-1], sampled[1:]
     crossing = (runs[right] - runs[left] == 1) & (members[left] != members[right])
     left, right = left[crossing], right[crossing]
@@ -489,7 +490,11 @@ def _leading_regime_change(leading: np.ndarray, angles: np.ndarray, members: np.
     widths[~peers.any(axis=1)] = np.inf
     noise = np.maximum(floor, np.maximum(widths[left], widths[right]))
     jump = leading[left, right]
-    return bool(np.any((jump > factor * noise) & (factor * jump < angles[left, right])))
+    # The crossed boundary ends the left sample's run. A full-space
+    # comparison at the sample endpoints would include within-run drift.
+    boundary = np.flatnonzero(breaks)[runs[left]]
+    step = angles.diagonal(1)[boundary]
+    return bool(np.any((jump > factor * noise) & (factor * jump < step)))
 
 
 def _whole_space_switch(geometry: _OutputGeometry, angles: np.ndarray, members: np.ndarray,

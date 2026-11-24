@@ -859,6 +859,24 @@ class TestAnomalySignals(unittest.TestCase):
                 expected = first_run | second_run if detected else set()
                 self.assertEqual(set(found), {layer_name(i) for i in expected})
 
+    def test_sparse_leading_measurements_compare_with_the_crossed_boundary_step(self):
+        rows = [row(layer_name(i)) for i in range(22)]
+        stats = {r.name: Measurements(1.6, 1.) for r in rows}
+        group = set(range(8, 14))
+        eye = np.eye(4)
+        for interior, edge in [(62., 58.), (58., 62.)]:
+            with self.subTest(interior=interior, edge=edge):
+                spaces = {r.name: eye[:, :2] for r in rows}
+                for i in group:
+                    angles = np.radians([20., edge if i == max(group) else interior])
+                    spaces[layer_name(i)] = eye[:, :2] * np.cos(angles) + eye[:, 2:] * np.sin(angles)
+                axes = {layer_name(i): spaces[layer_name(i)][:, 0] for i in (11, 12, 15, 16)}
+                found = subspace_outliers(rows, spaces, 3., stats, axes)
+                # The sampled axes straddle the exit. Only the subspace step
+                # from layer 13 to 14 can corroborate a regime change there.
+                expected = group if edge < 3 * 20. else set()
+                self.assertEqual(set(found), {layer_name(i) for i in expected})
+
     def test_sparse_boundary_axes_use_the_resolution_of_the_output_spaces(self):
         rows = [row(layer_name(i)) for i in range(22)]
         stats = {r.name: Measurements(1.6, 1.) for r in rows}
