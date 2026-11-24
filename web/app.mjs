@@ -519,12 +519,9 @@ function deltaView(model) {
     staleDeltaNote(model),
     tiles,
     unscanned.length > 0 && h('p', { class: 'note' },
-      h('strong', null, `${plural(unscanned.length, 'tensor')} of the ${formatCount(model.inventory.length)} compared ${unscanned.length === 1 ? 'is' : 'are'} not in delta.csv. `),
-      'The scan covers 2-D float tensors that both models have with the same shape, so '
-      + [structural > 0 && `${formatCount(structural)} structural ${structural === 1 ? 'mismatch' : 'mismatches'} (missing, added, reshaped or retyped)`,
-        unscanned.length > structural && `${plural(unscanned.length - structural, 'tensor')} that ${unscanned.length - structural === 1 ? 'is not a 2-D float matrix' : 'are not 2-D float matrices'}`,
-      ].filter(Boolean).join(' and ')
-      + ' have no ΔW stats. The Ranking and Inventory tabs still list them.'),
+      h('strong', null, `${plural(unscanned.length, 'tensor')} of the ${formatCount(model.inventory.length)} compared ${unscanned.length === 1 ? 'is' : 'are'} not in delta.csv`),
+      structural > 0 && `, ${formatCount(structural)} of them ${structural === 1 ? 'a structural mismatch' : 'structural mismatches'} (missing, added, reshaped or retyped)`,
+      `. ${SCAN_SCOPE} The Ranking and Inventory tabs still list every tensor.`),
     charts?.box ?? emptyState('No changed 2-D tensor to plot',
       h('p', null, 'delta.csv lists tensors, but none carries a usable effective rank: every scanned tensor is identical to base, or its stats are unusable.')),
     listed.length > 0 && h('h3', { class: 'section-title' }, 'Changed tensors in delta.csv'),
@@ -561,6 +558,10 @@ function sides(base, suspect, format = (v) => v) {
   return `base ${base ? format(base) : 'absent'} → suspect ${suspect ? format(suspect) : 'absent'}`;
 }
 
+// why a tensor can be absent from delta.csv; which of the two applies to one tensor is not in the report
+const SCAN_SCOPE = 'The scan covers 2-D float tensors that both models have with the same shape, '
+  + 'and a scan that stopped early leaves out the ones it had not reached.';
+
 /** The median the ranking judged this tensor by, as rank.py computed it; nothing for a tensor it judged another way. */
 function yardstickFact(t) {
   const y = t.yardstick;
@@ -572,9 +573,10 @@ function yardstickFact(t) {
 
 function deltaFacts(model, t) {
   if (!model.hasDelta) return h('p', null, 'delta.csv is missing or lists no tensor, so no tensor in this report has ΔW stats.');
-  if (!t.scanned) return h('p', null, 'Not in delta.csv. The scan covers 2-D float tensors that exist in both models with the same shape.');
+  if (!t.scanned) return [staleDeltaNote(model), h('p', null, `Not in delta.csv. ${SCAN_SCOPE}`)];
   if (!t.spectrum.length && t.effectiveRank == null) {
-    return h('p', null, t.status === 'identical' ? 'ΔW = 0: identical tensors are listed in delta.csv without stats.' : 'delta.csv lists this tensor without stats.');
+    return [staleDeltaNote(model),
+      h('p', null, t.status === 'identical' ? 'ΔW = 0: identical tensors are listed in delta.csv without stats.' : 'delta.csv lists this tensor without stats.')];
   }
   const kind = canonicalKind(t.kind);
   const peers = model.measured.filter((p) => canonicalKind(p.kind) === kind && p !== t && hasSpectrum(p));
