@@ -231,6 +231,14 @@ def _recurring_rank_shift(names: list[str], members: np.ndarray, stats: dict[str
     return None
 
 
+def _ordinary_step(steps: np.ndarray, floor: float = 0.) -> float:
+    """Upper reference for ordinary motion; small samples cannot estimate its dispersion."""
+    if len(steps) < 8:
+        return float(steps.max(initial=0.)) + floor
+    peers = Peers.summarize(steps.tolist())
+    return peers.median + max(floor, 6 * 1.4826 * peers.mad)
+
+
 def _coherent_groups(angles: np.ndarray, layer_count: int, factor: float, floor: float) -> Iterator[np.ndarray]:
     """Yield partitions with a gap between all within- and between-group angles."""
     labels = np.zeros(len(angles), dtype=int)
@@ -282,9 +290,12 @@ def _trajectory_groups(ids: list[int], angles: np.ndarray, layer_count: int,
                 for group in range(len(sizes)):
                     members = np.flatnonzero(groups == group)
                     rates = angles[members[:-1], members[1:]] / np.diff(layers[members])
-                    step = max(step, float(rates.max()))
-                if step <= math.acos(0.9) and separation > factor * max(floor, step):
-                    yield groups, step
+                    if rates.max() > math.acos(0.9):
+                        break  # Every link must still be a comparable direction.
+                    step = max(step, min(float(rates.max()), _ordinary_step(rates)))
+                else:
+                    if separation > factor * max(floor, step):
+                        yield groups, step
         labels[labels == b] = a
         previous = max(floor, separation)
 
@@ -301,7 +312,7 @@ def _subspace_groups(ids: list[int], angles: np.ndarray, layer_count: int, facto
     found = False
     for labels, step in _trajectory_groups(ids, angles, layer_count, factor, floor):
         found = True
-        yield labels, np.full(labels.max() + 1, step), "maximum within-group step per layer"
+        yield labels, np.full(labels.max() + 1, step), "ordinary within-group step per layer"
     if not found:
         cliques = _isolated_cliques(ids, angles, layer_count, factor, floor, extent)
         if cliques is not None:
@@ -379,7 +390,13 @@ def _stable_angles(angles: np.ndarray, members: np.ndarray, background: np.ndarr
     boundary_limit = min(math.acos(0.9), max_boundary_step)
     if sampled is None or same_run.any():
         rates = angles[a[same_run], b[same_run]] / (b - a)[same_run]
-        boundary_limit = min(boundary_limit, factor * rates.max(initial=floor))
+        # A single large within-regime step must not certify a primary-axis
+        # jump at a secondary switch. Preserve the measured rate of each regime.
+        member_pairs = members[a[same_run]]
+        drift = floor
+        for local in (rates[member_pairs], rates[~member_pairs]):
+            drift = max(drift, min(float(local.max(initial=0.)), _ordinary_step(local)))
+        boundary_limit = min(boundary_limit, factor * drift)
     if not np.all(angles[a[boundary], b[boundary]] <= boundary_limit):
         return None
     return max(spread, across)
@@ -492,11 +509,8 @@ def _independent_mode_switch(cosines: np.ndarray, angles: np.ndarray, members: n
     # Compare each moving mode at every boundary with ordinary outside steps.
     steps = angles.diagonal(1)[adjacent & same.diagonal(1) & ~members[:-1]]
     reference = "outside step limit"
-    if len(steps) >= 8:
-        peers = Peers.summarize(steps.tolist())
-        step_limit = peers.median + max(floor, 6 * 1.4826 * peers.mad)
-    elif len(steps):
-        step_limit = steps.max() + floor
+    if len(steps):
+        step_limit = _ordinary_step(steps, floor)
     else:
         # In an alternating partition every adjacent pair may switch groups.
         # Use the full observed diameter of each outside regime as an upper
@@ -561,7 +575,10 @@ def _secondary_switch(ids: list[int], angles: np.ndarray, geometry: _OutputGeome
     paired = _observed_runs(ids, members, adjacent, geometry.extent, np.isfinite(second.diagonal()))
     if not paired.any():
         return None
-    primary = _stable_angles(geometry.leading_angles, members, background, adjacent, factor, floor)
+    # Boundary attribution concerns switches with a measured secondary mode
+    # on both sides. All primary measurements still constrain overall spread.
+    comparable = adjacent & ((members[:-1] == members[1:]) | np.isfinite(second.diagonal(1)))
+    primary = _stable_angles(geometry.leading_angles, members, background, comparable, factor, floor)
     if primary is None:
         return None
     outside = members[:, None] & ~members
@@ -701,27 +718,38 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
         ratio = spectrum.scale / scale
         lo, hi, unpaired = spectrum.outside_bounds(reference, bases[i])
         lower[i], upper[i], extra[i], noise[i] = ratio * np.array([lo, hi, unpaired, spectrum.noise])
-    peer_bound = (upper[background] + noise[background]).max()
-    strong = (ranks > p) & (extra - noise > peer_bound)
+    bounds = np.sort(upper[background] + noise[background])
+    # A shoulder can overlap wider intervals, but must clear a strict majority
+    # of the entire cohort and connect to a core above every reference interval.
+    resolved = extra - noise
+    strong = (ranks > p) & (resolved > bounds[-1])
+    if not strong.any():
+        return {}
+    elevated = (ranks > p) & (resolved > bounds[layer_count // 2])
     adjacent = (np.diff(ids) == 1) & measured[:-1] & measured[1:]
-    observed = np.flatnonzero(_observed_runs(ids, strong, adjacent, extent))
     steps = np.maximum(upper[1:] - lower[:-1], upper[:-1] - lower[1:])
-    outside_step = steps[adjacent & ~strong[:-1] & ~strong[1:]].max(initial=0.)
+    outside_step = _ordinary_step(steps[adjacent & background[:-1] & background[1:]])
+    unit = noise[measured].max()
     findings = {}
-    for run in np.split(observed, np.flatnonzero(np.diff(np.asarray(ids)[observed]) > 1) + 1):
-        if not len(run):
-            continue
-        limit = max(1., factor) * max(outside_step, steps[run[:-1]].max(initial=0.))
-        boundaries = [(run[0], run[0]-1), (run[-1], run[-1]+1)]
-        if any(lower[i] - upper[j] <= max(limit, noise[i] + noise[j])
-               for i, j in boundaries if 0 <= j < len(names)):
-            continue
-        unit = noise[measured].max()
-        for i in run:
-            findings[names[i]] = (f"abrupt output subspace expansion beyond rank {p} "
-                                  f"(unpaired strength at least {(extra[i]-noise[i])/unit:.2f} "
-                                  f"vs at most {peer_bound/unit:.2f} outside the majority space, "
-                                  "in units of the largest measurement allowance)")
+    for members in ([strong, elevated] if np.any(elevated != strong) else [strong]):
+        observed = np.flatnonzero(_observed_runs(ids, members, adjacent, extent))
+        for run in np.split(observed, np.flatnonzero(np.diff(np.asarray(ids)[observed]) > 1) + 1):
+            if not strong[run].any():
+                continue
+            # Compare ordinary motion within each confidence level. Crossing
+            # between levels is itself a possible transition.
+            inside = run[:-1][strong[run[:-1]] == strong[run[1:]]]
+            limit = max(1., factor) * max(outside_step, _ordinary_step(steps[inside]))
+            boundaries = [(run[0], run[0]-1), (run[-1], run[-1]+1)]
+            if any(lower[i] - upper[j] <= max(limit, noise[i] + noise[j])
+                   for i, j in boundaries if 0 <= j < len(names)):
+                continue
+            for i in run:
+                votes = np.searchsorted(bounds, resolved[i])
+                findings[names[i]] = (f"abrupt output subspace expansion beyond rank {p} "
+                                      f"(unpaired strength at least {resolved[i]/unit:.2f} exceeds "
+                                      f"the upper bounds of {votes}/{len(peers)} reference layers, "
+                                      "in units of the largest measurement allowance)")
     return findings
 
 

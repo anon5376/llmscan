@@ -661,6 +661,26 @@ class TestAnomalySignals(unittest.TestCase):
                 self.assertEqual({r.layer for r in ranked if r.tier != "T4"}, expected)
                 self.assertTrue(all("step per layer" in r.reason for r in ranked if r.tier == "T3"))
 
+    def test_switches_with_an_exceptional_step_in_the_majority_trajectory(self):
+        rows = [row(layer_name(i)) for i in range(24)]
+        eye = np.eye(4)
+        ordinary = list(range(0, 60, 3))
+        ordinary[3], ordinary[7] = ordinary[7], ordinary[3]
+        angles = ordinary[:10] + [90] * 4 + ordinary[10:]
+        for shared, primary in [(False, False), (True, False), (True, True)]:
+            with self.subTest(shared=shared, primary=primary):
+                spaces, directions = {}, {}
+                for r, angle in zip(rows, np.radians(angles)):
+                    basis = np.cos(angle) * eye[:, :2] + np.sin(angle) * eye[:, 2:]
+                    if shared:
+                        basis[:, 0] = eye[0]
+                    spaces[r.name] = basis
+                    if primary:
+                        directions[r.name] = eye[0]
+                findings = subspace_outliers(rows, spaces, 3., directions=directions)
+                for i in range(10, 14):
+                    self.assertIn("step per layer", findings[layer_name(i)])
+
     def test_isolated_run_compares_both_boundary_steps_with_other_layers(self):
         # An ordinary 40-degree step enters a pause. An exceptional exit
         # alone does not make the pause an anomalous regime.
@@ -941,6 +961,66 @@ class TestAnomalySignals(unittest.TestCase):
                 expanded = {name for name, reason in findings.items() if "subspace expansion" in reason}
                 expected = {layer_name(i) for i in run} if tilt_strength > 6 else set()
                 self.assertEqual(expanded, expected)
+
+    def test_stepped_expansion_attributes_only_independently_elevated_layers(self):
+        rows = [row(layer_name(i)) for i in range(26)]
+        eye = np.eye(4)
+        for (shoulders, attributed), reverse in product([([2.4], [2.4]), ([2.4, 2.8], [2.4, 2.8]),
+                                                        ([1.1, 2.4], []), ([1.1], [])], [False, True]):
+            with self.subTest(shoulders=shoulders, reverse=reverse):
+                values = [0.] * 7 + shoulders + [6.] * 4
+                values += [0.] * (len(rows) - len(values))
+                if reverse:
+                    values.reverse()
+                spaces, spectra = {}, {}
+                for r, value in zip(rows, values):
+                    # Less precise reference intervals overlap both
+                    # intermediate levels. The majority still separates.
+                    noise = 2. if r.layer in (0, 25) else 1.
+                    strengths = [9., value] if value else [9.]
+                    spaces[r.name] = eye[:, :len(strengths)]
+                    spectra[r.name] = core.OutputSpectrum(np.array(strengths), 0., noise, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                # 2.4 clears the majority, but its interval overlaps a 1.1
+                # neighbor. Only a measured outer boundary supports attribution.
+                expected = {r.name for r, value in zip(rows, values) if value in [6., *attributed]}
+                self.assertEqual(set(findings), expected)
+
+    def test_expansion_step_reference_tolerates_isolated_but_not_typical_motion(self):
+        rows = [row(layer_name(i)) for i in range(26)]
+        eye = np.eye(4)
+        for varying in [{3}, set(range(0, 26, 2))]:
+            with self.subTest(varying=varying):
+                spaces, spectra = {}, {}
+                target = set(range(9, 14))
+                for r in rows:
+                    if r.layer in target:
+                        basis, values = eye[:, [0, 2]], [20., 5.5]
+                    else:
+                        angle = .12 if r.layer in varying else 0.
+                        axis = np.cos(angle) * eye[0] + np.sin(angle) * eye[1]
+                        basis, values = axis[:, None], [20.]
+                    spaces[r.name] = basis
+                    spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .5, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                expanded = {name for name, reason in findings.items() if "subspace expansion" in reason}
+                expected = target if len(varying) == 1 else set()
+                self.assertEqual(expanded, {layer_name(i) for i in expected})
+
+    def test_continuous_strength_ramp_across_rank_and_rounding_thresholds(self):
+        rows = [row(layer_name(i)) for i in range(32)]
+        eye = np.eye(5)
+        for reverse in [False, True]:
+            with self.subTest(reverse=reverse):
+                spaces, spectra = {}, {}
+                for r in rows:
+                    depth = len(rows) - r.layer - 1 if reverse else r.layer
+                    strength = (depth + 1) / 8
+                    noise = 3. if depth < 20 else .5
+                    edit = np.diag([10., strength, 0., 0., 0.])
+                    measured = core.analyze_delta(0. * eye, edit, 1, noise)
+                    spaces[r.name], spectra[r.name] = measured.output_subspace, measured.output_spectrum
+                self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
 
     def test_expansion_compares_absolute_strength_when_layer_budgets_differ(self):
         rows = [row(layer_name(i)) for i in range(17)]
@@ -1552,7 +1632,9 @@ class TestAnomalySignals(unittest.TestCase):
                 axes, spaces = {}, {}
                 for r in rows:
                     terminal = r.layer >= 12
-                    theta = np.radians(r.layer + (jump if terminal else 0))
+                    # An isolated excursion in the background must not raise
+                    # the tolerance for a primary-axis jump at the boundary.
+                    theta = np.radians(r.layer + (jump if terminal else 0) + (6 if r.layer == 4 else 0))
                     axes[r.name] = np.cos(theta) * eye[0] + np.sin(theta) * eye[1]
                     spaces[r.name] = np.column_stack((axes[r.name], eye[3 if terminal else 2]))
                 stats = {r.name: Measurements(1.5, 1.) for r in rows}

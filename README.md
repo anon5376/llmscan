@@ -260,8 +260,12 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      space. The scanner compares the strength of each layer's unpaired modes with an
      upper bound on the majority edits in the entire orthogonal complement. It tracks
      strength in that same complement across depth, so adjacent expansions can point
-     in different directions. Even a single layer must clear both measurement allowances
-     and show an abrupt step at each observed boundary relative to ordinary steps.
+     in different directions. At least one layer in a run must clear every reference
+     interval after both measurement allowances. A contiguous transition layer must
+     independently clear the intervals of a strict majority of the whole cohort.
+     Both outer boundaries must show a resolved jump relative to ordinary steps in
+     the reference and within the run at the same confidence level. A terminal run
+     with one boundary requires a continuous measured trajectory.
      A minority rank drop adds no direction.
      For each resolved rank, layers reaching that rank can also compare their additional
      modes directly. A line shared by two planes supplies no evidence about how their
@@ -276,9 +280,11 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      the largest diameter by the configured outlier factor, allowing for numerical precision.
      If slow drift makes a group's diameter too large, the scanner also checks for a
      gap in the angles needed to connect groups by single linkage. It compares the
-     smallest between-group angle with the largest within-group step in layer order,
-     dividing each step by the layer interval. This allows gradual rotation over many
-     layers while requiring the groups to remain separated throughout the trajectory.
+     smallest between-group angle with ordinary within-group steps in layer order,
+     dividing each step by the layer interval. With at least eight steps it estimates
+     ordinary motion from the median plus six MAD-based standard deviations. Smaller
+     samples use their maximum. Each observed rate must still lie within the coherence
+     radius. This allows gradual rotation over many layers.
      When the other layers wander, the scanner can also identify an isolated group of at
      least three mutually close layers. Its members may recur in separate layer ranges.
      The group's diameter must be small compared with both
