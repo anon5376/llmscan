@@ -138,14 +138,19 @@ function wireImport() {
   }
   const hasFiles = (event) => event.dataTransfer?.types.includes('Files');
   const hint = (on) => document.body.classList.toggle('dropping', on);
-  window.addEventListener('dragenter', (event) => { if (hasFiles(event)) hint(true); });
+  // dragenter and dragover both have to be cancelled, and name the effect, for the page to count as a drop target
+  for (const type of ['dragenter', 'dragover']) {
+    window.addEventListener(type, (event) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      hint(true);
+    });
+  }
   // no related target: the drag left the page (for the tab strip, another window), where a drop is not ours
   window.addEventListener('dragleave', (event) => { if (!event.relatedTarget) hint(false); });
-  window.addEventListener('dragover', (event) => {
-    if (!hasFiles(event)) return;
-    event.preventDefault();
-    hint(true);
-  });
+  // a drag that ends without a drop reaching the page sends nothing; the pointer moving again means it is over
+  for (const type of ['blur', 'pointermove']) window.addEventListener(type, () => hint(false));
   window.addEventListener('drop', async (event) => {
     hint(false);
     if (!hasFiles(event)) return;
