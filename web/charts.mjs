@@ -66,7 +66,7 @@ function padded(lo, hi, log) {
   return [lo - pad, hi + pad];
 }
 
-const tickLabel = (v, log) => (log ? `1e${Math.round(Math.log10(v))}` : formatNumber(v));
+const tickLabel = (v, log) => (log ? `1e${Math.round(Math.log10(v))}` : String(v));
 
 /** Plot frame: gridlines, tick labels and axis titles. Returns the scales and the plot group. */
 function frame({ width, height, x, y, xLabel, yLabel, xTicks, label }) {

@@ -1,6 +1,6 @@
 // llmscan workbench: reads one CLI output folder in the browser and renders it. Nothing is uploaded.
 import { readReport } from './report.mjs';
-import { append, h } from './dom.mjs';
+import { h } from './dom.mjs';
 import {
   TIERS, buildWorkbench, filterTensors, formatCount, formatNumber, formatPercent, formatShape,
   pageOf, sortTensors, statusLabel, tierInfo,
@@ -335,7 +335,8 @@ function kindMatrix(model, view, rerender) {
       onclick: () => { Object.assign(view, active ? { kind: '', statuses: new Set() } : { kind: k.kind, statuses: new Set([status]) }); view.page = 0; rerender(); },
     }, formatCount(count)));
   };
-  return h('details', { class: 'matrix', open: wide.matches },
+  view.matrixOpen ??= wide.matches;
+  return h('details', { class: 'matrix', open: view.matrixOpen, ontoggle: (event) => { view.matrixOpen = event.target.open; } },
     h('summary', null, 'Tensors by kind and status'),
     h('div', { class: 'table-wrap' }, h('table', { class: 'compact' },
       h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Kind'),
@@ -378,6 +379,8 @@ function inventoryView(model) {
   ];
 }
 
+const tensorCount = (n) => `${formatCount(n)} tensor${n === 1 ? '' : 's'}`;
+
 function tile(label, value, detail) {
   return h('div', { class: 'tile' }, h('dt', null, label), h('dd', null, h('span', { class: 'tile-value' }, value), detail && h('span', { class: 'tile-detail' }, detail)));
 }
@@ -387,6 +390,7 @@ function deltaCharts(model) {
   const draw = () => {
     const options = { selected: state.selected, onPick: (name) => select(name, { open: true }) };
     const withLayer = model.measured.filter((t) => t.layer != null);
+    const spectra = (kind) => model.measured.filter((t) => t.kind === kind && t.spectrum.length);
     const kinds = kindOrder(model.measured.filter((t) => t.spectrum.length).map((t) => t.kind));
     const layers = withLayer.map((t) => t.layer);
     const layerRange = [Math.min(...layers), Math.max(...layers)];
@@ -399,13 +403,13 @@ function deltaCharts(model) {
         byLayer ? [byLayer.chart, h('ul', { class: 'legend' }, byLayer.legend.map(({ kind, color }) =>
           h('li', null, h('span', { class: 'swatch', style: { background: color } }), h('code', null, kind))))]
           : h('p', { class: 'note' }, 'No changed tensor in this report belongs to a numbered layer.'),
-        offStack > 0 && h('p', { class: 'fine' }, `${formatCount(offStack)} changed tensor${offStack === 1 ? ' is' : 's are'} outside the layer stack and only in the table below.`)),
+        offStack > 0 && h('p', { class: 'fine' }, `${tensorCount(offStack)} outside the layer stack ${offStack === 1 ? 'is' : 'are'} only in the table below.`)),
       h('figure', { class: 'card' },
         h('figcaption', null, h('h3', null, 'Singular values of ΔW by kind'),
           h('p', null, 'One line per changed tensor, log scale. An abliteration-like edit is one spike above a low floor.')),
         h('div', { class: 'multiples' }, kinds.map((kind) => h('div', null,
-          h('h4', null, h('code', null, kind), ` · ${formatCount(model.measured.filter((t) => t.kind === kind).length)} tensors`),
-          kindSpectraChart(kind, model.measured.filter((t) => t.kind === kind && t.spectrum.length), { ...options, layerRange })))),
+          h('h4', null, h('code', null, kind), ` · ${tensorCount(spectra(kind).length)}`),
+          kindSpectraChart(kind, spectra(kind), { ...options, layerRange })))),
         withLayer.length > 0 && h('p', { class: 'ramp' }, `layer ${layerRange[0]}`,
           h('span', { class: 'ramp-bar', style: { background: layerGradient } }), `layer ${layerRange[1]}`)),
     );
@@ -648,6 +652,10 @@ wide.addEventListener('change', () => {
   if (state.model) renderDetail();
 });
 dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+window.addEventListener('hashchange', () => {
+  const id = location.hash.slice(1);
+  if (state.model && id !== state.tab && TABS.some((tab) => tab.id === id)) showTab(id);
+});
 
 wireImport();
 state.tab = location.hash.slice(1) || 'ranking';

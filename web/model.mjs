@@ -224,7 +224,7 @@ export function pageOf(rows, page, size) {
   return { rows: rows.slice(start, start + size), page: current, pages, start, end: Math.min(start + size, rows.length) };
 }
 
-/** Four significant digits, like the CLI's reasons; blank cells print as an en dash. */
+/** Four significant digits (1.00026 prints as 1.000, not as an exact 1); blank cells print as an en dash. */
 export function formatNumber(value) {
   if (value == null) return '–';
   if (Number.isNaN(value)) return 'NaN';
@@ -232,7 +232,8 @@ export function formatNumber(value) {
   if (value === 0) return '0';
   const abs = Math.abs(value);
   if (abs >= 1e6 || abs < 1e-3) return value.toExponential(2).replace('e+', 'e').replaceAll('-', '−');
-  return String(Number(value.toPrecision(4))).replace('-', '−');
+  if (Number.isInteger(value) || abs >= 1000) return Math.round(value).toLocaleString('en-US').replace('-', '−');
+  return value.toPrecision(4).replace('-', '−');
 }
 
 export function formatCount(value) {

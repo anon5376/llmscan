@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
+import { readReport } from "../../web/report.mjs";
 import { kindColors, kindOrder, layerColor, linearTicks, logTicks, scale } from "../../web/charts.mjs";
 import {
   buildWorkbench, filterTensors, formatNumber, formatPercent, median, naturalCompare, pageOf, parseNumber,
@@ -142,7 +143,8 @@ test("parses and prints the numbers the CLI writes", () => {
   assert.deepEqual(["", " ", "abc", "1.00002", "5e-07", "nan", "inf", "-inf"].map(parseNumber).map(String),
     ["null", "null", "null", "1.00002", "5e-7", "NaN", "Infinity", "-Infinity"]);
   assert.deepEqual([null, NaN, Infinity, 0, 1.00002, 4.97312, 0.458873, 1427.3, 7.55e6, 0.000334269].map(formatNumber),
-    ["–", "NaN", "∞", "0", "1", "4.973", "0.4589", "1427", "7.55e6", "3.34e−4"]);
+    ["–", "NaN", "∞", "0", "1.000", "4.973", "0.4589", "1,427", "7.55e6", "3.34e−4"]);
+  assert.deepEqual([1, 6144, -2.5].map(formatNumber), ["1", "6,144", "−2.500"]);
   assert.equal(median([3, 1, 2, 10]), 2.5);
   assert.equal(median([]), null);
   assert.deepEqual(["org/Model-v2", "/a/b/", "C:\\x\\y", ""].map(shortName), ["Model-v2", "b", "y", ""]);
@@ -161,6 +163,22 @@ test("chart colours follow the CLI figures and scales stay inside the plot", () 
   assert.deepEqual(logTicks(2e-5, 0.7), [1e-4, 1e-3, 1e-2, 1e-1]);
   const y = scale([1e-4, 1], [200, 0], true);
   assert.deepEqual([y(1e-4), y(1e-2), y(1), y(0)].map(Math.round), [200, 100, 0, 200]);
+});
+
+test("the bundled demo loads through readReport into a complete workbench", async () => {
+  const files = ["pair.txt", "inventory.csv", "ranking.csv", "delta.csv"]
+    .map((name) => new File([readFileSync(new URL(`demo/${name}`, WEB))], name));
+  const model = buildWorkbench(await readReport(files));
+  assert.deepEqual([model.baseName, model.suspectName], ["tiny-llama", "tiny-llama-abliterated-tampered"]);
+  assert.deepEqual([...model.tierCounts], [["T1", 3], ["T2", 2], ["T3", 1], ["T4", 21]]);
+  assert.equal(model.inventory.length, 112);
+  for (const t of model.ranking) {
+    assert.ok(t.reason && t.numel > 0 && t.status !== "identical", t.name); // every ranked row found its inventory row
+  }
+  assert.ok(model.hasDelta);
+  assert.equal(model.measured.length, 24);
+  assert.ok(model.measured.every((t) => t.spectrum.length === 32 && t.gap > 1));
+  assert.equal(model.deltaSummary.top, model.ranking.find((t) => t.tier === "T3"));
 });
 
 test("the page is local-first: same-origin only, and report text never becomes markup", () => {
