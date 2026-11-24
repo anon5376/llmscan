@@ -855,6 +855,26 @@ class TestAnomalySignals(unittest.TestCase):
                 found = subspace_outliers(rows, spaces, 3., stats)
                 self.assertEqual(set(found), {layer_name(i) for i in run} if measured else set())
 
+    def test_missing_boundary_affects_only_its_own_run(self):
+        rows = [row(layer_name(i)) for i in range(30)]
+        stats = {r.name: Measurements(2., 1.) for r in rows}
+        eye = np.eye(5)
+        for reverse, lines in product([False, True], [{0, 1, 2}, {7}, {17}, {7, 17}, set()]):
+            with self.subTest(reverse=reverse, lines=lines):
+                spaces, expected = {}, set()
+                runs = [range(3, 7), range(18, 22)]
+                for r in rows:
+                    i = 29 - r.layer if reverse else r.layer
+                    modes = [0] if i in lines else [0, 1]
+                    for run in runs:
+                        if i in run:
+                            modes = [0, 2]
+                            if run.start - 1 not in lines and run.stop not in lines:
+                                expected.add(r.layer)
+                    spaces[r.name] = eye[:, modes]
+                ranked = rank.rank_tensors(rows, stats, subspaces=spaces)
+                self.assertEqual({r.layer for r in ranked if r.tier == "T3"}, expected)
+
     def test_higher_rank_outlier_needs_departure_in_its_additional_modes(self):
         rows = [row(layer_name(i)) for i in range(21)]
         stats = {r.name: Measurements(2., 1.) for r in rows}

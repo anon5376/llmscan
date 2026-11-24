@@ -327,8 +327,8 @@ def _isolated_cliques(ids: list[int], angles: np.ndarray, layer_count: int,
         separation = angles[np.ix_(members, ~members)].min()
         if separation <= factor * max(floor, diameter):
             continue
-        boundaries = members[:-1] != members[1:]
-        if not adjacent[boundaries].all():
+        boundaries = adjacent & (members[:-1] != members[1:])
+        if not boundaries.any():
             continue
         background = steps[adjacent & ~members[:-1] & ~members[1:]]
         if len(background) < 8:
@@ -520,6 +520,20 @@ def _independent_mode_switch(cosines: np.ndarray, angles: np.ndarray, members: n
                     f"vs {reference} {math.degrees(step_limit):.2f} degrees")
 
 
+def _observed_runs(ids: list[int], members: np.ndarray, adjacent: np.ndarray,
+                   extent: tuple[int, int]) -> np.ndarray:
+    """Members of physical runs with a measurement on each outer boundary."""
+    starts = np.flatnonzero(members & np.r_[True, ~(adjacent & members[:-1])])
+    ends = np.flatnonzero(members & np.r_[~(adjacent & members[1:]), True])
+    observed = np.zeros_like(members)
+    for start, end in zip(starts, ends):
+        left = adjacent[start - 1] if start else ids[0] == extent[0]
+        right = adjacent[end] if end < len(adjacent) else ids[-1] == extent[1]
+        if left and right:
+            observed[start:end + 1] = True
+    return observed
+
+
 def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, geometry: _OutputGeometry,
                         factor: float, floor: float, adjacent: np.ndarray,
                         labels: np.ndarray, widths: np.ndarray, spread: str, finest: bool) -> dict[str, str]:
@@ -530,11 +544,11 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
     for label in np.flatnonzero(sizes < sizes.max()):
         within = widths[label]
         members = labels == label
-        # A run touching a filtered endpoint has an unmeasured outer boundary.
-        if (members[0] and ids[0] > geometry.extent[0]) or (members[-1] and ids[-1] < geometry.extent[1]):
+        observed = _observed_runs(ids, members, adjacent, geometry.extent)
+        if not observed.any():
             continue
-        switches = members[:-1] != members[1:]
-        if not adjacent[switches].all() or (switches.sum() == 1 and not adjacent.all()):
+        switches = observed[:-1] != observed[1:]
+        if switches.sum() == 1 and not adjacent.all():
             continue
         outside = members[:, None] & ~members
         limit = factor * max(floor, within)
@@ -566,9 +580,9 @@ def _partition_switches(ids: list[int], names: list[str], angles: np.ndarray, ge
                 if independent is None:
                     continue
                 switch, evidence = independent
-        reason = (f"abrupt {switch} switch in {sizes[label]} layers "
+        reason = (f"abrupt {switch} switch in {observed.sum()} layers "
                   f"({evidence}, {spread} {math.degrees(within):.2f} degrees)")
-        for i in np.flatnonzero(members):
+        for i in np.flatnonzero(observed):
             findings[names[i]] = reason
     return findings
 
