@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 
 from helpers import gguf_float, write_gguf, write_safetensors
-from llmscan import core, rank
+from llmscan import core, interval_fit, rank
 from llmscan.interval_fit import _box_excess, fit_excess
 from llmscan.names import stack_of
 from llmscan.removal import joint_excess, promising_symmetric_response, skew_excess
@@ -344,6 +344,35 @@ class TestProjectionMeasurements(unittest.TestCase):
                     s = b + (axes * strengths) @ (axes.T @ b)
                     excess = fit_excess(b + error, s - error, radius, radius)
                     self.assertEqual(excess > 0., gain)
+
+    def test_zero_psd_projection_requires_a_verified_negative_margin(self):
+        axes = np.linalg.qr(np.random.default_rng(11).normal(size=(5, 5)))[0]
+        for scale in (2.**-500, 1., 2.**500):
+            for largest, certified in [(-0.1, True), (0., False), (1e-12, False)]:
+                with self.subTest(scale=scale, largest=largest):
+                    a = (axes * np.array([-4., -3., -2., -1., largest]) * scale) @ axes.T
+                    self.assertEqual(interval_fit._negative_definite((a + a.T) / 2), certified)
+        # Completing a factorization alone cannot authorize the shortcut.
+        with patch.object(np.linalg, "cholesky", return_value=np.eye(5)):
+            self.assertFalse(interval_fit._negative_definite(-2 * np.eye(5)))
+
+    def test_certified_zero_projection_preserves_each_two_box_witness(self):
+        rng = np.random.default_rng(20)
+        b = rng.normal(size=(14, 8))
+        s = 0.5 * b + 0.02 * rng.normal(size=b.shape)
+        radius = np.full_like(b, 0.01)
+        with patch.object(interval_fit, "_box_excess", wraps=_box_excess) as fast:
+            self.assertEqual(fit_excess(b, s, radius, radius), 0.)
+        with patch.object(interval_fit, "_negative_definite", return_value=False), \
+                patch.object(interval_fit, "_box_excess", wraps=_box_excess) as dense:
+            self.assertEqual(fit_excess(b, s, radius, radius), 0.)
+        self.assertTrue(any(call.args[-2].shape[1] == 0 for call in fast.call_args_list))
+        self.assertEqual(fast.call_count, dense.call_count)
+        for actual, reference in zip(fast.call_args_list, dense.call_args_list):
+            f, k = actual.args[-2:]
+            g, j = reference.args[-2:]
+            np.testing.assert_array_equal(f @ f.T, g @ g.T)
+            np.testing.assert_array_equal(k, j)
 
 
 class TestAnomalySignals(unittest.TestCase):

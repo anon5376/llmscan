@@ -61,6 +61,30 @@ def _box_excess(b, s, rb, rs, factor, skew):
     return 0.
 
 
+def _negative_definite(a):
+    """Certify a zero PSD projection by reconstructing a shifted Gram matrix."""
+    n = len(a)
+    # If A = -LLᵀ - shift I + E and ||E||₂ < shift, then A ≺ 0.
+    # Leave room for backward error even quite close to the cone boundary.
+    scale = np.abs(a.diagonal()).sum()
+    eps = 16 * (n + 1) * math.ulp(1.)
+    floor = 16 * (n + 1)**2 * np.finfo(float).tiny
+    shift = 4 * (eps * scale + floor)
+    shifted = -a
+    shifted.flat[::n + 1] -= shift
+    try:
+        lower = np.linalg.cholesky(shifted)
+    except np.linalg.LinAlgError:
+        return False
+    remainder = a + lower @ lower.T
+    remainder.flat[::n + 1] += shift
+    # The absolute row-sum bounds the symmetric reconstruction residual.
+    # Product roundoff has spectral norm <= gamma_n ||L||_F². Allow also
+    # for both additions, the norm reductions and gradual underflow.
+    guard = eps * (np.einsum("ij,ij->", lower, lower) + scale + shift) + floor
+    return np.max(np.abs(remainder).sum(axis=1)) + guard < shift
+
+
 def fit_excess(b, s, rb, rs):
     """Seek a separating witness by fitting interval corrections to the Gram form."""
     d = s - b
@@ -81,15 +105,22 @@ def fit_excess(b, s, rb, rs):
     correction = np.zeros_like(form)
     extrapolated = correction
     step = floor / 2
+    try_cholesky = False
     for iteration in range(1, 513):
         # Fit the *linearized* corrected form to the cone of symmetric NSD
         # matrices. Its residual is a PSD factor plus a skew matrix. Only
         # _box_excess can turn this search direction into a finding.
         trial = form + extrapolated
-        vals, vecs = np.linalg.eigh((trial + trial.T) / 2)
-        factor = vecs * np.sqrt(np.maximum(0., vals))
+        symmetric = (trial + trial.T) / 2
         skew = (trial - trial.T) / 2
-        residual = factor @ factor.T + skew
+        if try_cholesky and _negative_definite(symmetric):
+            factor = w[:, :0]
+            residual = skew
+        else:
+            vals, vecs = np.linalg.eigh(symmetric)
+            try_cholesky = vals[-1] < 0.
+            factor = vecs * np.sqrt(np.maximum(0., vals))
+            residual = factor @ factor.T + skew
         if iteration & (iteration - 1) == 0:
             excess = _box_excess(b, s, rb, rs, w @ factor, w @ skew @ w.T)
             if excess:
