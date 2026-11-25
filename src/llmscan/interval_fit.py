@@ -5,6 +5,10 @@ import math
 import numpy as np
 
 
+_POLISH_STEPS = 16
+_FIT_STEPS = 512
+
+
 def _box_epsilon(shape):
     return 128 * (sum(shape) + 1) * math.ulp(1.)
 
@@ -155,14 +159,18 @@ def _polish_primal(b, s, d, rb, rs, eb, es):
     bq, sq = b @ axes, s @ axes
     form = s.T @ d
     yb, ys = eb, es
-    for step in range(1, 17):
+    for step in range(1, _POLISH_STEPS + 1):
         reflected = form + b.T @ (2 * es - ys) - s.T @ (2 * eb - yb)
         z = (axes.T @ (reflected - reflected.T) @ axes) / denom
         yb = eb + (sq @ z) @ axes.T
         ys = es - (bq @ z) @ axes.T
         eb, es = np.clip(yb, -rb, rb), np.clip(ys, -rs, rs)
-        if step in (4, 16) and _primal_remainder(s, d, eb, es, tol, weights) <= tol:
-            return True
+        if step in (4, _POLISH_STEPS):
+            updated = _primal_remainder(s, d, eb, es, tol, weights)
+            if updated <= tol:
+                return True
+            if not updated < remainder:
+                return False
     return False
 
 
@@ -187,7 +195,7 @@ def fit_excess(b, s, rb, rs):
     extrapolated = correction
     step = floor / 2
     negative_spectrum = False
-    for iteration in range(1, 513):
+    for iteration in range(1, _FIT_STEPS + 1):
         # Fit the *linearized* corrected form to the cone of symmetric NSD
         # matrices. Its residual is a PSD factor plus a skew matrix. Only
         # _box_excess can turn this search direction into a finding.
@@ -204,11 +212,13 @@ def fit_excess(b, s, rb, rs):
             residual = factor @ factor.T + skew
         if iteration & (iteration - 1) == 0:
             excess = _box_excess(b, s, rb, rs, w @ factor, w @ skew @ w.T)
-            if excess:
+            if excess or iteration == _FIT_STEPS:
                 return excess
             # Polish a box-feasible iterate, never the extrapolated point.
-            # An inconclusive probe leaves the witness trajectory intact.
-            if iteration >= 8 and _polish_primal(b, s, d, rb, rs, eb, es):
+            # Wait for at least four ordinary steps per speculative step.
+            # Doubling checkpoints then allow at most three 16-step probes
+            # in the entire 512-step search, each after its witness check.
+            if iteration >= 4 * _POLISH_STEPS and _polish_primal(b, s, d, rb, rs, eb, es):
                 return 0.
         gb, gs = _correction_adjoint(sw, dw, w, residual, negative_spectrum)
         # Accelerated projected gradient on the two boxes. The projection

@@ -404,20 +404,26 @@ class TestProjectionMeasurements(unittest.TestCase):
             self.assertEqual(fit_excess(b, s, radius, radius), 0.)
         self.assertLess(fast.call_count, old.call_count / 2)
 
-    def test_inconclusive_primal_checks_preserve_late_joint_witness(self):
-        # Widening the second base interval delays separation. The mixed
-        # PSD/skew witness first clears both boxes after several probes.
+    def test_late_joint_witness_precedes_speculative_polishing(self):
+        # Widening the second base interval delays separation to check 64.
         b, s = np.array([[1.5, 0.], [-1., 1.5]]), np.eye(2)
-        rb, rs = np.array([[0., 1.], [0.25, 0.]]), np.zeros_like(s)
+        rb, rs = np.array([[0., 1.], [0.3156, 0.]]), np.zeros_like(s)
         with patch.object(interval_fit, "_polish_primal", return_value=False):
             expected = fit_excess(b, s, rb, rs)
         with patch.object(interval_fit, "_polish_primal", wraps=interval_fit._polish_primal) as polish, \
                 patch.object(interval_fit, "_box_excess", wraps=_box_excess) as witness:
             actual = fit_excess(b, s, rb, rs)
-        self.assertGreater(polish.call_count, 0)
+        polish.assert_not_called()
+        self.assertEqual(witness.call_count, 7)
         self.assertGreater(actual, 0.)
         self.assertEqual(actual, expected)
         self.assertEqual(actual, _box_excess(*witness.call_args.args))
+        # Force an earlier polish attempt and check that its scratch
+        # iterates cannot disturb the eventual witness or its margin.
+        with patch.object(interval_fit, "_POLISH_STEPS", 4), \
+                patch.object(interval_fit, "_polish_primal", wraps=interval_fit._polish_primal) as polish:
+            self.assertEqual(fit_excess(b, s, rb, rs), expected)
+        self.assertGreater(polish.call_count, 0)
 
     def test_primal_bound_requires_full_unwhitened_reconstruction(self):
         s = np.eye(3)
