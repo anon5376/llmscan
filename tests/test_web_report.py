@@ -107,7 +107,7 @@ class Demo(unittest.TestCase):
                     b = new[tensor]
                     self.assertEqual(a.keys(), b.keys(), name)
                     for column in a.keys() - {"rank", "reason", "seconds"}:
-                        if column == "effective_rank" or column.startswith("sv_"):
+                        if column in {"effective_rank", "direction_cosine"} or column.startswith("sv_"):
                             self.assertEqual(a[column] == "", b[column] == "", (name, tensor, column))
                             if a[column]:
                                 self.assertAlmostEqual(float(a[column]), float(b[column]), delta=1e-3, msg=(name, tensor, column))

@@ -46,13 +46,14 @@ test("reads the demo, a full llmscan run", async () => {
   assert.equal(r.inventory.length, 112);
   assert.equal(r.ranking.length, 27);
   assert.equal(r.delta.length, 84);
-  assert.deepEqual(Object.keys(r.inventory[0]), INVENTORY_HEADER.split(","));
-  assert.deepEqual(Object.keys(r.ranking[0]), RANKING_HEADER.split(","));
+  assert.deepEqual(Object.keys(r.inventory[0]), [...INVENTORY_HEADER.split(","), "resave_dtype"]);
+  assert.deepEqual(Object.keys(r.ranking[0]), [...RANKING_HEADER.split(","), "direction_cosine"]);
   assert.ok("sv_032" in r.delta[0]);
   assert.deepEqual(r.ranking[5], {
     rank: "6", tier: "T3", name: "model.layers.8.mlp.down_proj.weight", layer: "8", kind: "down_proj", status: "changed",
     effective_rank: "5.91867", sv_001: "0.730039",
-    reason: "effective_rank 5.919 is 5.9x the median 1 of changed down_proj tensors (threshold 3x)",
+    reason: "effective_rank 5.919 is 5.9x the median 1 of changed down_proj tensors (threshold 3x); multi-mode change violates projection reciprocity (96.6% of the discrepancy exceeds rounding); abrupt output subspace expansion beyond rank 1 (unpaired strength at least 41.72 exceeds the upper bounds of 10/10 reference layers against the majority space, in units of the largest measurement allowance)",
+    direction_cosine: "",
   });
   assert.match(r.ranking[3].reason, /^changed q_proj: outside expected kinds \(attn_output, down_proj, /);  // quoted in the file
   for (const row of [...r.inventory, ...r.ranking, ...r.delta]) {

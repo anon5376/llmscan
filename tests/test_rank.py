@@ -49,6 +49,32 @@ def read_ranking(path):
 
 
 class TestTiers(unittest.TestCase):
+    def test_bf16_resave_requires_every_non_projection_value_to_match(self):
+        # Both halfway cases exercise ties-to-even. A single extra value or
+        # an untouched layer inconsistent with the cast invalidates the claim.
+        base = np.array([[1 + 1 / 256, 1 + 3 / 256]], np.float32)
+        rounded = np.array([[1., 1 + 2 / 128]], np.float32)
+        names = [layer_name(i, "self_attn.k_proj") for i in range(3)]
+        for mode, expected in [("all", "T4"), ("one extra difference", "T2"), ("unchanged layer", "T2")]:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                b = {name: ("F16", base) for name in names}
+                s = {name: ("F16", rounded.copy()) for name in names}
+                if mode == "one extra difference":
+                    s[names[-1]][1][0, 0] = 0.99
+                elif mode == "unchanged layer":
+                    s[names[-1]] = b[names[-1]]
+                write_safetensors(tmp / "b.safetensors", b)
+                write_safetensors(tmp / "s.safetensors", s)
+                rc, out, err = run_cli("--base", str(tmp / "b.safetensors"), "--suspect", str(tmp / "s.safetensors"),
+                                       "--out", str(tmp / "out"), "--inventory-only")
+                self.assertEqual(rc, 0, out + err)
+                rows = read_ranking(tmp / "out" / "ranking.csv")
+                self.assertEqual({r["tier"] for r in rows}, {expected})
+                self.assertEqual({r["status"] for r in rows}, {"changed"})
+                if mode == "all":
+                    self.assertTrue(all("BF16 re-save" in r["reason"] for r in rows))
+
     def test_structure_then_location_then_rest_and_identical_unranked(self):
         rows = [
             row("model.embed_tokens.weight", IDENTICAL),
@@ -281,7 +307,7 @@ class TestCli(unittest.TestCase):
         self.changed.append(layer_name(0, "mlp.gate_proj"))
         for name in self.changed:
             dt, w = base[name]
-            suspect[name] = (dt, w + 1 / 16)
+            suspect[name] = (dt, w * 0.5)  # a partial removal, so only the canned rank is anomalous
         # dtype-only re-save: same values stored as F16, must not be ranked
         suspect[layer_name(1, "self_attn.q_proj")] = ("F16", base[layer_name(1, "self_attn.q_proj")][1])
         write_safetensors(self.tmp / "base.safetensors", base)
@@ -331,7 +357,7 @@ class TestCli(unittest.TestCase):
         canned = {n: core.DeltaStats(np.array([2.0, 1.0]), 1.0) for n in self.changed}
         canned[layer_name(3, "mlp.down_proj")] = core.DeltaStats(np.array([2.0, 1.0]), 8.0)
 
-        def fake_analyze(w_base, w_suspect, k):  # delta.scan visits changed tensors in natural name order
+        def fake_analyze(w_base, w_suspect, k, subspace_budget):  # natural tensor order
             return canned[next(ranks)]
 
         with mock.patch.object(core, "analyze_delta", fake_analyze):
@@ -392,7 +418,7 @@ class TestCli(unittest.TestCase):
             real_mkdir(self_, *a, **kw)
             if self_ == out:
                 plant()
-        def analyze_then_plant(w_base, w_suspect, k):  # before the ranking after the scan
+        def analyze_then_plant(w_base, w_suspect, k, subspace_budget):  # before the ranking after the scan
             plant()
             return core.DeltaStats(np.array([2.0, 1.0]), 1.0)
 
