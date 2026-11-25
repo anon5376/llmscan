@@ -387,6 +387,52 @@ class TestProjectionMeasurements(unittest.TestCase):
             correction = (es @ w).T @ dw + sw.T @ ((es - eb) @ w)
             self.assertAlmostEqual(np.sum(skew * correction), np.sum(gb * eb + gs * es), places=11)
 
+    def test_primal_projection_ends_a_nonseparating_fit_early(self):
+        rng = np.random.default_rng(20)
+        b = rng.normal(size=(14, 8))
+        s = 0.5 * b + 0.02 * rng.normal(size=b.shape)
+        radius = np.full_like(b, 0.01)
+        with patch.object(interval_fit, "_primal_remainder", wraps=interval_fit._primal_remainder) as check, \
+                patch.object(interval_fit, "_correction_adjoint", wraps=interval_fit._correction_adjoint) as fast:
+            self.assertEqual(fit_excess(b, s, radius, radius), 0.)
+        self.assertGreater(check.call_count, 1)
+        for call in check.call_args_list:
+            for correction in call.args[2:4]:
+                self.assertTrue((np.abs(correction) <= radius).all())
+        with patch.object(interval_fit, "_polish_primal", return_value=False), \
+                patch.object(interval_fit, "_correction_adjoint", wraps=interval_fit._correction_adjoint) as old:
+            self.assertEqual(fit_excess(b, s, radius, radius), 0.)
+        self.assertLess(fast.call_count, old.call_count / 2)
+
+    def test_inconclusive_primal_checks_preserve_late_joint_witness(self):
+        # Widening the second base interval delays separation. The mixed
+        # PSD/skew witness first clears both boxes after several probes.
+        b, s = np.array([[1.5, 0.], [-1., 1.5]]), np.eye(2)
+        rb, rs = np.array([[0., 1.], [0.25, 0.]]), np.zeros_like(s)
+        with patch.object(interval_fit, "_polish_primal", return_value=False):
+            expected = fit_excess(b, s, rb, rs)
+        with patch.object(interval_fit, "_polish_primal", wraps=interval_fit._polish_primal) as polish, \
+                patch.object(interval_fit, "_box_excess", wraps=_box_excess) as witness:
+            actual = fit_excess(b, s, rb, rs)
+        self.assertGreater(polish.call_count, 0)
+        self.assertGreater(actual, 0.)
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual, _box_excess(*witness.call_args.args))
+
+    def test_primal_bound_requires_full_unwhitened_reconstruction(self):
+        s = np.eye(3)
+        zero = np.zeros_like(s)
+        for scale in (2.**-60, 1., 2.**60):
+            with self.subTest(scale=scale):
+                w = scale * s
+                skew = scale * np.array([[0., 1., 0.], [-1., 0., 0.], [0., 0., 0.]])
+                for d, closed in [(-w, True), (w, False), (-w + skew, False)]:
+                    self.assertEqual(interval_fit._polish_primal(w - d, w, d, zero, zero, zero, zero), closed)
+                # A fictitious base correction would hide positive growth.
+                self.assertFalse(interval_fit._polish_primal(zero, w, w, zero, zero, 2 * w, zero))
+                with patch.object(np.linalg, "cholesky", return_value=zero):
+                    self.assertFalse(interval_fit._polish_primal(2 * w, w, -w, zero, zero, zero, zero))
+
 
 class TestAnomalySignals(unittest.TestCase):
     def setUp(self):

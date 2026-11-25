@@ -5,6 +5,10 @@ import math
 import numpy as np
 
 
+def _box_epsilon(shape):
+    return 128 * (sum(shape) + 1) * math.ulp(1.)
+
+
 def _box_excess(b, s, rb, rs, factor, skew):
     """Lower-bound <M, Sᵀ(S−B)> over both entrywise intervals, M = FFᵀ + K."""
     m = factor @ factor.T + (skew - skew.T) / 2
@@ -13,7 +17,7 @@ def _box_excess(b, s, rb, rs, factor, skew):
     # All dot products and reductions in the certificate run along one
     # matrix dimension at a time. Include cancellation in FFᵀ + K, the
     # Gram product, the gradients, and the final row sums in the allowance.
-    eps = 128 * (sum(b.shape) + 1) * math.ulp(1.)
+    eps = _box_epsilon(b.shape)
     size = np.linalg.norm(factor)**2 + np.linalg.norm(skew)
     weights = sum(np.linalg.norm(a) for a in (b, s, rb, rs))
     guard = eps * size * weights**2 + (b.size + m.size) * np.finfo(float).tiny
@@ -96,6 +100,72 @@ def _correction_adjoint(sw, dw, w, residual, skew_only):
     return gb, dw @ residual.T @ w.T - gb
 
 
+def _primal_remainder(s, d, eb, es, shift, weight_norm):
+    """Bound the linear-cost gate in _box_excess for *every* witness.
+
+    For any corrections inside the boxes, gap - linear_cost <= <M, A>,
+    where A is the linearized corrected form below. If A = -LLᵀ + tI + E,
+    this is at most (t + ||E||_F) (||F||_F² + ||K||_F) for M = FFᵀ + K.
+    Cholesky only proposes L. Reconstruct in the original coordinates,
+    including the skew part, independently of how the fit was obtained.
+    """
+    form = (s + es).T @ d + s.T @ (es - eb)
+    shifted = -(form + form.T) / 2
+    shifted.flat[::len(form) + 1] += shift
+    try:
+        lower = np.linalg.cholesky(shifted)
+    except np.linalg.LinAlgError:
+        return math.inf
+    if np.linalg.norm(lower) > 2 * weight_norm:
+        return math.inf
+    remainder = form + lower @ lower.T
+    remainder.flat[::len(form) + 1] -= shift
+    # t and the measured reconstruction each spend 1/16 of the gate's
+    # guard per unit witness size. For gamma = (rows+cols+1)*ulp(1),
+    # each product's Frobenius error is <= gamma times its operand norms.
+    # The two form products have summed norm products <= 2*weight_norm².
+    # Bound LLᵀ's separately. The remaining 112*gamma covers these
+    # products, additions, norms and the gap/linear-cost evaluation.
+    return np.linalg.norm(remainder)
+
+
+def _polish_primal(b, s, d, rb, rs, eb, es):
+    """Douglas–Rachford projections between the two boxes and affine symmetry."""
+    weights = sum(np.linalg.norm(x) for x in (b, s, rb, rs))
+    # Stay in the normal range for products, squared norms and their
+    # error estimates. Outside this range use the ordinary witness search.
+    if not np.finfo(float).tiny**0.125 < weights < np.finfo(float).max**0.125:
+        return False
+    tol = (_box_epsilon(b.shape) / 16) * weights**2
+    eb, es = np.clip(eb, -rb, rb), np.clip(es, -rs, rs)
+    remainder = _primal_remainder(s, d, eb, es, tol, weights)
+    if remainder <= tol:
+        return True
+    if not math.isfinite(remainder):
+        return False
+
+    # The skew constraint is skew(SᵀD + BᵀEs - SᵀEb) = 0. Its affine
+    # projection adds SZ to Eb and subtracts BZ from Es, where Z is skew
+    # and GZ + ZG equals twice the current skew, G = BᵀB + SᵀS.
+    try:
+        values, axes = np.linalg.eigh(b.T @ b + s.T @ s)
+    except np.linalg.LinAlgError:
+        return False
+    denom = np.maximum(values[:, None] + values, max(math.ulp(values[-1]), np.finfo(float).tiny))
+    bq, sq = b @ axes, s @ axes
+    form = s.T @ d
+    yb, ys = eb, es
+    for step in range(1, 17):
+        reflected = form + b.T @ (2 * es - ys) - s.T @ (2 * eb - yb)
+        z = (axes.T @ (reflected - reflected.T) @ axes) / denom
+        yb = eb + (sq @ z) @ axes.T
+        ys = es - (bq @ z) @ axes.T
+        eb, es = np.clip(yb, -rb, rb), np.clip(ys, -rs, rs)
+        if step in (4, 16) and _primal_remainder(s, d, eb, es, tol, weights) <= tol:
+            return True
+    return False
+
+
 def fit_excess(b, s, rb, rs):
     """Seek a separating witness by fitting interval corrections to the Gram form."""
     d = s - b
@@ -136,6 +206,10 @@ def fit_excess(b, s, rb, rs):
             excess = _box_excess(b, s, rb, rs, w @ factor, w @ skew @ w.T)
             if excess:
                 return excess
+            # Polish a box-feasible iterate, never the extrapolated point.
+            # An inconclusive probe leaves the witness trajectory intact.
+            if iteration >= 8 and _polish_primal(b, s, d, rb, rs, eb, es):
+                return 0.
         gb, gs = _correction_adjoint(sw, dw, w, residual, negative_spectrum)
         # Accelerated projected gradient on the two boxes. The projection
         # onto the cone is nonexpansive, so the linear map bounds curvature.
