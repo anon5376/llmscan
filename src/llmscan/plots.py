@@ -79,7 +79,7 @@ def _unchanged_kinds(rows: list[dict]) -> list[str]:
 
 
 def plot_spectra(rows: list[dict], path: Path, title: str) -> bool:
-    """One panel per changed matrix kind; one line per layer, light (early) to dark (late).
+    """One panel per changed matrix kind; one spectrum per layer, light (early) to dark (late).
     Returns whether a figure was written: nothing is, and nothing is touched, without changed tensors."""
     changed = _changed(rows)
     by_kind = defaultdict(list)
@@ -103,11 +103,17 @@ def plot_spectra(rows: list[dict], path: Path, title: str) -> bool:
                 color = INK_2
             else:
                 color = LAYER_CMAP((int(r["layer"]) - lo) / max(hi - lo, 1))
-            ax.plot(range(1, len(sv) + 1), [max(s, 1e-12) for s in sv], color=color, linewidth=1.2)
+            heights = [s if s > 0 and math.isfinite(s) else math.nan for s in sv]
+            # A zero tail can leave one drawable value with no line segment.
+            marker = "o" if len(sv) > 1 and sum(map(math.isfinite, heights)) == 1 else None
+            ax.plot(range(1, len(sv) + 1), heights, color=color, linewidth=1.2, marker=marker)
         ax.set_yscale("log")
         n = len(by_kind[kind])
         ax.set_title(f"{kind}  ({n} tensor{'s' * (n != 1)})", color=INK, fontsize=10, loc="left")
         ax.set_xlabel("singular value index i")
+        for line in ax.lines:
+            if len(line.get_xdata()) == 1:
+                line.set_marker("o")
     for ax in axes[:, 0]:
         ax.set_ylabel("σᵢ(ΔW)")
     for ax in list(axes.flat)[len(kinds):]:
@@ -147,7 +153,7 @@ def plot_effective_rank(rows: list[dict], path: Path, title: str) -> None:
             t.set_color(INK_2)
     unchanged = _unchanged_kinds(rows)
     if unchanged:
-        ax.text(0.0, -0.2, "bit-identical to base: " + ", ".join(unchanged), transform=ax.transAxes,
+        ax.text(0.0, -0.2, "Values match base in scanned matrices: " + ", ".join(unchanged), transform=ax.transAxes,
                 color=MUTED, fontsize=8, va="top", wrap=True)
     ax.set_title(title, color=INK, fontsize=11, loc="left")
     fig.savefig(path, dpi=150, facecolor=SURFACE)

@@ -212,14 +212,11 @@ class GGUFCheckpoint(Checkpoint):
             raise CheckpointError(f"{self.path}: no such file")
         self.files = [self.path]
         self.ignored: dict[str, str] = {}
-        self._maps: dict[Path, mmap.mmap] = {}
+        self._maps: dict[Path, tuple[int, mmap.mmap]] = {}
         if self.path.stat().st_size == 0:
             raise CheckpointError(f"{self.path}: empty file")
-        try:
-            self.metadata, self.tensors = read_gguf(self._map(self.path), self.path)
-        except Exception:
-            self.close()
-            raise
+        with self.path.open("rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            self.metadata, self.tensors = read_gguf(mm, self.path)
 
     def to_float32(self, name: str) -> np.ndarray:
         dtype = self.tensors[name].dtype

@@ -10,10 +10,11 @@ from unittest import mock
 
 import numpy as np
 
-from llmscan import delta, inventory, plots, rank
+from llmscan import core, delta, inventory, plots, rank
 from llmscan.csv_safety import ENCODING_COLUMN, ENCODING_MARKER, csv_fieldnames, decode_row, encode_row
 from llmscan.inventory import CHANGED, InventoryRow
 from llmscan.rank import RankedRow
+from llmscan.signals import Measurements
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "score_blind.py"
@@ -62,8 +63,8 @@ class TestCsvSafety(unittest.TestCase):
                 return np.ones((1, 1), np.float32)
 
         delta_path = self.tmp / "delta.csv"
-        with mock.patch.object(delta.core, "analyze_delta", return_value=SimpleNamespace(
-                effective_rank=1.0, singular_values=[2.0])):
+        with mock.patch.object(delta.core, "analyze_delta", return_value=core.DeltaStats(
+                np.array([2.0]), 1.0)):
             delta.scan(Input(), Input(), delta_rows, delta_path, k=1, log=lambda _: None)
         raw = raw_rows(delta_path)
         self.assertEqual([r["name"] for r in raw], ["'" + r.name for r in delta_rows])
@@ -94,12 +95,13 @@ class TestCsvSafety(unittest.TestCase):
                 return np.ones((1, 1), np.float32)
 
         path = self.tmp / "delta.csv"
-        with mock.patch.object(delta.core, "analyze_delta", return_value=SimpleNamespace(
-                effective_rank=1.5, singular_values=[2.5])):
+        with mock.patch.object(delta.core, "analyze_delta", return_value=core.DeltaStats(
+                np.array([2.5]), 1.5)):
             delta.scan(Input(), Input(), [row], path, k=1, log=lambda _: None)
         self.assertEqual(raw_rows(path)[0]["name"], "'" + name)
         stats = rank.read_delta_csv(path)
-        self.assertEqual(stats, {name: (1.5, 2.5)})
+        self.assertEqual(stats[name].effective_rank, 1.5)
+        self.assertEqual(stats[name].sv_001, 2.5)
         self.assertEqual(rank.rank_tensors([row], stats)[0].name, name)
         self.assertEqual(rank.rank_tensors([row], stats)[0].effective_rank, 1.5)
         plotted = plots.read_rows(path)
@@ -156,7 +158,7 @@ class TestCsvSafety(unittest.TestCase):
     def test_legacy_unmarked_rows_are_not_decoded(self):
         delta_path = self.tmp / "legacy-delta.csv"
         delta_path.write_text("name,effective_rank,sv_001\n'=legacy,1,2\n", encoding="utf-8")
-        self.assertEqual(rank.read_delta_csv(delta_path), {"'=legacy": (1.0, 2.0)})
+        self.assertEqual(rank.read_delta_csv(delta_path), {"'=legacy": Measurements(1.0, 2.0)})
         self.assertEqual(plots.read_rows(delta_path)[0]["name"], "'=legacy")
 
         ranking_path = self.tmp / "legacy-ranking.csv"

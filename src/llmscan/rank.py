@@ -8,14 +8,9 @@ in the inventory. Every ranked tensor lands in one tier and carries a human-read
     T2 location      changed, but its kind is outside the expected set. Defaults: o_proj, down_proj,
                      embed_tokens (HF) and attn_output, ffn_down, token_embd (GGUF); MoE expert and
                      shared-expert down projections count as down_proj. q/k/v, gate/up, norms,
-                     biases and an untied lm_head are T2.
-    T3 outlier       changed, expected kind, and its effective_rank is more than `factor` times the
-                     median of the changed tensors of the same kind in this model (default 3x).
-                     Needs delta.csv and at least three changed tensors of that kind with a
-                     positive effective_rank; a tensor without one is judged by sv_001 against its
-                     kind's median the same way. The median, not a fixed rank, is the yardstick:
-                     Heretic's rank-3 edits and norm-preserving variants are honest. It assumes
-                     fewer than half of a kind's changed tensors are tampered with.
+                     biases and an untied lm_head are T2 unless inventory verifies an exact common re-save.
+    T3 outlier       changed expected-kind tensor with unusual rank, magnitude,
+                     residual direction, or concentrated embedding energy.
     T4 consistent    every other changed tensor.
 
 `delta` is None when no ΔW scan ran (--inventory-only, stub core): every other changed tensor is T4
@@ -24,7 +19,7 @@ whose stats are unusable is T3 with reason "stats unusable: <why>", never T4: no
 2-D float scanner skips says "not scanned (<why>)"), both cells blank, or any given effective_rank / sv_001
 that is NaN, infinite, zero or negative. An unusable row is excluded as a whole from every median.
 
-Inside a tier: effective_rank, then sv_001, both descending; tensors without usable stats follow in
+T3 prioritizes corroborated findings. Ties use effective_rank, then sv_001, both descending; tensors without usable stats follow in
 natural name order, then raw name. Unusable-stats T3 rows come after the genuine outliers.
 """
 
@@ -32,25 +27,28 @@ from __future__ import annotations
 
 import csv
 import math
-import re
-import statistics
-from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
+
+from llmscan.core import OutputSpectrum
 from llmscan.csv_safety import csv_fieldnames, decode_row, encode_row
-from llmscan.delta import sv_field
+from llmscan.delta import EXTRA_FIELDS, sv_field
 from llmscan.inventory import CHANGED, IDENTICAL, ONLY_BASE, ONLY_SUSPECT, SHAPE_MISMATCH, InventoryRow, natural_key
+from llmscan.names import EMBEDDINGS, RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind
 from llmscan.safetensors_io import FLOAT_DTYPES
+from llmscan.signals import (
+    Measurements, direction_cosines, direction_outliers, outlier_reasons, peer_groups, subspace_outliers,
+)
 
 T1, T2, T3, T4 = "T1", "T2", "T3", "T4"
 TIERS = (T1, T2, T3, T4)
-DEFAULT_EXPECTED_KINDS = frozenset({"o_proj", "down_proj", "embed_tokens", "attn_output", "ffn_down", "token_embd"})
+DEFAULT_EXPECTED_KINDS = RESIDUAL_WRITERS | EMBEDDINGS
 DEFAULT_OUTLIER_FACTOR = 3.0
-MIN_GROUP = 3  # changed tensors of one kind needed before a median means anything
 
 SV1 = sv_field(1)
-FIELDS = ["rank", "tier", "name", "layer", "kind", "status", "effective_rank", SV1, "reason"]
+FIELDS = ["rank", "tier", "name", "layer", "kind", "status", "effective_rank", SV1, "reason", "direction_cosine"]
 
 
 @dataclass
@@ -64,6 +62,7 @@ class RankedRow:
     effective_rank: float | None
     sv_001: float | None
     reason: str
+    direction_cosine: float | None = None
 
 
 def parse_kinds(text: str) -> frozenset[str]:
@@ -83,18 +82,13 @@ def check_factor(factor: float) -> float:
     return factor
 
 
-def canonical_kind(kind: str) -> str:
-    """`experts.down_proj` (fused MoE) -> `down_proj`; GGUF `ffn_down_exps` / `ffn_down_shexp` -> `ffn_down`."""
-    return re.sub(r"_(exps|shexp)$", "", kind.removeprefix("experts."))
-
-
-def read_delta_csv(path: Path) -> dict[str, tuple[float | None, float | None]]:
-    """name -> (effective_rank, sv_001); an empty cell (identical tensor) is None."""
+def read_delta_csv(path: Path) -> dict[str, Measurements]:
+    """Read both current and legacy delta.csv measurements; absent columns are optional."""
     def num(cell: str | None) -> float | None:
         return float(cell) if cell not in (None, "") else None
 
     with open(path, newline="", encoding="utf-8") as f:
-        return {r["name"]: (num(r.get("effective_rank")), num(r.get(SV1)))
+        return {r["name"]: Measurements(*(num(r.get(k)) for k in ("effective_rank", SV1, *EXTRA_FIELDS)))
                 for r in map(decode_row, csv.DictReader(f))}
 
 
@@ -108,14 +102,23 @@ def _structure_reason(r: InventoryRow) -> str:
     return f"dtype differs and is not a float re-save: base {r.base_dtype} vs suspect {r.suspect_dtype}"
 
 
-def _unusable(stats: tuple[float | None, float | None]) -> str | None:
+def _unusable(stats: Measurements) -> str | None:
     """Why a delta.csv row cannot be judged, or None. Blank cells are fine as long as one stat is given."""
-    er, sv = stats
+    er, sv = stats[:2]
     if er is None and sv is None:
         return "no ΔW stats for this tensor"
-    for label, v in (("effective_rank", er), (SV1, sv)):
+    for label, v in stats._asdict().items():
         if v is not None and not math.isfinite(v):
             return f"{label} {v} is not finite"
+        if label in ("second_tail_share", "token_row_fraction", "projection_error",
+                     "rank_one_excess", "tail_norm_fraction", "contraction_excess", "reciprocity_excess",
+                     "removal_excess") and v is not None:
+            if not 0 <= v <= 1:
+                return f"{label} {v:g} is outside [0, 1]"
+            if label != "token_row_fraction":
+                continue
+        if label == "token_row_spike" and v == 0:
+            continue
         if v is not None and v <= 0:
             return f"{label} {v:g} is not positive"
     return None
@@ -133,32 +136,31 @@ def _not_scanned(r: InventoryRow) -> str:
 
 def rank_tensors(
     rows: list[InventoryRow],
-    delta: dict[str, tuple[float | None, float | None]] | None = None,
+    delta: dict[str, tuple[float | None, float | None] | Measurements] | None = None,
     expected: frozenset[str] = DEFAULT_EXPECTED_KINDS,
     factor: float = DEFAULT_OUTLIER_FACTOR,
+    directions: dict[str, np.ndarray] | None = None,
+    subspaces: dict[str, np.ndarray] | None = None,
+    spectra: dict[str, OutputSpectrum] | None = None,
 ) -> list[RankedRow]:
     check_factor(factor)
     scanned = delta is not None  # an empty mapping is a scan that produced no rows, not "no scan"
     delta = delta or {}
     expected = frozenset(canonical_kind(k) for k in expected)
-    stats = {r.name: delta.get(r.name, (None, None)) for r in rows}
+    stats = {r.name: Measurements(*delta.get(r.name, ())) for r in rows}
     bad = {r.name: None if not scanned else _unusable(stats[r.name]) if r.name in delta else _not_scanned(r) for r in rows}
 
-    # medians per kind over changed, expected-kind tensors; effective_rank and sv_001 kept apart
-    groups: dict[tuple[str, int], list[float]] = defaultdict(list)
-    for r in rows:
-        if r.status == CHANGED and canonical_kind(r.kind) in expected:
-            er, sv = stats[r.name]
-            if bad[r.name]:
-                continue
-            if er is not None:
-                groups[canonical_kind(r.kind), 0].append(er)
-            elif sv is not None:
-                groups[canonical_kind(r.kind), 1].append(sv)
-    medians = {g: statistics.median(v) for g, v in groups.items() if len(v) >= MIN_GROUP}
+    usable = [r for r in rows if r.status == CHANGED and canonical_kind(r.kind) in expected and not bad[r.name]]
+    groups = peer_groups(usable, stats)
+    other_token_kinds = TOKEN_MATRICES - expected
+    other_tokens = [r for r in rows if r.status == CHANGED and r.kind in other_token_kinds and not bad[r.name]]
+    cosines = direction_cosines(usable + other_tokens, directions or {})
+    direction_flags = direction_outliers(usable, directions or {}, cosines, factor, subspaces)
+    direction_flags = subspace_outliers(usable, subspaces or {}, factor, stats, directions, direction_flags, spectra)
 
     ranked: list[tuple[str, InventoryRow, str]] = []
     unusable: set[str] = set()
+    evidence: dict[str, int] = {}
     for r in rows:
         if r.status == IDENTICAL:
             continue
@@ -166,31 +168,32 @@ def rank_tensors(
         if r.status != CHANGED:
             ranked.append((T1, r, _structure_reason(r)))
         elif kind not in expected:
-            ranked.append((T2, r, f"changed {r.kind}: outside expected kinds ({', '.join(sorted(expected))})"))
+            if r.resave_dtype:
+                ranked.append((T4, r, f"changed {r.kind}: exact {r.resave_dtype} re-save across non-projection locations"))
+            else:
+                ranked.append((T2, r, f"changed {r.kind}: outside expected kinds ({', '.join(sorted(expected))})"))
         else:
-            er, sv = stats[r.name]
             if bad[r.name]:
                 ranked.append((T3, r, f"stats unusable: {bad[r.name]}; cannot be judged consistent with abliteration"))
                 unusable.add(r.name)
                 continue
-            which, value = (0, er) if er is not None else (1, sv)
-            median = medians.get((kind, which))
-            if value is not None and value > 0 and median and value > factor * median:
-                label = "effective_rank" if which == 0 else SV1
-                ranked.append((T3, r, f"{label} {value:.4g} is {value / median:.1f}x the median {median:.4g} of changed {kind}"
-                                      f" tensors (threshold {factor:g}x)"))
+            reasons = outlier_reasons(r, stats[r.name], groups, direction_flags.get(r.name), factor)
+            if reasons:
+                ranked.append((T3, r, "; ".join(reasons)))
+                evidence[r.name] = len(reasons)
             else:
                 note = "" if scanned else " (no ΔW stats)"
                 ranked.append((T4, r, f"changed {r.kind}, consistent with abliteration{note}"))
 
     def key(item):
         tier, r, _ = item
-        er, sv = (v if v is not None and math.isfinite(v) and r.name not in unusable else None for v in stats[r.name])
-        return (tier, r.name in unusable, er is None, -(er or 0.0), sv is None, -(sv or 0.0), natural_key(r.name), r.name)
+        er, sv = (v if v is not None and math.isfinite(v) and r.name not in unusable else None for v in stats[r.name][:2])
+        return (tier, r.name in unusable, -evidence.get(r.name, 0), er is None, -(er or 0.0), sv is None,
+                -(sv or 0.0), natural_key(r.name), r.name)
 
     ranked.sort(key=key)
     return [
-        RankedRow(i, tier, r.name, r.layer, r.kind, r.status, *stats[r.name], reason)
+        RankedRow(i, tier, r.name, r.layer, r.kind, r.status, *stats[r.name][:2], reason, cosines.get(r.name))
         for i, (tier, r, reason) in enumerate(ranked, 1)
     ]
 

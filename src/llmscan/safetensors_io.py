@@ -24,6 +24,7 @@ DTYPE_BYTES = {
     "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
 }
 FLOAT_DTYPES = {"F64": "<f8", "F32": "<f4", "F16": "<f2", "BF16": None}  # BF16 decoded by hand
+VALUE_CHUNK = 1 << 14  # 128 KiB per decoded float64 array during mixed-dtype comparison
 MAX_OPEN_MAPS = 4  # per checkpoint; each mmap holds a file descriptor, and sharded models have hundreds of files
 MAX_HEADER_BYTES = 16 * 1024 * 1024
 MAX_TENSORS = 300_000
@@ -59,9 +60,11 @@ def shard_files(path: Path) -> list[Path]:
         raise CheckpointError(f"{path}: no such file or directory")
     if (path / "model.safetensors").is_file():  # transformers loads this before any index
         return [path / "model.safetensors"]
-    indexes = sorted(path.glob("*.safetensors.index.json"))
-    if indexes:
-        weight_map = json.loads(indexes[0].read_text(encoding="utf-8"))["weight_map"]
+    index = path / "model.safetensors.index.json"
+    if not index.is_file():
+        index = min(path.glob("*.safetensors.index.json"), default=None)
+    if index is not None:
+        weight_map = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
         return [path / f for f in sorted(set(weight_map.values()))]
     files = sorted(path.glob("*.safetensors"))
     if not files:
@@ -168,26 +171,40 @@ class Checkpoint:
         if tied_embeddings(self.path) and "lm_head.weight" in self.tensors:
             del self.tensors["lm_head.weight"]
             self.ignored["lm_head.weight"] = "tie_word_embeddings=true in config.json"
-        self._maps: dict[Path, mmap.mmap] = {}
+        self._maps: dict[Path, tuple[int, mmap.mmap]] = {}
 
-    def _map(self, file: Path) -> mmap.mmap:
-        """The mapping of `file`, opened on demand. Only the most recently used MAX_OPEN_MAPS stay open."""
-        if file in self._maps:
-            self._maps[file] = self._maps.pop(file)  # mark as most recently used
-            return self._maps[file]
-        while len(self._maps) >= MAX_OPEN_MAPS:
-            self._maps.pop(next(iter(self._maps))).close()
-        with open(file, "rb") as f:
-            self._maps[file] = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        return self._maps[file]
+    def _buffer(self, t: TensorInfo, start: int, end: int) -> memoryview:
+        """Borrow a tensor range without retaining resident pages from earlier ranges."""
+        if start == end:
+            return memoryview(b"")
+        cached = self._maps.pop(t.file, None)
+        if cached is not None:
+            offset, mm = cached
+            if offset <= start and end <= offset + len(mm):
+                self._maps[t.file] = cached
+                return memoryview(mm)[start - offset:end - offset]
+            mm.close()
+        elif len(self._maps) >= MAX_OPEN_MAPS:
+            _, old = self._maps.pop(next(iter(self._maps)))
+            old.close()
+        # Map ahead for small streaming reads. A whole-tensor conversion
+        # gets a single contiguous view even when it exceeds the window.
+        offset = start - start % mmap.ALLOCATIONGRANULARITY
+        limit = min(t.end, max(end, start + (1 << 20)))
+        with t.file.open("rb") as f:
+            mm = mmap.mmap(f.fileno(), limit - offset, access=mmap.ACCESS_READ, offset=offset)
+        self._maps[t.file] = offset, mm
+        return memoryview(mm)[start - offset:end - offset]
 
     def iter_bytes(self, name: str, chunk: int = 1 << 20) -> Iterator[bytes]:
         """The tensor's raw bytes, in chunks, without holding the whole tensor in memory."""
         t = self.tensors[name]
         for pos in range(t.start, t.end, chunk):
-            yield self._map(t.file)[pos:min(pos + chunk, t.end)]
+            with self._buffer(t, pos, min(pos + chunk, t.end)) as buf:
+                data = bytes(buf)
+            yield data
 
-    def iter_values(self, name: str, chunk: int = 1 << 16) -> Iterator[np.ndarray]:
+    def iter_values(self, name: str, chunk: int = VALUE_CHUNK) -> Iterator[np.ndarray]:
         """The tensor's values as flat float64 chunks of at most `chunk` elements. Every supported
         float dtype converts to float64 without loss, and memory stays bounded by the chunk."""
         t = self.tensors[name]
@@ -196,7 +213,7 @@ class Checkpoint:
         width = DTYPE_BYTES[t.dtype]
         for i in range(0, t.numel, chunk):
             lo, hi = t.start + i * width, t.start + min(i + chunk, t.numel) * width
-            with memoryview(self._map(t.file)) as whole, whole[lo:hi] as buf:
+            with self._buffer(t, lo, hi) as buf:
                 if t.dtype == "BF16":
                     bits = np.frombuffer(buf, dtype="<u2").astype(np.uint32)
                     bits <<= 16
@@ -205,31 +222,52 @@ class Checkpoint:
                     out = np.frombuffer(buf, dtype=FLOAT_DTYPES[t.dtype]).astype(np.float64)
             yield out
 
+    def _float_values(self, t, start, stop, shape, columns, dtype, out=None):
+        if t.dtype not in FLOAT_DTYPES:
+            raise CheckpointError(f"{t.name}: dtype {t.dtype} is not a supported float type")
+        with self._buffer(t, start, stop) as buf:
+            values = np.frombuffer(buf, FLOAT_DTYPES[t.dtype] or "<u2").reshape(shape)
+            if columns is not None:
+                values = values[:, columns]
+            if out is not None and (out.shape != values.shape or out.dtype != dtype):
+                raise ValueError("decode destination must match the requested shape and dtype")
+            if t.dtype == "BF16":
+                # Place the stored words directly in the high bits of the
+                # float32 destination, including when it is a strip tile.
+                words = out.view(np.uint32) if out is not None and out.dtype == np.float32 else None
+                words = np.left_shift(values, 16, dtype=np.uint32, out=words)
+                values = words.view(np.float32)
+                if dtype == np.float32:
+                    return values
+            if out is None:
+                return values.astype(dtype)
+            np.copyto(out, values, casting="unsafe")
+            return out
+
+    def matrix_rows(self, name, start, stop, columns, dtype, *, out=None):
+        """Decode a rectangle of a stored matrix, selecting columns before conversion."""
+        t = self.tensors[name]
+        rows, width = t.shape
+        if not 0 <= start <= stop <= rows:
+            raise IndexError("row range outside the tensor")
+        stride = width * DTYPE_BYTES[t.dtype]
+        return self._float_values(t, t.start + start * stride, t.start + stop * stride,
+                                  (stop - start, width), columns, dtype, out)
+
     def to_float32(self, name: str) -> np.ndarray:
         """A fresh, writable float32 copy of one tensor, in its stored shape."""
         t = self.tensors[name]
-        if t.dtype not in FLOAT_DTYPES:
-            raise CheckpointError(f"{name}: dtype {t.dtype} is not a supported float type")
-        with memoryview(self._map(t.file)) as whole, whole[t.start:t.end] as buf:
-            if t.dtype == "BF16":
-                bits = np.frombuffer(buf, dtype="<u2").astype(np.uint32)
-                bits <<= 16  # bf16 is the top half of a float32
-                out = bits.view(np.float32)
-            else:
-                out = np.frombuffer(buf, dtype=FLOAT_DTYPES[t.dtype]).astype(np.float32)
-        return out.reshape(t.shape)
+        return self._float_values(t, t.start, t.end, t.shape, None, np.float32)
 
     def to_float64(self, name: str) -> np.ndarray:
         """Like `to_float32`, but exact for F64 tensors, whose differences float32 would round away."""
         t = self.tensors[name]
         if t.dtype != "F64":
             return self.to_float32(name).astype(np.float64)
-        with memoryview(self._map(t.file)) as whole, whole[t.start:t.end] as buf:
-            out = np.frombuffer(buf, dtype="<f8").copy()
-        return out.reshape(t.shape)
+        return self._float_values(t, t.start, t.end, t.shape, None, np.float64)
 
     def close(self) -> None:
-        for mm in self._maps.values():
+        for _, mm in self._maps.values():
             mm.close()
         self._maps.clear()
 

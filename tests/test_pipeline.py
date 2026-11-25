@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
+from matplotlib.figure import Figure
 
 from helpers import tiny_llama, write_safetensors, write_sharded
 from llmscan import cli, core, inventory
@@ -17,7 +18,7 @@ from llmscan.names import kind_of, layer_of
 from llmscan.safetensors_io import Checkpoint, CheckpointError
 
 
-def fake_analyze(w_base, w_suspect, k):
+def fake_analyze(w_base, w_suspect, k, subspace_budget):
     """Stand-in for the core: records the call, returns fixed numbers."""
     fake_analyze.calls.append((w_base.shape, w_suspect.shape, k))
     return core.DeltaStats(np.linspace(1.0, 0.1, min(k, *w_base.shape)), 1.0)
@@ -82,6 +83,34 @@ class TestCheckpointLayout(unittest.TestCase):
             self.assertEqual([f.name for f in c.files], ["model.safetensors"])
             np.testing.assert_array_equal(c.to_float32("x"), 1)
 
+    def test_prefers_primary_index_over_auxiliary_index(self):
+        primary = {"x": ("F32", np.ones((2, 2), np.float32))}
+        base = self.tmp / "base.safetensors"
+        suspect = self.tmp / "suspect"
+        write_safetensors(base, primary)
+        write_sharded(suspect, [primary])
+        write_safetensors(suspect / "adapter.safetensors", {"x": ("F32", np.zeros((2, 2), np.float32))})
+        (suspect / "adapter.safetensors.index.json").write_text('{"weight_map": {"x": "adapter.safetensors"}}')
+
+        out = self.tmp / "out"
+        code, _, err = run_cli("--base", str(base), "--suspect", str(suspect), "--out", str(out), "--inventory-only")
+        self.assertEqual(code, 0, err)
+        with (out / "inventory.csv").open() as f:
+            self.assertEqual([(r["name"], r["status"]) for r in csv.DictReader(f)], [("x", "identical")])
+
+    def test_uses_nonstandard_index_without_primary_index(self):
+        write_sharded(self.tmp, [{"x": ("F32", np.ones((2, 2), np.float32))}])
+        (self.tmp / "model.safetensors.index.json").rename(self.tmp / "custom.safetensors.index.json")
+        write_safetensors(self.tmp / "extra.safetensors", {"extra": ("F32", np.zeros(1, np.float32))})
+        with Checkpoint(self.tmp) as c:
+            self.assertEqual(set(c.tensors), {"x"})
+
+    def test_uses_loose_shards_without_index(self):
+        for name in ("x", "y"):
+            write_safetensors(self.tmp / f"{name}.safetensors", {name: ("F32", np.ones(1, np.float32))})
+        with Checkpoint(self.tmp) as c:
+            self.assertEqual(set(c.tensors), {"x", "y"})
+
     def test_tied_lm_head_is_set_aside(self):
         t = {"model.embed_tokens.weight": ("F32", np.ones((4, 2), np.float32)), "lm_head.weight": ("F32", np.ones((4, 2), np.float32))}
         write_safetensors(self.tmp / "model.safetensors", t)
@@ -130,6 +159,22 @@ class TestNames(unittest.TestCase):
         self.assertEqual(kind_of("lm_head.weight"), "lm_head")
 
 
+class TestInventorySummary(unittest.TestCase):
+    def test_percentage_counts_parameters_in_unchanged_tensors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            weights = np.zeros((10, 10), np.float32)
+            tensors = {"weight": ("F32", weights), "bias": ("F32", np.zeros(25, np.float32))}
+            write_safetensors(tmp / "base.safetensors", tensors)
+            weights[0, 0] = 1
+            write_safetensors(tmp / "suspect.safetensors", tensors)
+
+            code, out, err = run_cli("--base", str(tmp / "base.safetensors"), "--suspect", str(tmp / "suspect.safetensors"),
+                                     "--out", str(tmp / "out"), "--inventory-only")
+            self.assertEqual(code, 0, err)
+            self.assertIn("parameters in unchanged tensors: 20.00%", out.splitlines())
+
+
 class TestInventoryAndCli(unittest.TestCase):
     """A base and a suspect that differs in known places."""
 
@@ -151,6 +196,27 @@ class TestInventoryAndCli(unittest.TestCase):
         write_safetensors(self.tmp / "base.safetensors", base)
         names = list(suspect)
         write_sharded(self.tmp / "suspect", [{n: suspect[n] for n in names[:5]}, {n: suspect[n] for n in names[5:]}])
+
+    def test_invalid_k_preserves_previous_scan(self):
+        out = self.tmp / "out"
+        args = ["--base", str(self.tmp / "base.safetensors"), "--suspect", str(self.tmp / "suspect"),
+                "--out", str(out)]
+        self.assertEqual(run_cli(*args, "-k", "1")[0], 0)
+        before = {p.name: p.read_bytes() for p in out.iterdir()}
+        for k in ("0", "-1"):
+            with self.subTest(k=k):
+                with self.assertRaises(SystemExit) as cm:
+                    run_cli(*args, "-k", k)
+                self.assertEqual(cm.exception.code, 2)
+                self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
+
+    def test_invalid_k_on_identical_checkpoints_creates_no_output(self):
+        base = str(self.tmp / "base.safetensors")
+        out = self.tmp / "out"
+        with self.assertRaises(SystemExit) as cm:
+            run_cli("--base", base, "--suspect", base, "--out", str(out), "-k", "0")
+        self.assertEqual(cm.exception.code, 2)
+        self.assertFalse(out.exists())
 
     def test_inventory_statuses(self):
         with Checkpoint(self.tmp / "base.safetensors") as b, Checkpoint(self.tmp / "suspect") as s:
@@ -174,6 +240,17 @@ class TestInventoryAndCli(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("analyze_delta is not written yet", err)
         self.assertTrue((self.tmp / "out" / "inventory.csv").exists())
+
+    def test_rank_caption_limits_value_equality_to_scanned_matrices(self):
+        with mock.patch.object(Figure, "savefig", autospec=True) as save:
+            code, _, err = run_cli("--base", str(self.tmp / "base.safetensors"), "--suspect", str(self.tmp / "suspect"),
+                                   "--out", str(self.tmp / "out"))
+        self.assertEqual(code, 0, err)
+        fig, = (fig for (fig, path), _ in save.call_args_list if path.name == "effective_rank.png")
+        # q_proj includes a float re-save; up_proj and v_proj each have a layer the scan skips.
+        self.assertEqual([t.get_text() for t in fig.axes[0].texts], [
+            "Values match base in scanned matrices: embed_tokens, gate_proj, q_proj, up_proj, v_proj",
+        ])
 
     def test_cli_end_to_end_with_stand_in_core(self):
         fake_analyze.calls = []

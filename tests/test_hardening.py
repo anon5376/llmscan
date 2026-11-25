@@ -8,6 +8,7 @@ import sys
 import tempfile
 import tracemalloc
 import unittest
+from itertools import permutations
 from pathlib import Path
 from unittest import mock
 
@@ -16,7 +17,7 @@ import numpy as np
 from helpers import write_safetensors, write_sharded
 from llmscan import atomic, cli, core, inventory
 from llmscan import safetensors_io
-from llmscan.safetensors_io import MAX_HEADER_BYTES, MAX_OPEN_MAPS, Checkpoint, CheckpointError
+from llmscan.safetensors_io import MAX_HEADER_BYTES, MAX_OPEN_MAPS, VALUE_CHUNK, Checkpoint, CheckpointError
 from test_pipeline import fake_analyze, run_cli
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,7 +52,7 @@ def compare_one(tmp: Path, base: tuple[str, np.ndarray], suspect: tuple[str, np.
 
 class TestCrossDtypeComparison(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
     def test_f64_difference_below_float32_resolution_is_changed(self):
         status = compare_one(self.tmp, ("F64", np.array([1 + 2.0**-30])), ("F32", np.array([1.0])))
@@ -61,12 +62,17 @@ class TestCrossDtypeComparison(unittest.TestCase):
         status = compare_one(self.tmp, ("F64", np.array([1e300])), ("F32", np.array([np.inf])))
         self.assertEqual(status, inventory.CHANGED)
 
-    def test_recast_with_equal_values_stays_identical(self):
-        a = np.array([0.5, -1.25, 3.0, 2.0**-20], dtype=np.float32)
-        for dtype in ("F64", "F32", "F16", "BF16"):
-            with self.subTest(dtype=dtype):
-                self.assertEqual(compare_one(self.tmp, ("BF16", a), (dtype, a)), inventory.IDENTICAL)
-                self.assertEqual(compare_one(self.tmp, (dtype, a), ("F64", a)), inventory.IDENTICAL)
+    def test_mixed_float_comparison_across_chunks(self):
+        # All four formats represent these values exactly.
+        a = np.resize(np.array([0.5, -1.25, 3.0, 2.0**-20]), 4 * VALUE_CHUNK + 3)
+        for edit in (None, 0, VALUE_CHUNK - 1, VALUE_CHUNK, 2 * VALUE_CHUNK, a.size - 1):
+            b = a.copy()
+            if edit is not None:
+                b[edit] = -2
+            expected = inventory.IDENTICAL if edit is None else inventory.CHANGED
+            for left, right in permutations(("BF16", "F16", "F32", "F64"), 2):
+                with self.subTest(left=left, right=right, edit=edit):
+                    self.assertEqual(compare_one(self.tmp, (left, a), (right, b)), expected)
 
     def test_difference_in_a_late_chunk_is_found(self):
         a = np.zeros(5000, dtype=np.float32)
@@ -93,6 +99,12 @@ class TestCrossDtypeComparison(unittest.TestCase):
                 tracemalloc.stop()
         self.assertLess(peak, 4 * n)  # less than ONE float32 copy of the tensor; whole-tensor decoding needs ~9n
 
+    def test_same_dtype_detects_signed_zero_in_partial_final_chunk(self):
+        a = np.zeros(32_769, dtype=np.float32)  # two 64 KiB chunks plus one value
+        b = a.copy()
+        b[-1] = -0.0
+        self.assertEqual(compare_one(self.tmp, ("F32", a), ("F32", b)), inventory.CHANGED)
+
     def test_same_dtype_byte_comparison_memory_is_bounded_by_the_chunk_not_the_tensor(self):
         n = 8_000_000  # 32 MB per side; reading each tensor whole would allocate at least 32 MB
         a = np.zeros(n, dtype=np.float32)
@@ -105,10 +117,28 @@ class TestCrossDtypeComparison(unittest.TestCase):
                 peak = tracemalloc.get_traced_memory()[1]
             finally:
                 tracemalloc.stop()
-        self.assertLess(peak, 8 << 20)
+        self.assertLess(peak, 1 << 20)
 
 
 class TestBoundedOpenMaps(unittest.TestCase):
+    def test_streaming_an_unaligned_tensor_maps_only_the_current_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "weights.safetensors"
+            values = np.arange(1_000_003, dtype=np.float32)
+            write_safetensors(path, {"empty": ("F64", values[:0]), "x": ("F32", values)})
+            with Checkpoint(path) as checkpoint:
+                self.assertEqual(checkpoint.to_float64("empty").size, 0)
+                chunks = checkpoint.iter_values("x", chunk=65_537)
+                first = next(chunks)
+                _, window = checkpoint._maps[path]
+                self.assertLess(len(window), values.nbytes)
+                # Interleave an independent full-tensor read. Its eviction
+                # of the streaming window must not invalidate yielded data.
+                converted = checkpoint.to_float32("x")
+                np.testing.assert_array_equal(converted, values)
+                converted[:] = -1
+                np.testing.assert_array_equal(np.concatenate([first, *chunks]), values)
+
     def test_touching_many_shards_keeps_few_maps_and_file_descriptors(self):
         tmp = Path(tempfile.mkdtemp())
         shards = [{f"t{i}": ("F32", np.full((2, 2), i, np.float32))} for i in range(40)]
