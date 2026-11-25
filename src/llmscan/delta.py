@@ -26,16 +26,22 @@ def sv_field(i: int) -> str:
 def estimate_tensor_bytes(row: InventoryRow) -> int:
     """Estimated peak working memory (bytes) for one 2-D tensor in `core.analyze_delta`.
 
-    Accounts for both decoded weight arrays (float32 or float64), the float64 Gram matrix
-    plus its matmul/eigensolve copy, and the float64 row block plus scaling temporary.
+    Accounts for both decoded weight arrays (float32 or float64), any intermediate float32
+    array created when widening a non-F64 side to float64, the full-tensor `np.isfinite`
+    boolean mask, the float64 Gram matrix plus its matmul/eigensolve copy, and the float64
+    row block plus scaling temporary.
     """
     d0, d1 = (int(x) for x in row.base_shape.split("x"))
     m, n = (d0, d1) if d0 >= d1 else (d1, d0)
-    itemsize = 8 if "F64" in (row.base_dtype, row.suspect_dtype) else 4
+    use_f64 = "F64" in (row.base_dtype, row.suspect_dtype)
+    itemsize = 8 if use_f64 else 4
     decoded = 2 * m * n * itemsize
+    # Checkpoint.to_float64 widens non-F64 tensors via an intermediate float32 array.
+    decode_temp = m * n * 4 if use_f64 and (row.base_dtype != "F64" or row.suspect_dtype != "F64") else 0
+    finite_mask = m * n
     gram = 2 * n * n * 8
     block = 2 * min(m, core._ROWS_PER_BLOCK) * n * 8
-    return decoded + gram + block
+    return decoded + decode_temp + finite_mask + gram + block
 
 
 def _max_parallelism(costs: list[int], jobs: int, max_memory_bytes: int) -> int:

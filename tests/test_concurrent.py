@@ -41,21 +41,27 @@ def make_pair(tmp: Path, changed_layers: tuple[int, ...] = (0, 1, 2, 3), d: int 
 
 
 class TestMemoryEstimator(unittest.TestCase):
-    def test_estimate_accounts_for_decoded_gram_and_block(self):
+    def test_estimate_accounts_for_decoded_mask_gram_and_block(self):
         row = inventory.InventoryRow(
             name="m.weight", layer=0, kind="o_proj", status=inventory.CHANGED,
             base_dtype="BF16", suspect_dtype="F32", base_shape="1024x2048", suspect_shape="1024x2048", numel=1024 * 2048,
         )
-        # m=2048, n=1024, itemsize=4 -> decoded=16 MiB, gram=16 MiB, block=32 MiB -> 64 MiB
-        self.assertEqual(delta.estimate_tensor_bytes(row), 64 * 1024 * 1024)
+        # m=2048, n=1024, itemsize=4 -> decoded=16 MiB, finite_mask=2 MiB, gram=16 MiB, block=32 MiB -> 66 MiB
+        self.assertEqual(delta.estimate_tensor_bytes(row), 66 * 1024 * 1024)
 
-    def test_estimate_uses_float64_when_either_side_is_f64(self):
-        row = inventory.InventoryRow(
+    def test_estimate_accounts_for_mixed_precision_f64_temporary(self):
+        mixed = inventory.InventoryRow(
             name="m.weight", layer=0, kind="o_proj", status=inventory.CHANGED,
             base_dtype="F32", suspect_dtype="F64", base_shape="16x8", suspect_shape="16x8", numel=128,
         )
-        # m=16, n=8, itemsize=8 -> decoded=2*128*8=2048, gram=2*64*8=1024, block=2*16*8*8=2048
-        self.assertEqual(delta.estimate_tensor_bytes(row), 2048 + 1024 + 2048)
+        pure_f64 = inventory.InventoryRow(
+            name="m.weight", layer=0, kind="o_proj", status=inventory.CHANGED,
+            base_dtype="F64", suspect_dtype="F64", base_shape="16x8", suspect_shape="16x8", numel=128,
+        )
+        # m=16, n=8, itemsize=8 -> decoded=2048, finite_mask=128, gram=1024, block=2048
+        # mixed also includes the float32 widening temporary: 128 * 4 = 512
+        self.assertEqual(delta.estimate_tensor_bytes(pure_f64), 2048 + 128 + 1024 + 2048)
+        self.assertEqual(delta.estimate_tensor_bytes(mixed), 2048 + 512 + 128 + 1024 + 2048)
 
     def test_max_parallelism_bounds_by_jobs_and_memory(self):
         self.assertEqual(delta._max_parallelism([100, 100, 100], jobs=1, max_memory_bytes=1000), 1)
