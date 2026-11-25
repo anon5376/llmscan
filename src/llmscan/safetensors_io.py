@@ -159,24 +159,38 @@ class Checkpoint:
         if tied_embeddings(self.path) and "lm_head.weight" in self.tensors:
             del self.tensors["lm_head.weight"]
             self.ignored["lm_head.weight"] = "tie_word_embeddings=true in config.json"
-        self._maps: dict[Path, mmap.mmap] = {}
+        self._maps: dict[Path, tuple[int, mmap.mmap]] = {}
 
-    def _map(self, file: Path) -> mmap.mmap:
-        """The mapping of `file`, opened on demand. Only the most recently used MAX_OPEN_MAPS stay open."""
-        if file in self._maps:
-            self._maps[file] = self._maps.pop(file)  # mark as most recently used
-            return self._maps[file]
-        while len(self._maps) >= MAX_OPEN_MAPS:
-            self._maps.pop(next(iter(self._maps))).close()
-        with open(file, "rb") as f:
-            self._maps[file] = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        return self._maps[file]
+    def _buffer(self, t: TensorInfo, start: int, end: int) -> memoryview:
+        """Borrow a tensor range without retaining resident pages from earlier ranges."""
+        if start == end:
+            return memoryview(b"")
+        cached = self._maps.pop(t.file, None)
+        if cached is not None:
+            offset, mm = cached
+            if offset <= start and end <= offset + len(mm):
+                self._maps[t.file] = cached
+                return memoryview(mm)[start - offset:end - offset]
+            mm.close()
+        elif len(self._maps) >= MAX_OPEN_MAPS:
+            _, old = self._maps.pop(next(iter(self._maps)))
+            old.close()
+        # Map ahead for small streaming reads. A whole-tensor conversion
+        # gets a single contiguous view even when it exceeds the window.
+        offset = start - start % mmap.ALLOCATIONGRANULARITY
+        limit = min(t.end, max(end, start + (1 << 20)))
+        with t.file.open("rb") as f:
+            mm = mmap.mmap(f.fileno(), limit - offset, access=mmap.ACCESS_READ, offset=offset)
+        self._maps[t.file] = offset, mm
+        return memoryview(mm)[start - offset:end - offset]
 
     def iter_bytes(self, name: str, chunk: int = 1 << 20) -> Iterator[bytes]:
         """The tensor's raw bytes, in chunks, without holding the whole tensor in memory."""
         t = self.tensors[name]
         for pos in range(t.start, t.end, chunk):
-            yield self._map(t.file)[pos:min(pos + chunk, t.end)]
+            with self._buffer(t, pos, min(pos + chunk, t.end)) as buf:
+                data = bytes(buf)
+            yield data
 
     def iter_values(self, name: str, chunk: int = 1 << 16) -> Iterator[np.ndarray]:
         """The tensor's values as flat float64 chunks of at most `chunk` elements. Every supported
@@ -187,7 +201,7 @@ class Checkpoint:
         width = DTYPE_BYTES[t.dtype]
         for i in range(0, t.numel, chunk):
             lo, hi = t.start + i * width, t.start + min(i + chunk, t.numel) * width
-            with memoryview(self._map(t.file)) as whole, whole[lo:hi] as buf:
+            with self._buffer(t, lo, hi) as buf:
                 if t.dtype == "BF16":
                     bits = np.frombuffer(buf, dtype="<u2").astype(np.uint32)
                     bits <<= 16
@@ -201,7 +215,7 @@ class Checkpoint:
         t = self.tensors[name]
         if t.dtype not in FLOAT_DTYPES:
             raise CheckpointError(f"{name}: dtype {t.dtype} is not a supported float type")
-        with memoryview(self._map(t.file)) as whole, whole[t.start:t.end] as buf:
+        with self._buffer(t, t.start, t.end) as buf:
             if t.dtype == "BF16":
                 bits = np.frombuffer(buf, dtype="<u2").astype(np.uint32)
                 bits <<= 16  # bf16 is the top half of a float32
@@ -215,12 +229,12 @@ class Checkpoint:
         t = self.tensors[name]
         if t.dtype != "F64":
             return self.to_float32(name).astype(np.float64)
-        with memoryview(self._map(t.file)) as whole, whole[t.start:t.end] as buf:
+        with self._buffer(t, t.start, t.end) as buf:
             out = np.frombuffer(buf, dtype="<f8").copy()
         return out.reshape(t.shape)
 
     def close(self) -> None:
-        for mm in self._maps.values():
+        for _, mm in self._maps.values():
             mm.close()
         self._maps.clear()
 

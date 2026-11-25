@@ -108,6 +108,24 @@ class TestCrossDtypeComparison(unittest.TestCase):
 
 
 class TestBoundedOpenMaps(unittest.TestCase):
+    def test_streaming_an_unaligned_tensor_maps_only_the_current_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "weights.safetensors"
+            values = np.arange(1_000_003, dtype=np.float32)
+            write_safetensors(path, {"empty": ("F64", values[:0]), "x": ("F32", values)})
+            with Checkpoint(path) as checkpoint:
+                self.assertEqual(checkpoint.to_float64("empty").size, 0)
+                chunks = checkpoint.iter_values("x", chunk=65_537)
+                first = next(chunks)
+                _, window = checkpoint._maps[path]
+                self.assertLess(len(window), values.nbytes)
+                # Interleave an independent full-tensor read. Its eviction
+                # of the streaming window must not invalidate yielded data.
+                converted = checkpoint.to_float32("x")
+                np.testing.assert_array_equal(converted, values)
+                converted[:] = -1
+                np.testing.assert_array_equal(np.concatenate([first, *chunks]), values)
+
     def test_touching_many_shards_keeps_few_maps_and_file_descriptors(self):
         tmp = Path(tempfile.mkdtemp())
         shards = [{f"t{i}": ("F32", np.full((2, 2), i, np.float32))} for i in range(40)]

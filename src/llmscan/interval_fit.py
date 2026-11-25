@@ -75,12 +75,17 @@ def fit_excess(b, s, rb, rs):
     form = sw.T @ dw
     eb, es = np.zeros_like(b), np.zeros_like(s)
     yb, ys = eb, es
+    # The correction map L(b,s) = (sW)ᵀDW + SWᵀ((s-b)W) is linear.
+    # Carry L of both iterates so a step and its extrapolation need only
+    # one fresh evaluation. Recompute each candidate from its coordinates.
+    correction = np.zeros_like(form)
+    extrapolated = correction
     step = floor / 2
     for iteration in range(1, 513):
         # Fit the *linearized* corrected form to the cone of symmetric NSD
         # matrices. Its residual is a PSD factor plus a skew matrix. Only
         # _box_excess can turn this search direction into a finding.
-        trial = form + (ys @ w).T @ dw + sw.T @ ((ys - yb) @ w)
+        trial = form + extrapolated
         vals, vecs = np.linalg.eigh((trial + trial.T) / 2)
         factor = vecs * np.sqrt(np.maximum(0., vals))
         skew = (trial - trial.T) / 2
@@ -97,7 +102,8 @@ def fit_excess(b, s, rb, rs):
             tb = np.clip(yb - step * gb, -rb, rb)
             ts = np.clip(ys - step * gs, -rs, rs)
             db, ds = tb - yb, ts - ys
-            change = (ds @ w).T @ dw + sw.T @ ((ds - db) @ w)
+            candidate = (ts @ w).T @ dw + sw.T @ ((ts - tb) @ w)
+            change = candidate - extrapolated
             if step * np.linalg.norm(change)**2 <= np.linalg.norm(db)**2 + np.linalg.norm(ds)**2:
                 break
             step /= 2
@@ -107,6 +113,8 @@ def fit_excess(b, s, rb, rs):
             return 0.
         momentum = (iteration - 1) / (iteration + 2)
         yb, ys = tb + momentum * (tb - eb), ts + momentum * (ts - es)
+        extrapolated = candidate + momentum * (candidate - correction)
+        correction = candidate
         eb, es = tb, ts
         step *= 1.03
     return 0.

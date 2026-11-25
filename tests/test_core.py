@@ -27,6 +27,16 @@ class TestAnalyzeDelta(unittest.TestCase):
     def setUp(self):
         self.rng = np.random.default_rng(0)
 
+    def test_power_of_two_scaling_matches_ldexp_at_float64_limits(self):
+        for dtype in (np.float32, np.float64):
+            info = np.finfo(dtype)
+            values = np.array([-0., 0., info.smallest_subnormal, -info.tiny, 1., -info.max], dtype=dtype)
+            for exponent in (-1073, -1024, -1023, 0, 1022, 1023, 1024):
+                with self.subTest(dtype=dtype, exponent=exponent), np.errstate(over="ignore", under="ignore"):
+                    expected = np.ldexp(values, -exponent, dtype=np.float64)
+                    scaled = core._scaled_weights(values, exponent)
+                    np.testing.assert_array_equal(scaled.view(np.uint64), expected.view(np.uint64))
+
     def test_entrywise_allowance_resolves_a_separated_pair_of_modes(self):
         base = np.full((32, 32), 1.9375, dtype=np.float32)
         suspect = base.copy()

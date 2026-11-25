@@ -132,6 +132,13 @@ def rounding_budget(base: np.ndarray, base_dtype: str, suspect_dtype: str) -> fl
     return budget
 
 
+def _scaled_weights(weights: np.ndarray, exponent: int) -> np.ndarray:
+    """Exact power-of-two scaling in float64, including extreme F64 binades."""
+    if -1022 <= -exponent <= 1023:
+        return np.multiply(weights, math.ldexp(1., -exponent), dtype=np.float64)
+    return np.ldexp(weights, -exponent, dtype=np.float64)
+
+
 def _storage_radius(weights: np.ndarray, dtype: str, exponent: int, arithmetic: float) -> np.ndarray:
     # For w = mantissa * 2**e, half the larger adjacent spacing is
     # 2**(e-2) times the spacing at one. Include the subnormal grid.
@@ -155,8 +162,8 @@ def difference_rounding_budget(base: np.ndarray, suspect: np.ndarray, base_dtype
     energy = 0.
     for start in range(0, rows, block_rows):
         sl = slice(start, start + block_rows)
-        b = np.ldexp(base[sl], -exponent, dtype=np.float64)
-        s = np.ldexp(suspect[sl], -exponent, dtype=np.float64)
+        b = _scaled_weights(base[sl], exponent)
+        s = _scaled_weights(suspect[sl], exponent)
         radii = _storage_radius(b, base_dtype, exponent, arithmetic)
         radii += _storage_radius(s, suspect_dtype, exponent, arithmetic)
         energy += float(np.einsum("ij,ij->", radii, radii))
@@ -269,8 +276,7 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     def blocks():
         for start in range(0, rows, block_rows):
             sl = slice(start, start + block_rows)
-            yield (np.ldexp(base[sl], -exponent, dtype=np.float64),
-                   np.ldexp(suspect[sl], -exponent, dtype=np.float64))
+            yield _scaled_weights(base[sl], exponent), _scaled_weights(suspect[sl], exponent)
 
     def range_basis(probes):
         action = np.zeros_like(probes)
@@ -318,8 +324,8 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     if not width:
         return 0.
     selected = np.argsort(-np.abs(x), kind="stable")[:width]
-    b = np.ldexp(base[:, selected], -exponent, dtype=np.float64)
-    s = np.ldexp(suspect[:, selected], -exponent, dtype=np.float64)
+    b = _scaled_weights(base[:, selected], exponent)
+    s = _scaled_weights(suspect[:, selected], exponent)
     rb = _storage_radius(b, base_dtype, exponent, arithmetic)
     rs = _storage_radius(s, suspect_dtype, exponent, arithmetic)
     z = x[selected]
