@@ -33,12 +33,13 @@ def sv_field(i: int) -> str:
 
 
 def estimate_tensor_bytes(row: InventoryRow) -> int:
-    """Estimated peak working memory (bytes) for one 2-D tensor in `core.analyze_delta`.
+    """Estimated peak working memory (bytes) for one 2-D tensor in `_analyze_tensor`.
 
-    Accounts for both decoded weight arrays (float32 or float64), any intermediate float32
-    array created when widening a non-F64 side to float64, the full-tensor `np.isfinite`
-    boolean mask, the float64 Gram matrix plus its matmul/eigensolve copy, and the float64
-    row block plus scaling temporary.
+    Accounts for both decoded weight arrays (float32 or float64) plus the largest
+    non-overlapping temporary phase: any intermediate float32 widening array for mixed
+    F64, the `core.removal_bounds` scaled-block cache and radius buffers for projection
+    tensors, the full-tensor `np.isfinite` boolean mask, or the float64 Gram/block
+    workspace.
     """
     d0, d1 = (int(x) for x in row.base_shape.split("x"))
     m, n = (d0, d1) if d0 >= d1 else (d1, d0)
@@ -50,9 +51,20 @@ def estimate_tensor_bytes(row: InventoryRow) -> int:
     finite_mask = m * n
     gram = 2 * n * n * 8
     block = 2 * min(m, core._ROWS_PER_BLOCK) * n * 8
-    # The widening temporary, the finite-value mask, and the Gram/block workspace live in
-    # separate phases while the two decoded arrays stay resident.
-    return decoded + max(decode_temp, finite_mask, gram + block)
+    kind = canonical_kind(row.kind)
+    token_matrix = kind in TOKEN_MATRICES and row.layer is None
+    removal_ws = 0
+    if token_matrix or kind in RESIDUAL_WRITERS:
+        rows, cols = (d1, d0) if token_matrix else (d0, d1)
+        r_block_rows = min(rows, max(1, core._ROWS_PER_BLOCK * min(rows, cols) // cols))
+        r_block = r_block_rows * cols * 8
+        r_cache = min(2 * rows * cols * 8, core._REMOVAL_CACHE_BYTES)
+        r_stream = 2 * r_block if 2 * rows * cols * 8 > core._REMOVAL_CACHE_BYTES else 0
+        r_radius = (3 if kind in RESIDUAL_WRITERS else 1) * r_block
+        removal_ws = r_cache + r_stream + r_radius
+    # The widening temporary, removal-check workspace, finite-value mask, and Gram/block
+    # workspace live in separate phases while the two decoded arrays stay resident.
+    return decoded + max(decode_temp, removal_ws, finite_mask, gram + block)
 
 
 def _max_parallelism(costs: list[int], jobs: int, max_memory_bytes: int) -> int:

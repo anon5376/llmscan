@@ -43,13 +43,13 @@ def make_pair(tmp: Path, changed_layers: tuple[int, ...] = (0, 1, 2, 3), d: int 
 class TestMemoryEstimator(unittest.TestCase):
     def test_estimate_accounts_for_decoded_and_peak_phase_workspace(self):
         row = inventory.InventoryRow(
-            name="m.weight", layer=0, kind="o_proj", status=inventory.CHANGED,
+            name="m.weight", layer=0, kind="q_proj", status=inventory.CHANGED,
             base_dtype="BF16", suspect_dtype="F32", base_shape="1024x2048", suspect_shape="1024x2048", numel=1024 * 2048,
         )
         # m=2048, n=1024, itemsize=4 -> decoded=16 MiB, max(0, finite_mask=2 MiB, gram+block=48 MiB) -> 64 MiB
         self.assertEqual(delta.estimate_tensor_bytes(row), 64 * 1024 * 1024)
 
-        # Two 2560x2560 BF16 tensors fit in the default 512 MiB budget because finite_mask and gram+block do not coexist.
+        # Two 2560x2560 BF16 non-projection tensors fit in the default 512 MiB budget.
         sq = inventory.InventoryRow(
             name="q.weight", layer=0, kind="q_proj", status=inventory.CHANGED,
             base_dtype="BF16", suspect_dtype="BF16", base_shape="2560x2560", suspect_shape="2560x2560", numel=2560 * 2560,
@@ -60,23 +60,31 @@ class TestMemoryEstimator(unittest.TestCase):
             2,
         )
 
+    def test_estimate_accounts_for_removal_bounds_workspace_on_projections(self):
+        down = inventory.InventoryRow(
+            name="model.layers.0.mlp.down_proj.weight", layer=0, kind="down_proj", status=inventory.CHANGED,
+            base_dtype="BF16", suspect_dtype="BF16", base_shape="1024x3072", suspect_shape="1024x3072", numel=1024 * 3072,
+        )
+        # decoded=24 MiB; removal_bounds holds cached scaled pair (48 MiB) + 3 radius buffers (72 MiB) = 120 MiB > gram+block (64 MiB)
+        self.assertEqual(delta.estimate_tensor_bytes(down), (24 + 120) * 1024 * 1024)
+
     def test_estimate_accounts_for_tall_mask_and_mixed_precision_f64_temporary(self):
         tall_bf16 = inventory.InventoryRow(
-            name="e.weight", layer=None, kind="embed", status=inventory.CHANGED,
+            name="e.weight", layer=0, kind="q_proj", status=inventory.CHANGED,
             base_dtype="BF16", suspect_dtype="BF16", base_shape="1000000x8", suspect_shape="1000000x8", numel=8_000_000,
         )
         # m=1_000_000, n=8 -> finite_mask=8_000_000 > gram+block (~525 KiB)
         self.assertEqual(delta.estimate_tensor_bytes(tall_bf16), 2 * 8_000_000 * 4 + 8_000_000)
 
         tall_mixed = inventory.InventoryRow(
-            name="e.weight", layer=None, kind="embed", status=inventory.CHANGED,
+            name="e.weight", layer=0, kind="q_proj", status=inventory.CHANGED,
             base_dtype="F32", suspect_dtype="F64", base_shape="1000000x8", suspect_shape="1000000x8", numel=8_000_000,
         )
         # mixed F64 decode_temp=32_000_000 > finite_mask=8_000_000 > gram+block
         self.assertEqual(delta.estimate_tensor_bytes(tall_mixed), 2 * 8_000_000 * 8 + 8_000_000 * 4)
 
         tall_f64 = inventory.InventoryRow(
-            name="e.weight", layer=None, kind="embed", status=inventory.CHANGED,
+            name="e.weight", layer=0, kind="q_proj", status=inventory.CHANGED,
             base_dtype="F64", suspect_dtype="F64", base_shape="1000000x8", suspect_shape="1000000x8", numel=8_000_000,
         )
         # pure F64 has no widening temporary, so finite_mask=8_000_000 dominates
