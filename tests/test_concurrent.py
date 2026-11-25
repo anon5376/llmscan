@@ -228,14 +228,14 @@ class TestConcurrencyBehavior(unittest.TestCase):
         max_active = 0
         orig = core.analyze_delta
 
-        def slow_analyze(wb, ws, k):
+        def slow_analyze(wb, ws, k, *args, **kwargs):
             nonlocal active, max_active
             with lock:
                 active += 1
                 max_active = max(max_active, active)
             time.sleep(0.03)
             try:
-                return orig(wb, ws, k)
+                return orig(wb, ws, k, *args, **kwargs)
             finally:
                 with lock:
                     active -= 1
@@ -269,7 +269,7 @@ class TestConcurrencyBehavior(unittest.TestCase):
         giant_saw_peers = False
         orig = core.analyze_delta
 
-        def tracked(wb, ws, k):
+        def tracked(wb, ws, k, *args, **kwargs):
             nonlocal active, giant_saw_peers
             is_giant = wb.shape == (128, 128)
             with lock:
@@ -281,7 +281,7 @@ class TestConcurrencyBehavior(unittest.TestCase):
                 if is_giant and active > 1:
                     giant_saw_peers = True
                 active -= 1
-            return orig(wb, ws, k)
+            return orig(wb, ws, k, *args, **kwargs)
 
         with Checkpoint(self.tmp / "b.safetensors") as b, Checkpoint(self.tmp / "s.safetensors") as s:
             rows = inventory.compare(b, s)
@@ -320,13 +320,13 @@ class TestConcurrencyBehavior(unittest.TestCase):
         lock = threading.Lock()
         orig = core.analyze_delta
 
-        def staggered(wb, ws, k):
+        def staggered(wb, ws, k, *args, **kwargs):
             nonlocal finished_later
             diff = float(ws[0, 0] - wb[0, 0])
             if abs(diff - 1.0) < 0.1:  # layer 0 waits until layers 2 and 3 finish
                 others_done.wait(timeout=5.0)
-                return orig(wb, ws, k)
-            res = orig(wb, ws, k)
+                return orig(wb, ws, k, *args, **kwargs)
+            res = orig(wb, ws, k, *args, **kwargs)
             with lock:
                 finished_later += 1
                 if finished_later == 2:
@@ -450,14 +450,14 @@ class TestInterruptionAndErrors(unittest.TestCase):
         second_failed = threading.Event()
         orig = core.analyze_delta
 
-        def fail_second(wb, ws, k):
+        def fail_second(wb, ws, k, *args, **kwargs):
             diff = float(ws[0, 0] - wb[0, 0])
             if abs(diff - 2.0) < 0.1:
                 second_failed.set()
                 raise RuntimeError("boom on layer 1")
             if abs(diff - 1.0) < 0.1:
                 second_failed.wait(timeout=5.0)
-            return orig(wb, ws, k)
+            return orig(wb, ws, k, *args, **kwargs)
 
         out_csv = self.tmp / "delta.csv"
         with Checkpoint(self.tmp / "b.safetensors") as b, Checkpoint(self.tmp / "s.safetensors") as s:

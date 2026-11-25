@@ -15,19 +15,509 @@ over every direction and moves it very little, which a threshold count would not
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import numpy as np
 
+from .interval_fit import fit_excess
+from .removal import joint_excess, promising_symmetric_response, skew_probe
+
 _ROWS_PER_BLOCK = 4096
+_REMOVAL_CACHE_BYTES = 64 << 20
+_RADIUS_TILE_ELEMENTS = 32 << 10
+
+
+class OutputSpectrum(NamedTuple):
+    """Basis-ordered singular values, omitted norm and noise floor, all divided by scale."""
+    retained: np.ndarray
+    omitted: float
+    noise: float
+    scale: float
+
+    def outside_bounds(self, reference: np.ndarray, basis: np.ndarray,
+                       paired_rank: int | None = None) -> tuple[float, float, float]:
+        """Bound strength outside the reference and measure the contribution of extra modes."""
+        overlap = reference.T @ basis
+        residual = basis - reference @ overlap
+        lower = float(np.linalg.norm(residual * self.retained, ord=2))
+        # Tilts of the best-paired axes alone cannot establish that an
+        # extra mode carries appreciable energy.
+        unpaired = 0.
+        paired = reference.shape[1] if paired_rank is None else paired_rank
+        if basis.shape[1] > paired:
+            _, _, right = np.linalg.svd(overlap, full_matrices=basis.shape[1] > reference.shape[1])
+            extra = right[paired:]
+            # In a wider ambient hull even an extra axis may be partly paired.
+            # Residual principal axes are mutually orthogonal with lengths
+            # sin(theta). Count only their component outside that hull.
+            weighted = extra * self.retained
+            if paired < reference.shape[1]:
+                weighted = np.linalg.norm(residual @ extra.T, axis=0)[:, None] * weighted
+            unpaired = float(np.linalg.norm(weighted, ord=2))
+        # Retained and omitted terms act on orthogonal right singular spaces.
+        return lower, math.hypot(lower, self.omitted), unpaired
+
+    def outside_continuation(self, anchor: np.ndarray, basis: np.ndarray, angle: float) -> float:
+        """Strength guaranteed outside any anchor-rank plane within the angular allowance."""
+        rank = anchor.shape[1]
+        best_rank_residual = (np.partition(self.retained, -rank-1)[-rank-1]
+                              if len(self.retained) > rank else 0.)
+        if angle >= math.pi / 2:
+            return float(best_rank_residual)
+        coordinates = anchor.T @ basis
+        residual = (basis - anchor @ coordinates) * self.retained
+        _, outside, inputs = np.linalg.svd(residual, full_matrices=False)
+        # Each residual singular value has a unit input that attains it.
+        # Only the parallel response to that same input can be recovered by
+        # rotating the plane. A dominant response on another input cannot.
+        parallel = np.linalg.norm((coordinates * self.retained) @ inputs.T, axis=0)
+        remaining = math.cos(angle) * outside - math.sin(angle) * parallel
+        return float(max(best_rank_residual, remaining.max()))
 
 
 class DeltaStats(NamedTuple):
     singular_values: np.ndarray
     effective_rank: float
+    frobenius: float | None = None
+    column_fraction: float | None = None
+    second_tail_share: float | None = None
+    direction: np.ndarray | None = None
+    projection_gain: float | None = None
+    projection_error: float | None = None
+    column_spike: float | None = None
+    tail_norm_fraction: float | None = None
+    fit_residual: np.ndarray | None = None
+    base_probe: np.ndarray | None = None
+    output_subspace: np.ndarray | None = None
+    output_spectrum: OutputSpectrum | None = None
+
+    def tail_excess(self, rounding_budget: float) -> float | None:
+        total = self.frobenius
+        if not total or not math.isfinite(total) or self.tail_norm_fraction is None:
+            return None
+        # Round down at the F64 subnormal floor, where one ULP can be a
+        # large fraction of the reported physical norm.
+        total = math.nextafter(total, 0.)
+        if not total or not self.tail_norm_fraction:
+            return 0.
+        return max(0., self.tail_norm_fraction - rounding_budget / total)
 
 
-def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaStats:
+# Spacing at one and at zero for the supported checkpoint storage formats.
+_SPACING = {"BF16": (2.0**-7, 2.0**-133), "F16": (2.0**-10, 2.0**-24),
+            "F32": (2.0**-23, 2.0**-149), "F64": (2.0**-52, 2.0**-1074)}
+
+
+def rank_one_excess(base: np.ndarray, stats: DeltaStats, base_dtype: str, suspect_dtype: str) -> float | None:
+    """Lower bound on the fraction of ΔW unexplained by one removal and a floating-point re-save."""
+    return stats.tail_excess(rounding_budget(base, base_dtype, suspect_dtype))
+
+
+def rounding_budget(base: np.ndarray, base_dtype: str, suspect_dtype: str) -> float:
+    """Frobenius allowance for a partial removal and floating-point re-save."""
+    # A partial orthogonal removal cannot increase the base Frobenius norm.
+    # Allow a full ULP at the coarser precision, including a subnormal floor.
+    # Accumulate a scaled norm in blocks to avoid squaring extreme F64 values.
+    relative, absolute = map(max, zip(_SPACING[base_dtype], _SPACING[suspect_dtype]))
+    scale = max(float(base.max()), -float(base.min()))
+    if not math.isfinite(scale):
+        return math.inf
+    budget = absolute * math.sqrt(base.size)
+    if scale:
+        rows = base if base.shape[0] >= base.shape[1] else base.T
+        energy = 0.
+        for start in range(0, len(rows), _ROWS_PER_BLOCK):
+            block = np.divide(rows[start:start + _ROWS_PER_BLOCK], scale, dtype=np.float64)
+            energy += float(np.einsum("ij,ij->", block, block))
+        budget += (relative * math.sqrt(energy)) * scale
+    return budget
+
+
+def _scaled_weights(weights: np.ndarray, exponent: int) -> np.ndarray:
+    """Exact power-of-two scaling in float64, including extreme F64 binades."""
+    if -1022 <= -exponent <= 1023:
+        return np.multiply(weights, math.ldexp(1., -exponent), dtype=np.float64)
+    return np.ldexp(weights, -exponent, dtype=np.float64)
+
+
+def _storage_spacing(weights: np.ndarray, dtype: str, exponent: int) -> np.ndarray:
+    # For w = mantissa * 2**e, half the larger adjacent spacing is
+    # 2**(e-2) times the spacing at one. Include the subnormal grid.
+    relative, absolute = _SPACING[dtype]
+    floor = math.ldexp(absolute, -exponent)
+    # Scaled blocks are native binary64. The exponent field alone is the
+    # lower power-of-two boundary of each normal value, and zero for ±0.
+    binade = (weights.view(np.uint64) & np.uint64(0x7ff0000000000000)).view(np.float64)
+    if floor < np.finfo(float).tiny * (relative / 2):
+        # In mixed extreme-scale checkpoints a scaled subnormal's binade
+        # can still matter above the storage floor.
+        sub = (binade == 0) & (weights != 0)
+        binade[sub] = np.ldexp(1., np.frexp(weights[sub])[1] - 1)
+    binade *= relative / 2
+    return np.maximum(binade, floor, out=binade)
+
+
+def _storage_radius(weights: np.ndarray, dtype: str, exponent: int, arithmetic: float) -> np.ndarray:
+    return _storage_spacing(weights, dtype, exponent) + arithmetic * np.abs(weights)
+
+
+def difference_rounding_budget(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspect_dtype: str) -> float:
+    """Frobenius bound on the error in a difference of two stored matrices."""
+    extrema = [base.min(), base.max(), suspect.min(), suspect.max()]
+    if not np.isfinite(extrema).all():
+        return math.inf
+    _, exponent = math.frexp(max(_SPACING[base_dtype][1], _SPACING[suspect_dtype][1],
+                                 *(abs(float(v)) for v in extrema)))
+    rows, cols = base.shape
+    block_rows = max(1, _ROWS_PER_BLOCK * min(rows, cols) // cols)
+    arithmetic = 2 * np.finfo(base.dtype).eps + 8 * math.ulp(1.) * (rows + cols + 2)
+    energy = 0.
+    for start in range(0, rows, block_rows):
+        sl = slice(start, start + block_rows)
+        b = _scaled_weights(base[sl], exponent)
+        s = _scaled_weights(suspect[sl], exponent)
+        radii = _storage_radius(b, base_dtype, exponent, arithmetic)
+        radii += _storage_radius(s, suspect_dtype, exponent, arithmetic)
+        energy += float(np.einsum("ij,ij->", radii, radii))
+    return float(np.nextafter(np.ldexp(math.sqrt(energy), exponent), math.inf))
+
+
+def _skew_columns(base: np.ndarray, delta: np.ndarray, scale: float) -> tuple[int, int]:
+    """Select two coordinates of the skew matrix K = BᵀΔ − ΔᵀB without forming K."""
+    # A dense witness samples all modes, including ties. Select a coordinate
+    # from Kz, then its strongest partner from that row of K. Only the final
+    # two-coordinate discrepancy enters the test and its rounding allowance.
+    z = np.random.default_rng(0).standard_normal(base.shape[1])
+    z /= np.linalg.norm(z)
+    block_rows = max(1, _ROWS_PER_BLOCK * min(base.shape) // base.shape[1])
+
+    def action(column: int | None) -> np.ndarray:
+        result = np.zeros(base.shape[1])
+        for start in range(0, len(base), block_rows):
+            sl = slice(start, start + block_rows)
+            b = np.divide(base[sl], scale, dtype=np.float64)
+            d = np.divide(delta[sl], scale, dtype=np.float64)
+            bx, dx = (b @ z, d @ z) if column is None else (b[:, column], d[:, column])
+            result += b.T @ dx - d.T @ bx
+        return result
+
+    i = int(np.argmax(np.abs(action(None))))
+    return i, int(np.argmax(np.abs(action(i))))
+
+
+def _fit_storage_box(weights, dtype, exponent, arithmetic):
+    """Enclose the nearest-rounding cell of each power-of-two scaled weight."""
+    relative, absolute = _SPACING[dtype]
+    mantissa, power = np.frexp(weights)
+    floor = math.ldexp(absolute, -exponent - 1)
+    away = np.maximum(floor, np.ldexp(relative / 4, power))
+    away[weights == 0] = floor
+    # At a binade boundary the neighbor toward zero is twice as close,
+    # except where both neighbors are on the uniform subnormal grid.
+    toward = np.where(np.abs(mantissa) == 0.5, np.maximum(floor, away / 2), away)
+    offset = (away - toward) / 2
+    center = weights + np.copysign(offset, weights)
+    radius = away - offset + arithmetic * np.abs(weights) + np.finfo(float).tiny
+    return center, radius
+
+
+def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspect_dtype: str) -> float | None:
+    return removal_bounds(base, suspect, base_dtype, suspect_dtype, difference=False)[0]
+
+
+def removal_bounds(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspect_dtype: str,
+                   *, difference: bool) -> tuple[float | None, float]:
+    """Test the symmetric negative semidefinite form SᵀΔ of a partial removal.
+
+    For S = (I − P)B, 0 ≼ P ≼ I, (Sx)ᵀΔx = −(Bx)ᵀ(I − P)P(Bx) ≤ 0.
+    Return the fraction of a witnessed violation left after bounding rounding
+    of both stored checkpoints, on a single input or jointly across inputs.
+    Also return the difference rounding budget if requested, otherwise infinity.
+    """
+    extrema = [base.min(), base.max(), suspect.min(), suspect.max()]
+    if not np.isfinite(extrema).all():
+        return None, math.inf
+    b_step = _SPACING[base_dtype][1]
+    s_step = _SPACING[suspect_dtype][1]
+    # A common power of two preserves the sign, including for subnormal
+    # checkpoints. Include the storage floors before rescaling mixed dtypes.
+    _, exponent = math.frexp(max(b_step, s_step, *(abs(float(v)) for v in extrema)))
+    rows, cols = base.shape
+    block_rows = max(1, _ROWS_PER_BLOCK * min(rows, cols) // cols)
+
+    # Every pass visits the same blocks in the same order. Keep a bounded
+    # prefix of the scaled pair and stream the remainder on each pass.
+    cached = []
+    cache_rows = _REMOVAL_CACHE_BYTES // (2 * cols * np.dtype(np.float64).itemsize)
+
+    def blocks():
+        for i, start in enumerate(range(0, rows, block_rows)):
+            if i < len(cached):
+                yield cached[i]
+                continue
+            sl = slice(start, min(start + block_rows, rows))
+            pair = _scaled_weights(base[sl], exponent), _scaled_weights(suspect[sl], exponent)
+            if sl.stop <= cache_rows:
+                cached.append(pair)
+            yield pair
+
+    def range_basis(probes):
+        action = np.zeros_like(probes)
+        for b, s in blocks():
+            d = s - b
+            action += s.T @ (d @ probes) + d.T @ (s @ probes)
+        return np.linalg.qr(action)[0]
+
+    def leading(basis, refine=False):
+        form = np.zeros((basis.shape[1], basis.shape[1]))
+        action = np.zeros_like(basis) if refine else None
+        for b, s in blocks():
+            d = s - b
+            sp, dp = s @ basis, d @ basis
+            form += sp.T @ dp
+            if refine:
+                action += s.T @ dp + d.T @ sp
+        values, vectors = np.linalg.eigh((form + form.T) / 2)
+        return values[-1], basis @ vectors[:, -1], action
+
+    sketch_width = 8
+    basis = (np.eye(cols) if cols <= sketch_width else
+             range_basis(np.random.default_rng(0).standard_normal((cols, sketch_width))))
+    value, x, action = leading(basis, refine=cols > sketch_width)
+    abs_x = np.abs(x)
+
+    arithmetic = 8 * math.ulp(1.) * (rows + cols + 2)
+    diff_arithmetic = 2 * np.finfo(base.dtype).eps + arithmetic
+
+    def project_radius(weights, dtype):
+        # Tile the elementwise passes in memory order. Preserve the layout
+        # and full block shape for the original matvec and norm reductions.
+        shape = weights.shape
+        order = "F" if weights.flags.f_contiguous else "C"
+        flat = weights.ravel(order=order)
+        radius = np.empty_like(flat)
+        diff_radius = np.empty_like(flat) if difference else None
+        for start in range(0, len(flat), _RADIUS_TILE_ELEMENTS):
+            sl = slice(start, start + _RADIUS_TILE_ELEMENTS)
+            spacing = _storage_spacing(flat[sl], dtype, exponent)
+            magnitude = np.abs(flat[sl])
+            np.multiply(arithmetic, magnitude, out=radius[sl])
+            radius[sl] += spacing
+            if difference:
+                np.multiply(diff_arithmetic, magnitude, out=diff_radius[sl])
+                diff_radius[sl] += spacing
+        projected = radius.reshape(shape, order=order) @ abs_x
+        return projected, diff_radius.reshape(shape, order=order) if difference else None
+
+    gap = 0.
+    energy = 0.
+    # An absolute float64 floor also covers underflow in scaled arithmetic.
+    budget = 16 * base.size * float(np.finfo(float).tiny)
+    for b, s in blocks():
+        bx, sx = b @ x, s @ x
+        dx = sx - bx
+        gap += float(sx @ dx)
+        eb, br = project_radius(b, base_dtype)
+        es, sr = project_radius(s, suspect_dtype)
+        if difference:
+            br += sr
+            energy += float(np.einsum("ij,ij->", br, br))
+            del br, sr
+        # Expanding (s+δs)(s+δs−b−δb) row by row gives (2s−b)δs
+        # − sδb − δsδb + δs². The final square is nonnegative.
+        budget += float(np.abs(sx + dx) @ es + np.abs(sx) @ eb + es @ eb
+                        + arithmetic * (np.abs(sx) @ np.abs(dx)))
+    refined = float(np.nextafter(np.ldexp(math.sqrt(energy), exponent), math.inf)) if difference else math.inf
+    if gap > budget:
+        return 1. - budget / gap, refined
+
+    # Refine the probe, then restrict the expensive joint interval test to
+    # influential columns. These limits cap work and never relax a bound.
+    if action is not None:
+        value, x, _ = leading(np.linalg.qr(action)[0])
+    cached.clear()
+    width = min(cols, 1024, (1 << 20) // rows)
+    if not width:
+        return 0., refined
+    selected = np.argsort(-np.abs(x), kind="stable")[:width]
+    b = _scaled_weights(base[:, selected], exponent)
+    s = _scaled_weights(suspect[:, selected], exponent)
+    rb = _storage_radius(b, base_dtype, exponent, arithmetic)
+    rs = _storage_radius(s, suspect_dtype, exponent, arithmetic)
+    z = x[selected]
+    # Symmetry is required even if every quadratic response is nonpositive.
+    skew, try_fit = skew_probe(b, s, rb, rs)
+    excess = 0.
+    if value > math.sqrt(np.finfo(float).tiny):
+        excess = joint_excess(b, s, rb, rs, z, value)
+        if not excess and not try_fit:
+            try_fit = promising_symmetric_response(b, s, rb, rs, z)
+    if not excess and try_fit:
+        b, rb = _fit_storage_box(b, base_dtype, exponent, arithmetic)
+        s, rs = _fit_storage_box(s, suspect_dtype, exponent, arithmetic)
+        excess = fit_excess(b, s, rb, rs)
+    # The peer ranker compares margins. A weak skew certificate must not
+    # replace a stronger certificate from the quadratic response.
+    return max(skew, excess), refined
+
+
+def _probe_bounds(base, delta, scale, total, base_dtype, suspect_dtype, z, probes):
+    """Evaluate contraction and reciprocity on the same scaled weight blocks."""
+    b_rel, b_abs = _SPACING[base_dtype]
+    s_rel, s_abs = _SPACING[suspect_dtype]
+    eps = float(np.finfo(delta.dtype).eps)
+    arithmetic = 2 * eps + 8 * math.ulp(1.) * (sum(base.shape) + 2)
+    if z is not None:
+        abs_z = np.abs(z)
+        base_norm = reflected_norm = envelope_norm = 0.
+    if probes is not None:
+        magnitudes = np.abs(probes)
+        one_norms = magnitudes.sum(axis=0)
+        gap = 0.
+        budget = 8 * base.size * float(np.finfo(np.float64).tiny)
+
+    block_rows = max(1, _ROWS_PER_BLOCK * min(base.shape) // base.shape[1])
+    for start in range(0, len(base), block_rows):
+        sl = slice(start, start + block_rows)
+        b = np.divide(base[sl], scale, dtype=np.float64)
+        d = np.divide(delta[sl], scale, dtype=np.float64)
+        if z is not None:
+            x = b @ z
+            base_norm = math.hypot(base_norm, *x)
+            reflected_norm = math.hypot(reflected_norm, *(x + 2 * (d @ z)))
+        if probes is not None:
+            bp, dp = b @ probes, d @ probes
+            sp = bp + dp
+            # BᵀB is symmetric. Only B and Δ contribute to the measured skew.
+            gap += float(bp[:, 0] @ dp[:, 1] - bp[:, 1] @ dp[:, 0])
+
+        # The signed products are finished. Reuse their owned buffers for
+        # the magnitudes needed by both storage-error envelopes.
+        np.abs(b, out=b)
+        np.abs(d, out=d)
+        if probes is not None:
+            b_mag = b @ magnitudes
+            s_mag = b_mag + d @ magnitudes
+            be = (0.5 * b_rel + arithmetic) * b_mag + (b_abs / scale) * one_norms
+            se = (0.5 * s_rel + arithmetic) * s_mag + (s_abs / scale) * one_norms
+            budget += float(np.sum(np.abs(bp) * se[:, ::-1] + be * (np.abs(sp[:, ::-1]) + se[:, ::-1])))
+        if z is not None:
+            b += d
+            envelope_norm = math.hypot(envelope_norm, *(b @ abs_z))
+
+    contraction = reciprocity = None
+    if z is not None:
+        # (I − 2P) is contractive. Charge one ULP at the coarser precision
+        # across both checkpoints, the working subtraction and scaled matvecs.
+        allowance = (max(b_rel, s_rel) + arithmetic / 2) * envelope_norm
+        allowance += 2 * (max(b_abs, s_abs) / scale) * math.sqrt(len(base)) * abs_z.sum()
+        growth = (reflected_norm - base_norm) / 2
+        denominator = total / scale + math.ulp(total) / scale
+        if growth <= allowance:
+            contraction = 0.
+        elif denominator:
+            contraction = min(1., (growth - allowance) / denominator)
+    if probes is not None:
+        reciprocity = 1. - budget / abs(gap) if abs(gap) > budget else 0.
+    return contraction, reciprocity
+
+
+def projection_excesses(base, delta, stats, base_dtype, suspect_dtype, *, contraction=True, reciprocity=True):
+    """Share a traversal when both projection certificates probe the full matrix."""
+    total = stats.frobenius
+    if not total or not math.isfinite(total):
+        return None, None
+    scale = max(total, float(base.max()), -float(base.min()))
+    args = scale, total, base_dtype, suspect_dtype
+    z = probes = None
+    contraction_margin = reciprocity_margin = None
+    residual = stats.fit_residual
+    if contraction and residual is not None:
+        length = np.linalg.norm(residual)
+        if length:
+            z = residual / length
+        else:
+            contraction_margin = 0.
+    if reciprocity:
+        if stats.direction is None:
+            if stats.tail_norm_fraction is not None:
+                i, j = _skew_columns(base, delta, scale)
+                if i == j:
+                    reciprocity_margin = 0.
+                else:
+                    _, reciprocity_margin = _probe_bounds(base[:, [i, j]], delta[:, [i, j]], *args, None, np.eye(2))
+        elif stats.base_probe is not None and residual is not None:
+            x = stats.base_probe
+            y = residual - (x @ residual) * x
+            length = np.linalg.norm(y)
+            if length <= math.sqrt(math.ulp(1.)):
+                reciprocity_margin = 0.
+            else:
+                probes = np.column_stack((x, y / length))
+    if z is not None or probes is not None:
+        measured_contraction, measured_reciprocity = _probe_bounds(base, delta, *args, z, probes)
+        if z is not None:
+            contraction_margin = measured_contraction
+        if probes is not None:
+            reciprocity_margin = measured_reciprocity
+    return contraction_margin, reciprocity_margin
+
+
+def contraction_excess(base, delta, stats, base_dtype, suspect_dtype):
+    """Test one input against the contraction 2W_suspect − W_base."""
+    return projection_excesses(base, delta, stats, base_dtype, suspect_dtype, reciprocity=False)[0]
+
+
+def reciprocity_excess(base, delta, stats, base_dtype, suspect_dtype):
+    """Bound a two-input reciprocity discrepancy over both storage boxes."""
+    return projection_excesses(base, delta, stats, base_dtype, suspect_dtype, contraction=False)[1]
+
+
+def _projection_fit(right: np.ndarray, projected: np.ndarray, gain: float | None) -> tuple[float, float, np.ndarray]:
+    """Fit the signed coefficients of a partial removal, in units of σ₁."""
+    residual = right.copy()
+    if gain is not None and gain > 0:
+        # A partial or full removal lies on the segment from zero to
+        # -Wᵀu₁/σ₁. Here projected is its unit base direction.
+        length = np.clip(-(right @ projected), 0.0, 1.0 / gain)
+        residual += length * projected
+    error = min(1.0, float(np.linalg.norm(residual)))
+    # Large coefficients already explained by the base row have zero error.
+    # Use both the RMS of a unit coefficient vector and a vocabulary-size
+    # adjusted Gaussian maximum, with MAD estimating the background scale.
+    deviations = np.abs(residual - np.median(residual))
+    n = len(right)
+    robust_sigma = 1.4826 * np.median(deviations)
+    bound = max(1 / np.sqrt(n), robust_sigma * np.sqrt(2 * np.log(2 * n / 0.01)))
+    return error, float(deviations.max() / bound), residual
+
+
+def _subspace_dimension(energy: np.ndarray, total: float, shape: tuple[int, int], noise: float | None) -> int:
+    """Choose a resolved prefix of the scaled Gram spectrum for peer comparison."""
+    if noise is None:  # Legacy callers without checkpoint storage metadata.
+        gaps = np.flatnonzero(energy[:-1] > 4 * energy[1:])
+        dim = int(gaps[0] + 1) if gaps.size else len(energy)
+        return dim if energy[dim - 1] >= min(energy[0] / 4, total / len(energy)) else 0
+
+    # Weyl's inequality bounds each singular-value error by the operator
+    # norm of the rounding perturbation, itself bounded by its Frobenius norm.
+    # Also exclude eigenvalues at the scale of error in the Gram product.
+    gram_floor = math.sqrt(math.ulp(1.) * sum(shape) * total)
+    dim = int(np.count_nonzero(np.sqrt(energy) > max(noise, gram_floor)))
+    if dim == 0:
+        return 0
+    if dim < shape[0] and (dim == len(energy) or energy[dim - 1] > 4 * energy[dim]):
+        return dim
+    # The floor cuts a cluster or the resolved modes span the whole output.
+    # Find a distinct prefix above the bulk without splitting a tied space.
+    gaps = np.flatnonzero((energy[:dim - 1] > 4 * energy[1:dim])
+                          & (energy[:dim - 1] >= min(energy[0] / 4, total / len(energy))))
+    return int(gaps[-1] + 1) if gaps.size else 0
+
+
+def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int,
+                  subspace_budget: float | tuple[float, float] | None = None) -> DeltaStats:
     """Spectrum of the change from `w_base` to `w_suspect` for one weight matrix.
 
     Inputs
@@ -35,12 +525,26 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
             dtype, as stored in the checkpoint: float32, or float64 when either side is F64.
             Both are fresh copies; modifying them is fine.
         k: how many leading singular values to return, k >= 1.
+        subspace_budget: Frobenius bound on checkpoint rounding in physical units, or
+            the whole-tensor bound and its entrywise refinement. Without storage metadata,
+            retain the leading-cluster heuristic. Infinity skips extraction.
 
     Returns DeltaStats
         singular_values: 1-D float64 array of the k largest singular values of
             ΔW = w_suspect − w_base, largest first. Fewer than k if min(shape) < k.
         effective_rank: participation ratio (Σσ²)² / Σσ⁴, 0.0 when ΔW is zero. It is NaN
             when ΔW holds a non-finite value; the ranking treats that tensor as unusable.
+        frobenius: norm of the full delta, including modes beyond k.
+        column_fraction: effective number of energized columns divided by the column count.
+        second_tail_share: fraction of non-leading energy in the second singular mode.
+        direction: leading left singular vector when the leading mode is separated.
+        projection_gain: σ₁ / ‖u₁ᵀ W_base‖₂ when the denominator is nonzero.
+        projection_error: relative error of the best partial removal along u₁.
+        column_spike: largest centered coefficient error relative to its robust noise bound.
+        tail_norm_fraction: Frobenius distance to the best rank-one delta divided by the delta norm.
+        fit_residual: unexplained leading coefficients in input space, used as a contraction probe.
+        base_probe: normalized base coefficients along the leading output direction.
+        output_subspace: left basis for a separated cluster of leading modes.
 
     The pipeline never calls this for bit-identical tensors.
     """
@@ -49,19 +553,95 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> DeltaSta
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
     np.subtract(w_suspect, w_base, out=w_suspect)  # ΔW, in place: the caller's copy is ours
-    dw = w_suspect if w_suspect.shape[0] >= w_suspect.shape[1] else w_suspect.T
-    if not np.isfinite(dw).all():
+    return analyze_difference(w_base, w_suspect, k, subspace_budget)
+
+
+def analyze_difference(w_base, difference, k, subspace_budget):
+    """Gram spectrum and witnesses from row-addressable base and difference blocks."""
+    if k < 1:
+        raise ValueError(f"k must be >= 1, got {k}")
+    dw = difference if difference.shape[0] >= difference.shape[1] else difference.T
+    scale = max(float(dw.max()), -float(dw.min()))
+    if not math.isfinite(scale):
         return DeltaStats(np.full(min(k, dw.shape[1]), np.nan), float("nan"))
 
-    scale = max(float(dw.max()), -float(dw.min()))  # largest |ΔW| entry, without an abs() copy
     if scale == 0.0:
         return DeltaStats(np.zeros(min(k, dw.shape[1])), 0.0)
 
+    # Orient the Gram on the small side, but report the direction in the
+    # original output space. The caller puts embeddings in residual x token order.
+    tall = difference.shape[0] >= difference.shape[1]
     gram = np.zeros((dw.shape[1], dw.shape[1]))
+    column_energy = np.empty(difference.shape[1])
     for start in range(0, dw.shape[0], _ROWS_PER_BLOCK):
-        block = dw[start:start + _ROWS_PER_BLOCK].astype(np.float64) / scale  # entries in [-1, 1]
+        block = np.divide(dw[start:start + _ROWS_PER_BLOCK], scale, dtype=np.float64)  # entries in [-1, 1]
         gram += block.T @ block
-    energy = np.clip(np.linalg.eigvalsh(gram)[::-1], 0.0, None)  # (σ/scale)², largest first
+        if not tall:
+            column_energy[start:start + len(block)] = np.einsum("ij,ij->i", block, block)
+    if tall:
+        column_energy = gram.diagonal()
+    values, vectors = np.linalg.eigh(gram)
+    energy = np.maximum(values[::-1], 0.0)
+    total = energy.sum()
+    effective_rank = float(total ** 2 / (energy @ energy))
+    fraction = float(column_energy.sum() ** 2 / (len(column_energy) * (column_energy @ column_energy)))
+    tail = energy[1:].sum()
+    # Eckart–Young, evaluated before restoring physical units: separate F64
+    # subnormal norms can round differently and distort a ratio of the two.
+    tail_norm_fraction = float(np.sqrt(tail / total))
+    second_share = float(energy[1] / tail) if tail else 0.0
 
-    effective_rank = float(energy.sum()) ** 2 / float(np.square(energy).sum())
-    return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank)
+    # A repeated or nearly repeated leading singular value has no stable axis.
+    direction = gain = projection_error = column_spike = fit_residual = base_probe = None
+    output_subspace = None
+    if len(energy) == 1 or energy[0] > 4 * energy[1]:
+        small = vectors[:, -1].copy()
+        other = np.empty(dw.shape[0])
+        direction, right = (other, small) if tall else (small, other)
+        base = w_base if tall else w_base.T
+        base_scale = max(float(w_base.max()), -float(w_base.min()))
+        projected = np.zeros(difference.shape[1])
+        for start in range(0, dw.shape[0], _ROWS_PER_BLOCK):
+            sl = slice(start, start + _ROWS_PER_BLOCK)
+            other[sl] = (np.divide(dw[sl], scale, dtype=np.float64) @ small) / np.sqrt(energy[0])
+            if base_scale:
+                block = np.divide(base[sl], base_scale, dtype=np.float64)
+                if tall:
+                    projected += block.T @ direction[sl]
+                else:
+                    projected[sl] = block @ direction
+        # For the orthogonal projection W' = W - uuᵀW this gain equals one,
+        # regardless of how much weight this layer has in direction u.
+        projected_norm = np.linalg.norm(projected)
+        if projected_norm:
+            gain = float((np.sqrt(energy[0]) / projected_norm) * (scale / base_scale))
+            projected /= projected_norm
+            base_probe = projected
+        projection_error, column_spike, fit_residual = _projection_fit(right, projected, gain)
+
+    budgets = subspace_budget if isinstance(subspace_budget, tuple) else (subspace_budget,)
+    floors = [None if b is None else b / scale for b in budgets]
+    # A tighter floor may land inside a spectral cluster or admit the whole
+    # output space. Keep a separated prefix resolved at either storage bound.
+    dim = max(_subspace_dimension(energy, total, difference.shape, f) for f in floors)
+    if dim == 1 and direction is not None and len(difference) > 1:
+        output_subspace = direction[:, None]
+    elif 2 <= dim < len(difference):
+        small = vectors[:, -dim:]
+        if tall:
+            output_subspace = np.empty((len(dw), dim))
+            singular = np.sqrt(energy[:dim][::-1])
+            for start in range(0, len(dw), _ROWS_PER_BLOCK):
+                sl = slice(start, start + _ROWS_PER_BLOCK)
+                output_subspace[sl] = (np.divide(dw[sl], scale, dtype=np.float64) @ small) / singular
+        else:
+            output_subspace = small.copy()
+
+    spectrum = None
+    if output_subspace is not None and subspace_budget is not None:
+        floor = max(min(floors), math.sqrt(math.ulp(1.) * sum(difference.shape) * total))
+        spectrum = OutputSpectrum(np.sqrt(energy[:dim][::-1]),
+                                  math.sqrt(energy[dim]) if dim < len(energy) else 0., floor, scale)
+    return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),
+                      fraction, second_share, direction, gain, projection_error, column_spike, tail_norm_fraction,
+                      fit_residual, base_probe, output_subspace, spectrum)

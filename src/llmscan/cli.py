@@ -84,10 +84,10 @@ def _slug(spec: str) -> str:
     return spec.rstrip("/\\").replace("\\", "/").split("/")[-1]
 
 
-def _rank(args, rows, out: Path, delta_csv: Path | None = None) -> str:
+def _rank(args, rows, out: Path, delta_csv: Path | None = None, directions=None, subspaces=None, spectra=None) -> str:
     """Write ranking.csv (with ΔW stats when delta_csv is given); return the top-N text."""
     ranked = rank.rank_tensors(rows, rank.read_delta_csv(delta_csv) if delta_csv else None,
-                               args.expected_kinds, args.outlier_factor)
+                               args.expected_kinds, args.outlier_factor, directions, subspaces, spectra)
     atomic.write(out / "ranking.csv", lambda tmp: rank.write_csv(ranked, tmp))
     return rank.summarize(ranked, args.top)
 
@@ -107,7 +107,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="comma-separated matrix kinds an abliteration may change (default: "
                          + ",".join(sorted(rank.DEFAULT_EXPECTED_KINDS)) + ")")
     ap.add_argument("--outlier-factor", type=rank.parse_factor, default=rank.DEFAULT_OUTLIER_FACTOR, metavar="X",
-                    help="effective rank above X times the median of its kind is an outlier (default: 3)")
+                    help="coarse outlier threshold for effective rank relative to peers and for projection gain "
+                         "(default: 3); adaptive and directional checks also apply")
     ap.add_argument("-j", "--jobs", type=int, default=1,
                     help="concurrent tensor workers for the delta scan (at least 1; default: 1, serial)")
     ap.add_argument("--max-memory", type=float, default=float(delta.DEFAULT_MAX_MEMORY_MIB), metavar="MIB",
@@ -167,10 +168,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"wrote {out / 'inventory.csv'}\nwrote {out / 'ranking.csv'}")
             return 0
         try:
+            directions = {}
+            subspaces = {}
+            spectra = {}
             atomic.write(
                 out / "delta.csv",
                 lambda tmp: delta.scan(
                     base, suspect, rows, tmp, k=args.k,
+                    directions=directions, subspaces=subspaces, spectra=spectra,
                     jobs=args.jobs, max_memory_bytes=max_memory_bytes,
                 ),
                 keep_partial=True,
@@ -181,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"wrote {out / 'inventory.csv'}\nwrote {out / 'ranking.csv'}")
             return 2
 
-    print(_rank(args, rows, out, out / "delta.csv") + "\n")
+    print(_rank(args, rows, out, out / "delta.csv", directions, subspaces, spectra) + "\n")
     from llmscan import plots  # matplotlib import is slow; only needed from here on
 
     drows = plots.read_rows(out / "delta.csv")

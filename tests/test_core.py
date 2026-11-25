@@ -27,6 +27,113 @@ class TestAnalyzeDelta(unittest.TestCase):
     def setUp(self):
         self.rng = np.random.default_rng(0)
 
+    def test_power_of_two_scaling_matches_ldexp_at_float64_limits(self):
+        for dtype in (np.float32, np.float64):
+            info = np.finfo(dtype)
+            values = np.array([-0., 0., info.smallest_subnormal, -info.tiny, 1., -info.max], dtype=dtype)
+            for exponent in (-1073, -1024, -1023, 0, 1022, 1023, 1024):
+                with self.subTest(dtype=dtype, exponent=exponent), np.errstate(over="ignore", under="ignore"):
+                    expected = np.ldexp(values, -exponent, dtype=np.float64)
+                    scaled = core._scaled_weights(values, exponent)
+                    np.testing.assert_array_equal(scaled.view(np.uint64), expected.view(np.uint64))
+
+    def test_entrywise_allowance_resolves_a_separated_pair_of_modes(self):
+        base = np.full((32, 32), 1.9375, dtype=np.float32)
+        suspect = base.copy()
+        suspect[np.diag_indices(4)] -= [1.25, .75, .375, .375]
+        coarse = core.rounding_budget(base, "BF16", "BF16")
+        refined = core.difference_rounding_budget(base, suspect, "BF16", "BF16")
+        self.assertLess(refined, .375)
+        self.assertGreater(coarse, .375)
+        measured = core.analyze_delta(base, suspect, 1, refined)
+        self.assertEqual(measured.output_subspace.shape, (32, 4))
+
+    def test_storage_spacing_matches_frexp_across_binary64_binades(self):
+        powers = np.ldexp(1., np.arange(-1074, 1024))
+        values = np.r_[0., powers, np.nextafter(powers, 0.), np.finfo(float).max]
+        values = np.stack([values, -values]).T
+        for dtype, (relative, absolute) in core._SPACING.items():
+            for exponent in (-10, 0, 1000, 1024):
+                with self.subTest(dtype=dtype, exponent=exponent), np.errstate(under="ignore"):
+                    expected = np.ldexp(relative / 4, np.frexp(values)[1])
+                    expected[values == 0.] = 0.
+                    expected = np.maximum(expected, np.ldexp(absolute, -exponent))
+                    np.testing.assert_array_equal(core._storage_spacing(values, dtype, exponent), expected)
+
+    def test_streamed_difference_budget_matches_independent_pass(self):
+        for dtype, formats in [(np.float32, ("BF16", "F16")), (np.float64, ("F64", "F32"))]:
+            b = self.rng.normal(size=(13, 9)).astype(dtype)
+            for s in (b * 0.5, b * 1.5):
+                for base, suspect in [(b, s), (b.T, s.T)]:
+                    with self.subTest(dtype=dtype, shape=base.shape), mock.patch.object(core, "_ROWS_PER_BLOCK", 2):
+                        args = (base, suspect, *formats)
+                        joint, refined = core.removal_bounds(*args, difference=True)
+                        self.assertEqual(joint, core.removal_excess(*args))
+                        self.assertEqual(refined, core.difference_rounding_budget(*args))
+        b[0, 0] = np.nan
+        self.assertEqual(core.removal_bounds(b, b, *formats, difference=True), (None, float("inf")))
+
+    def test_full_width_refinement_keeps_a_previously_resolved_prefix(self):
+        base = np.full((4, 4), 1.9375, dtype=np.float32)
+        suspect = base - np.diag(np.array([1., .15625, .046875, .046875], dtype=np.float32))
+        coarse = core.rounding_budget(base, "BF16", "BF16")
+        refined = core.difference_rounding_budget(base, suspect, "BF16", "BF16")
+        self.assertLess(refined, .046875)
+        self.assertGreater(coarse, .046875)
+        measured = core.analyze_delta(base, suspect, 1, (coarse, refined))
+        basis = measured.output_subspace
+        np.testing.assert_allclose(basis @ basis.T, np.diag([1, 1, 0, 0]))
+        self.assertAlmostEqual(measured.output_spectrum.omitted, .046875)
+        self.assertAlmostEqual(measured.output_spectrum.noise, refined)
+
+    def test_cached_removal_blocks_and_tiled_radii_match_independent_passes(self):
+        base = self.rng.normal(size=(45, 35)).astype(np.float32)
+        suspect = 0.5 * base
+        # Cache two blocks, stream the remainder, and split radius tiles
+        # in the middle of a row or column in the two memory orders.
+        for b, s in ((base, suspect), (base.T, suspect.T)):
+            with self.subTest(shape=b.shape), mock.patch.object(core, "_ROWS_PER_BLOCK", 5):
+                args = b, s, "BF16", "F16"
+                with mock.patch.object(core, "_REMOVAL_CACHE_BYTES", 0), \
+                     mock.patch.object(core, "_scaled_weights", wraps=core._scaled_weights) as uncached:
+                    expected = core.removal_bounds(*args, difference=True)
+                self.assertEqual(expected[1], core.difference_rounding_budget(*args))
+                rows = max(1, 5 * min(b.shape) // b.shape[1])
+                with mock.patch.object(core, "_REMOVAL_CACHE_BYTES", rows * b.shape[1] * 16 * 2), \
+                     mock.patch.object(core, "_RADIUS_TILE_ELEMENTS", 29), \
+                     mock.patch.object(core, "_scaled_weights", wraps=core._scaled_weights) as cached:
+                    self.assertEqual(core.removal_bounds(*args, difference=True), expected)
+                self.assertLess(cached.call_count, uncached.call_count)
+
+    def test_joint_projection_pass_reads_each_strip_once_for_both_positive_margins(self):
+        from llmscan.token_blocks import _BlockView
+
+        base = np.eye(9)
+        change = np.zeros_like(base)
+        change[0, 1] = 2.
+        stats = core.DeltaStats(np.array([2.]), 1., frobenius=2., direction=base[0],
+                                base_probe=base[0], fit_residual=base[1])
+        reads = mock.Mock(wraps=base.__getitem__)
+        view = _BlockView(base.shape, base.dtype, (0., 1.), reads, base.T.__getitem__)
+        args = view, change, stats, "F64", "F64"
+        with mock.patch.object(core, "_ROWS_PER_BLOCK", 4):
+            separate = core.contraction_excess(*args), core.reciprocity_excess(*args)
+            self.assertEqual(reads.call_count, 6)
+            reads.reset_mock()
+            self.assertEqual(core.projection_excesses(*args), separate)
+            self.assertEqual(reads.call_count, 3)
+        self.assertTrue(all(margin > 0. for margin in separate))
+
+    def test_entrywise_allowance_encloses_mixed_precision_resaves(self):
+        original = self.rng.uniform(-3., 3., size=(60, 45))
+        original[::3] *= 2.**-24
+        original[::5] = 0.
+        base = to_bf16(original)
+        suspect = original.astype(np.float16).astype(np.float32)
+        budget = core.difference_rounding_budget(base, suspect, "BF16", "F16")
+        self.assertGreaterEqual(budget, np.linalg.norm(suspect.astype(np.float64) - base))
+        self.assertIsNone(core.analyze_delta(base, suspect, 1, budget).output_subspace)
+
     def test_known_spectrum_and_participation_ratio(self):
         s = np.array([5.0, 3.0, 1.0])
         dw = orthonormal(self.rng, 64, 3) @ np.diag(s) @ orthonormal(self.rng, 32, 3).T
@@ -107,6 +214,65 @@ class TestAnalyzeDelta(unittest.TestCase):
 
 
 class TestScanPrecision(unittest.TestCase):
+    def test_streamed_token_certificates_match_dense_scan(self):
+        rng = np.random.default_rng(13)
+        name = "model.embed_tokens.weight"
+        # Uneven final blocks along both axes. Exercise a genuine removal,
+        # an expanding leading axis and a multi-mode nonreciprocal edit.
+        base = rng.integers(-16, 17, size=(73, 13)) / 16
+        edits = [base.copy(), base.copy(), np.roll(base, 1, axis=1)]
+        edits[0][:, 0] = 0.
+        edits[1][:, 0] *= 4.
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(core, "_ROWS_PER_BLOCK", 19):
+            tmp = Path(tmp)
+            for formats in [("F64", "F32"), ("BF16", "F16")]:
+                for suspect in edits:
+                    with self.subTest(formats=formats):
+                        write_safetensors(tmp / "a", {name: (formats[0], base)})
+                        write_safetensors(tmp / "b", {name: (formats[1], suspect)})
+                        with Checkpoint(tmp / "a") as a, Checkpoint(tmp / "b") as b:
+                            rows = inventory.compare(a, b)
+                            def measure(label):
+                                dirs = {}
+                                delta.scan(a, b, rows, tmp / label, directions=dirs, log=lambda _: None)
+                                with (tmp / label).open() as f:
+                                    row, = csv.DictReader(f)
+                                del row["seconds"]
+                                return row, dirs
+
+                            expected, dense_dirs = measure("dense")
+                            with (mock.patch.object(delta, "_TOKEN_WORKING_BYTES", 0),
+                                  mock.patch.object(Checkpoint, "to_float32", side_effect=AssertionError),
+                                  mock.patch.object(Checkpoint, "to_float64", side_effect=AssertionError)):
+                                actual, dirs = measure("stream")
+                            self.assertEqual(actual, expected)
+                            self.assertEqual(dirs.keys(), dense_dirs.keys())
+                            for key in dirs:
+                                np.testing.assert_array_equal(dirs[key], dense_dirs[key])
+                            if suspect is edits[1]:
+                                self.assertGreater(float(actual["removal_excess"]), 0.)
+
+    def test_streamed_token_blocks_preserve_working_precision_and_extrema(self):
+        from llmscan.token_blocks import token_blocks
+
+        base = np.ones((23, 7))
+        suspect = base.copy()
+        suspect[14, 2] += 2.**-40
+        suspect[22, 6] = np.nan
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            write_safetensors(tmp / "a", {"x": ("BF16", base)})
+            write_safetensors(tmp / "b", {"x": ("F64", suspect)})
+            with Checkpoint(tmp / "a") as ca, Checkpoint(tmp / "b") as cb:
+                a, b, d = token_blocks(ca, cb, "x", 5)
+                for view, dense in zip((a, b, d), (base.T, suspect.T, (suspect - base).T)):
+                    for cols in (slice(10, 16), [22, 3, 14, 3]):
+                        np.testing.assert_array_equal(view[:, cols], dense[:, cols])
+                    np.testing.assert_array_equal(view[2:5], dense[2:5])
+                    np.testing.assert_equal(view.min(), dense.min())
+                    np.testing.assert_equal(view.max(), dense.max())
+                self.assertTrue(np.isnan(core.analyze_difference(a, d, 2, np.inf).effective_rank))
+
     def test_f64_change_below_float32_resolution_keeps_its_rank(self):
         base = np.ones((16, 16))
         suspect = base + np.eye(16) * 5e-8  # a full-rank change that float32 would round to zero

@@ -12,11 +12,20 @@ import numpy as np
 
 from llmscan import core
 from llmscan._blas import BlasThreadCap
+from llmscan.gguf_io import GGUFCheckpoint
 from llmscan.inventory import CHANGED, DTYPE_MISMATCH, IDENTICAL, InventoryRow
+from llmscan.names import RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind
 from llmscan.safetensors_io import FLOAT_DTYPES, Checkpoint
+from llmscan.token_blocks import token_blocks
 
 FIELDS = ["name", "layer", "kind", "status", "shape", "effective_rank", "seconds"]
+EXTRA_FIELDS = ["frobenius", "projection_gain", "second_tail_share", "token_row_fraction",
+                "projection_error", "token_row_spike", "rank_one_excess", "tail_norm_fraction", "contraction_excess",
+                "reciprocity_excess", "removal_excess"]
 DEFAULT_MAX_MEMORY_MIB = 512
+
+# Stream token matrices when decoding both checkpoints would exceed this size.
+_TOKEN_WORKING_BYTES = 64 << 20
 
 
 def sv_field(i: int) -> str:
@@ -63,23 +72,79 @@ def _max_parallelism(costs: list[int], jobs: int, max_memory_bytes: int) -> int:
     return best
 
 
-def _run_analyze(w_base: np.ndarray, w_suspect: np.ndarray, k: int) -> tuple[core.DeltaStats, float]:
+def _tensor_inputs(base, suspect, row, token_matrix):
+    """Return both weights and, for streamed inputs, a blockwise difference."""
+    wide_dtype = "F64" in (row.base_dtype, row.suspect_dtype)
+    if token_matrix and row.numel * (16 if wide_dtype else 8) > _TOKEN_WORKING_BYTES:
+        tokens, features = map(int, row.base_shape.split("x"))
+        # Virtual readers can override whole-tensor decoding. Only read
+        # mapped bytes directly for the two built-in checkpoint formats.
+        if tokens > features and all(type(c) in (Checkpoint, GGUFCheckpoint) for c in (base, suspect)):
+            return token_blocks(base, suspect, row.name, core._ROWS_PER_BLOCK)
+
+    load = "to_float64" if wide_dtype else "to_float32"
+    a, b = getattr(base, load)(row.name), getattr(suspect, load)(row.name)
+    return (a.T, b.T, None) if token_matrix else (a, b, None)
+
+
+def _analyze_tensor(
+    a,
+    b,
+    difference,
+    r: InventoryRow,
+    k: int,
+    projection: bool,
+    compare_spaces: bool,
+) -> tuple[core.DeltaStats, float | None, float | None, float | None, float | None, float]:
     t0 = time.perf_counter()
-    stats = core.analyze_delta(w_base, w_suspect, k)
-    return stats, time.perf_counter() - t0
+    dtypes = r.base_dtype, r.suspect_dtype
+    removal, refined = None, float("inf")
+    if projection:
+        removal, refined = core.removal_bounds(a, b, *dtypes, difference=compare_spaces)
+    budget = core.rounding_budget(a, *dtypes)
+    space_budget = float("inf")
+    if compare_spaces:
+        space_budget = (budget, refined) if refined < budget else budget
+    if difference is None:
+        stats = core.analyze_delta(a, b, k, space_budget)
+        difference = b  # analyze_delta subtracted the base in place
+    else:
+        stats = core.analyze_difference(a, difference, k, space_budget)
+    excess = stats.tail_excess(budget)
+    contraction = reciprocity = None
+    if projection:
+        contraction, reciprocity = core.projection_excesses(a, difference, stats, *dtypes)
+    del a, b, difference
+    return stats, excess, contraction, reciprocity, removal, time.perf_counter() - t0
 
 
 def _write_delta_row(
     w: csv.DictWriter,
     f,
     r: InventoryRow,
+    kind: str,
+    token_matrix: bool,
+    projection: bool,
     stats: core.DeltaStats,
+    excess: float | None,
+    contraction: float | None,
+    reciprocity: float | None,
+    removal: float | None,
     elapsed: float,
     k: int,
     done: int,
     n_core: int,
     log: Callable[[str], None],
+    directions: dict[str, np.ndarray] | None,
+    subspaces: dict[str, np.ndarray] | None,
+    spectra: dict[str, core.OutputSpectrum] | None,
 ) -> None:
+    if directions is not None and projection and stats.direction is not None:
+        directions[r.name] = stats.direction
+    if subspaces is not None and kind in RESIDUAL_WRITERS and stats.output_subspace is not None:
+        subspaces[r.name] = stats.output_subspace
+        if spectra is not None and stats.output_spectrum is not None:
+            spectra[r.name] = stats.output_spectrum
     row = {
         "name": r.name,
         "layer": r.layer,
@@ -89,6 +154,22 @@ def _write_delta_row(
         "seconds": f"{elapsed:.2f}",
         "effective_rank": f"{float(stats.effective_rank):.6g}",
     }
+    values = (
+        stats.frobenius,
+        stats.projection_gain if projection else None,
+        stats.second_tail_share,
+        stats.column_fraction if token_matrix else None,
+        stats.projection_error if projection else None,
+        stats.column_spike if token_matrix else None,
+        excess,
+        stats.tail_norm_fraction,
+        contraction,
+        reciprocity,
+        removal,
+    )
+    for field, value in zip(EXTRA_FIELDS, values):
+        if value is not None:
+            row[field] = f"{value:.8g}"
     for i, s in enumerate(stats.singular_values[:k]):
         row[sv_field(i + 1)] = f"{float(s):.6g}"
     log(f"[{done}/{n_core}] {r.name}  eff_rank={row['effective_rank']}  ({row['seconds']}s)")
@@ -105,6 +186,9 @@ def _scan_serial(
     k: int,
     n_core: int,
     log: Callable[[str], None],
+    directions: dict[str, np.ndarray] | None,
+    subspaces: dict[str, np.ndarray] | None,
+    spectra: dict[str, core.OutputSpectrum] | None,
 ) -> int:
     done = 0
     for r in todo:
@@ -113,10 +197,20 @@ def _scan_serial(
             f.flush()
             continue
         t0 = time.perf_counter()
-        load = "to_float64" if "F64" in (r.base_dtype, r.suspect_dtype) else "to_float32"
-        stats = core.analyze_delta(getattr(base, load)(r.name), getattr(suspect, load)(r.name), k)
+        kind = canonical_kind(r.kind)
+        token_matrix = kind in TOKEN_MATRICES and r.layer is None
+        projection = token_matrix or kind in RESIDUAL_WRITERS
+        compare_spaces = subspaces is not None and kind in RESIDUAL_WRITERS
+        a, b, difference = _tensor_inputs(base, suspect, r, token_matrix)
+        stats, excess, contraction, reciprocity, removal, _ = _analyze_tensor(
+            a, b, difference, r, k, projection, compare_spaces,
+        )
+        del a, b, difference
         done += 1
-        _write_delta_row(w, f, r, stats, time.perf_counter() - t0, k, done, n_core, log)
+        _write_delta_row(
+            w, f, r, kind, token_matrix, projection, stats, excess, contraction, reciprocity, removal,
+            time.perf_counter() - t0, k, done, n_core, log, directions, subspaces, spectra,
+        )
     return done
 
 
@@ -132,6 +226,9 @@ def _scan_concurrent(
     eff_workers: int,
     max_memory_bytes: int,
     log: Callable[[str], None],
+    directions: dict[str, np.ndarray] | None,
+    subspaces: dict[str, np.ndarray] | None,
+    spectra: dict[str, core.OutputSpectrum] | None,
 ) -> int:
     n_core = len(changed_indices)
     max_buffered = max(eff_workers * 4, 16)
@@ -157,9 +254,15 @@ def _scan_concurrent(
                     write_pos += 1
                 elif write_pos in completed:
                     fut, load_sec = completed.pop(write_pos)
-                    stats, calc_sec = fut.result()
+                    stats, excess, contraction, reciprocity, removal, calc_sec = fut.result()
+                    kind = canonical_kind(r.kind)
+                    token_matrix = kind in TOKEN_MATRICES and r.layer is None
+                    projection = token_matrix or kind in RESIDUAL_WRITERS
                     done += 1
-                    _write_delta_row(w, f, r, stats, load_sec + calc_sec, k, done, n_core, log)
+                    _write_delta_row(
+                        w, f, r, kind, token_matrix, projection, stats, excess, contraction, reciprocity, removal,
+                        load_sec + calc_sec, k, done, n_core, log, directions, subspaces, spectra,
+                    )
                     write_pos += 1
                 else:
                     break
@@ -175,11 +278,13 @@ def _scan_concurrent(
                 idx = changed_indices[next_change]
                 r = todo[idx]
                 next_change += 1
+                kind = canonical_kind(r.kind)
+                token_matrix = kind in TOKEN_MATRICES and r.layer is None
+                projection = token_matrix or kind in RESIDUAL_WRITERS
+                compare_spaces = subspaces is not None and kind in RESIDUAL_WRITERS
                 try:
                     t_load = time.perf_counter()
-                    load = "to_float64" if "F64" in (r.base_dtype, r.suspect_dtype) else "to_float32"
-                    w_base = getattr(base, load)(r.name)
-                    w_suspect = getattr(suspect, load)(r.name)
+                    a, b, difference = _tensor_inputs(base, suspect, r, token_matrix)
                     load_sec = time.perf_counter() - t_load
                 except Exception as load_exc:
                     failed: concurrent.futures.Future = concurrent.futures.Future()
@@ -187,8 +292,22 @@ def _scan_concurrent(
                     completed[idx] = (failed, 0.0)
                     stop_submitting = True
                     break
-                fut = ex.submit(_run_analyze, w_base, w_suspect, k)
-                del w_base, w_suspect
+                if difference is not None:
+                    # Streamed token blocks read from the checkpoint mmaps on demand, so
+                    # keep them on the main thread rather than sharing Checkpoint._maps.
+                    fut: concurrent.futures.Future = concurrent.futures.Future()
+                    try:
+                        fut.set_result(_analyze_tensor(a, b, difference, r, k, projection, compare_spaces))
+                    except Exception as run_exc:
+                        fut.set_exception(run_exc)
+                        stop_submitting = True
+                    del a, b, difference
+                    completed[idx] = (fut, load_sec)
+                    if stop_submitting:
+                        break
+                    continue
+                fut = ex.submit(_analyze_tensor, a, b, None, r, k, projection, compare_spaces)
+                del a, b
                 running[fut] = (idx, cost, load_sec)
                 in_flight_bytes += cost
 
@@ -227,6 +346,9 @@ def scan(
     out_csv: Path,
     k: int = 32,
     log: Callable[[str], None] = print,
+    directions: dict[str, np.ndarray] | None = None,
+    subspaces: dict[str, np.ndarray] | None = None,
+    spectra: dict[str, core.OutputSpectrum] | None = None,
     *,
     jobs: int = 1,
     max_memory_bytes: int = DEFAULT_MAX_MEMORY_MIB * 1024 * 1024,
@@ -256,10 +378,13 @@ def scan(
     eff_workers = _max_parallelism(costs, jobs, max_memory_bytes) if costs else 1
 
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS + [sv_field(i + 1) for i in range(k)])
+        w = csv.DictWriter(f, fieldnames=FIELDS + [sv_field(i + 1) for i in range(k)] + EXTRA_FIELDS)
         w.writeheader()
         if eff_workers <= 1:
-            return _scan_serial(base, suspect, todo, w, f, k, n_core, log)
+            return _scan_serial(
+                base, suspect, todo, w, f, k, n_core, log, directions, subspaces, spectra,
+            )
         return _scan_concurrent(
-            base, suspect, todo, changed_indices, costs, w, f, k, eff_workers, max_memory_bytes, log
+            base, suspect, todo, changed_indices, costs, w, f, k, eff_workers, max_memory_bytes, log,
+            directions, subspaces, spectra,
         )
