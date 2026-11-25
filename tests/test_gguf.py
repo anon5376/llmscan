@@ -1,11 +1,13 @@
+import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
 from helpers import GGML, encode, gguf_float, nbytes_gguf, write_gguf, write_safetensors
-from llmscan import cli, inventory
+from llmscan import cli, gguf_io, inventory
 from llmscan.checkpoint import open_checkpoint
 from llmscan.gguf_io import GGUFCheckpoint
 from llmscan.safetensors_io import CheckpointError
@@ -55,6 +57,168 @@ class TestGGUFReader(unittest.TestCase):
                 np.testing.assert_array_equal(got, a)
                 got[0, 0] = 9  # must be a writable copy, not a view of the mmap
             np.testing.assert_array_equal(c.to_float32("v"), a[0])
+
+    def test_float_scalar_is_supported_but_block_quantized_scalars_are_rejected(self):
+        value = np.array(1.25, dtype=np.float32)
+        for dtype, width in (("F32", 4), ("F16", 2), ("BF16", 2)):
+            with self.subTest(dtype=dtype):
+                write_gguf(self.path, {"scalar": gguf_float(dtype, value)})
+                with GGUFCheckpoint(self.path) as c:
+                    self.assertEqual((c.tensors["scalar"].shape, c.tensors["scalar"].nbytes), ((), width))
+                    np.testing.assert_array_equal(c.to_float32("scalar"), value)
+
+        for dtype, (_, block, block_bytes) in GGML.items():
+            if block == 1:
+                continue
+            for fill in (0x31, 0xA7):
+                with self.subTest(dtype=dtype, fill=fill):
+                    raw = bytes([fill]) * block_bytes
+                    self.assertTrue(raw)
+                    write_gguf(self.path, {"scalar": (dtype, (), raw)})
+                    with self.assertRaisesRegex(CheckpointError, "no dimensions"):
+                        GGUFCheckpoint(self.path)
+
+    def test_gguf_count_and_string_limits_accept_boundary_and_reject_above(self):
+        tensor = gguf_float("F32", np.ones(1, np.float32))
+        with mock.patch.object(gguf_io, "MAX_STRING_BYTES", 3):
+            write_gguf(self.path, {}, [("k", 8, "abc")])
+            with GGUFCheckpoint(self.path):
+                pass
+            write_gguf(self.path, {}, [("k", 8, "abcd")])
+            with self.assertRaisesRegex(CheckpointError, "string length 4"):
+                GGUFCheckpoint(self.path)
+            write_gguf(self.path, {"abc": tensor})
+            with GGUFCheckpoint(self.path):
+                pass
+            write_gguf(self.path, {"abcd": tensor})
+            with self.assertRaisesRegex(CheckpointError, "string length 4"):
+                GGUFCheckpoint(self.path)
+
+        with mock.patch.object(gguf_io, "MAX_ARRAY_ELEMENTS", 2):
+            write_gguf(self.path, {}, [("k", 9, (4, [1, 2]))])
+            with GGUFCheckpoint(self.path):
+                pass
+            write_gguf(self.path, {}, [("k", 9, (4, [1, 2, 3]))])
+            with self.assertRaisesRegex(CheckpointError, "array length 3"):
+                GGUFCheckpoint(self.path)
+
+        with mock.patch.object(gguf_io, "MAX_KV", 1):
+            write_gguf(self.path, {}, [("a", 4, 1)])
+            with GGUFCheckpoint(self.path):
+                pass
+            write_gguf(self.path, {}, [("a", 4, 1), ("b", 4, 2)])
+            with self.assertRaisesRegex(CheckpointError, "entry count 2"):
+                GGUFCheckpoint(self.path)
+
+        with mock.patch.object(gguf_io, "MAX_TENSORS", 1):
+            write_gguf(self.path, {"a": tensor})
+            with GGUFCheckpoint(self.path):
+                pass
+            write_gguf(self.path, {"a": tensor, "b": tensor})
+            with self.assertRaisesRegex(CheckpointError, "tensor count 2"):
+                GGUFCheckpoint(self.path)
+
+    def test_decoded_allocation_budget_is_cumulative_across_metadata(self):
+        one = [("a", 8, "x")]
+        two = one + [("b", 8, "y")]
+        with mock.patch.object(gguf_io, "MAX_DECODED_BYTES", 400):
+            write_gguf(self.path, {}, one)
+            with GGUFCheckpoint(self.path):
+                pass
+            write_gguf(self.path, {}, two)
+            with self.assertRaisesRegex(CheckpointError, "decoded GGUF header"):
+                GGUFCheckpoint(self.path)
+
+    def test_tensor_records_share_the_decoded_allocation_budget(self):
+        tensor = gguf_float("F32", np.ones(1, np.float32))
+        with mock.patch.object(gguf_io, "MAX_DECODED_BYTES", 800):
+            write_gguf(self.path, {"a": tensor})
+            with GGUFCheckpoint(self.path):
+                pass
+            write_gguf(self.path, {"a": tensor, "b": tensor})
+            with self.assertRaisesRegex(CheckpointError, "decoded GGUF header"):
+                GGUFCheckpoint(self.path)
+
+    def test_default_giant_record_counts_are_rejected_before_iteration(self):
+        for tensor_count, kv_count in ((2**60, 0), (0, 2**60)):
+            with self.subTest(tensor_count=tensor_count, kv_count=kv_count):
+                self.path.write_bytes(b"GGUF" + struct.pack("<IQQ", 3, tensor_count, kv_count))
+                with mock.patch.object(gguf_io._Reader, "string") as string:
+                    with self.assertRaisesRegex(CheckpointError, "count.*limit"):
+                        GGUFCheckpoint(self.path)
+                string.assert_not_called()
+
+    def test_tokenizer_like_metadata_is_supported(self):
+        tokens = [f"▁token{i}" for i in range(1_024)]
+        scores = [-float(i) / 2 for i in range(1_024)]
+        types = [1] * 1_024
+        write_gguf(self.path, {}, [("tokenizer.ggml.tokens", 9, (8, tokens)),
+                                   ("tokenizer.ggml.scores", 9, (6, scores)),
+                                   ("tokenizer.ggml.token_type", 9, (5, types))])
+        with GGUFCheckpoint(self.path) as c:
+            self.assertEqual(c.metadata["tokenizer.ggml.tokens"], tokens)
+            self.assertEqual(c.metadata["tokenizer.ggml.scores"], scores)
+            self.assertEqual(c.metadata["tokenizer.ggml.token_type"], types)
+
+    def test_large_tokenizer_metadata_parses_under_default_limits(self):
+        tokens = [f"t{i}" for i in range(262_144)]
+        scores = [0.5] * 262_144
+        types = [1] * 262_144
+        merges = [f"a b{i}" for i in range(500_000)]
+        write_gguf(self.path, {}, [("tokenizer.ggml.tokens", 9, (8, tokens)),
+                                   ("tokenizer.ggml.scores", 9, (6, scores)),
+                                   ("tokenizer.ggml.token_type", 9, (5, types)),
+                                   ("tokenizer.ggml.merges", 9, (8, merges))])
+        with GGUFCheckpoint(self.path) as c:
+            self.assertEqual(c.metadata["tokenizer.ggml.tokens"], tokens)
+            self.assertEqual(c.metadata["tokenizer.ggml.scores"], scores)
+            self.assertEqual(c.metadata["tokenizer.ggml.token_type"], types)
+            self.assertEqual(c.metadata["tokenizer.ggml.merges"], merges)
+
+    def test_scalar_array_allocation_budget_is_checked_before_unpack(self):
+        write_gguf(self.path, {}, [("a", 9, (4, [1] * 10))])
+        with mock.patch.object(gguf_io, "MAX_DECODED_BYTES", 400), \
+                mock.patch.object(gguf_io.struct, "unpack_from", wraps=struct.unpack_from) as unpack:
+            with self.assertRaisesRegex(CheckpointError, "decoded GGUF header"):
+                GGUFCheckpoint(self.path)
+        self.assertNotIn("<10I", [call.args[0] for call in unpack.call_args_list])
+
+    def test_deeply_nested_metadata_is_a_checkpoint_error(self):
+        value = (0, [1])
+        for _ in range(40):
+            value = (9, [value])
+        write_gguf(self.path, {}, [("nested", 9, value)])
+        with self.assertRaisesRegex(CheckpointError, "arrays nested deeper"):
+            GGUFCheckpoint(self.path)
+
+    def test_sparse_oversized_strings_and_variable_arrays_are_rejected(self):
+        def sparse(end: int) -> None:
+            with open(self.path, "r+b") as f:
+                f.truncate(max(end, self.path.stat().st_size))
+
+        write_gguf(self.path, {}, [("big", 8, "x")])
+        data = bytearray(self.path.read_bytes())
+        length_pos = data.index(b"big") + 3 + 4
+        length = gguf_io.MAX_STRING_BYTES + 1
+        data[length_pos:length_pos + 8] = struct.pack("<Q", length)
+        self.path.write_bytes(data)
+        sparse(length_pos + 8 + length)
+        with self.assertRaisesRegex(CheckpointError, "string length"):
+            GGUFCheckpoint(self.path)
+
+        for elem, min_bytes, dtype in ((4, 4, "scalar"), (8, 8, "string"), (9, 12, "nested")):
+            with self.subTest(array=dtype):
+                write_gguf(self.path, {}, [("big", 9, (elem, []))])
+                data = bytearray(self.path.read_bytes())
+                count_pos = data.index(b"big") + 3 + 4 + 4
+                count = gguf_io.MAX_ARRAY_ELEMENTS + 1
+                data[count_pos:count_pos + 8] = struct.pack("<Q", count)
+                self.path.write_bytes(data)
+                sparse(count_pos + 8 + count * min_bytes)
+                with mock.patch.object(gguf_io.struct, "unpack_from", wraps=struct.unpack_from) as unpack:
+                    with self.assertRaisesRegex(CheckpointError, "array length"):
+                        GGUFCheckpoint(self.path)
+                self.assertNotIn(f"<{count}i", [call.args[0] for call in unpack.call_args_list])
 
     def test_non_default_alignment(self):
         a = np.arange(5, dtype=np.float32)

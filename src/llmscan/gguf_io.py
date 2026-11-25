@@ -25,6 +25,11 @@ VERSIONS = (2, 3)
 DEFAULT_ALIGNMENT = 32
 MAX_ARRAY_DEPTH = 32
 MAX_DIMS = 4  # GGML_MAX_DIMS
+MAX_STRING_BYTES = 16 * 1024 * 1024
+MAX_ARRAY_ELEMENTS = 4_000_000
+MAX_KV = 100_000
+MAX_TENSORS = 300_000
+MAX_DECODED_BYTES = 512 * 1024 * 1024
 
 # ggml type id -> (name, elements per block, bytes per block)
 GGML_TYPES = {
@@ -47,6 +52,12 @@ class _Reader:
 
     def __init__(self, mm: mmap.mmap, path: Path):
         self.mm, self.path, self.pos = mm, path, 0
+        self.decoded_bytes = 0
+
+    def charge(self, size: int) -> None:
+        if size > MAX_DECODED_BYTES - self.decoded_bytes:
+            raise CheckpointError(f"{self.path}: decoded GGUF header exceeds the {MAX_DECODED_BYTES}-byte limit")
+        self.decoded_bytes += size
 
     def take(self, fmt: str):
         size = struct.calcsize(fmt)
@@ -62,6 +73,9 @@ class _Reader:
     def string(self) -> str:
         n = self.take("<Q")
         self.need(n)
+        if n > MAX_STRING_BYTES:
+            raise CheckpointError(f"{self.path}: GGUF string length {n} exceeds the {MAX_STRING_BYTES}-byte limit")
+        self.charge(64 + 4 * n)
         raw = self.mm[self.pos:self.pos + n]
         self.pos += n
         try:
@@ -71,6 +85,7 @@ class _Reader:
 
     def value(self, vtype: int, depth: int = 0):
         if vtype in SCALARS:
+            self.charge(32)
             return self.take("<" + SCALARS[vtype])
         if vtype == STRING:
             return self.string()
@@ -82,11 +97,21 @@ class _Reader:
         if elem not in SCALARS and elem not in (STRING, ARRAY):
             raise CheckpointError(f"{self.path}: unknown metadata array element type {elem}")
         if elem in SCALARS:
-            fmt = f"<{count}{SCALARS[elem]}"  # count is checked against the file before it is used
-            self.need(count * struct.calcsize("<" + SCALARS[elem]))
+            width = struct.calcsize("<" + SCALARS[elem])
+            self.need(count * width)
+            if count > MAX_ARRAY_ELEMENTS:
+                raise CheckpointError(f"{self.path}: metadata array length {count} exceeds the {MAX_ARRAY_ELEMENTS}-element limit")
+            # Scalar objects plus list slots (32 bytes), and temporary tuple slots (8).
+            self.charge(128 + count * 40)
+            fmt = f"<{count}{SCALARS[elem]}"
             out = list(struct.unpack_from(fmt, self.mm, self.pos))
             self.pos += struct.calcsize(fmt)
             return out
+        minimum = 8 if elem == STRING else 12
+        self.need(count * minimum)
+        if count > MAX_ARRAY_ELEMENTS:
+            raise CheckpointError(f"{self.path}: metadata array length {count} exceeds the {MAX_ARRAY_ELEMENTS}-element limit")
+        self.charge(64 + count * 8)
         return [self.value(elem, depth + 1) for _ in range(count)]
 
 
@@ -97,7 +122,7 @@ def split_message(path: Path, metadata: dict | None = None) -> str | None:
     return None
 
 
-def read_gguf(mm: mmap.mmap, path: Path) -> tuple[dict, dict[str, TensorInfo]]:
+def _read_gguf(mm: mmap.mmap, path: Path) -> tuple[dict, dict[str, TensorInfo]]:
     """Parse the header of a mapped GGUF file into (metadata, tensors)."""
     r = _Reader(mm, path)
     if r.take("<4s") != MAGIC:
@@ -108,8 +133,13 @@ def read_gguf(mm: mmap.mmap, path: Path) -> tuple[dict, dict[str, TensorInfo]]:
             raise CheckpointError(f"{path}: big-endian GGUF is not supported")
         raise CheckpointError(f"{path}: unsupported GGUF version {version} (supported: {', '.join(map(str, VERSIONS))})")
     tensor_count, kv_count = r.take("<Q"), r.take("<Q")
+    if kv_count > MAX_KV:
+        raise CheckpointError(f"{path}: metadata entry count {kv_count} exceeds the {MAX_KV}-entry limit")
+    if tensor_count > MAX_TENSORS:
+        raise CheckpointError(f"{path}: tensor count {tensor_count} exceeds the {MAX_TENSORS}-tensor limit")
 
     metadata: dict = {}
+    r.charge(kv_count * 128)
     for _ in range(kv_count):
         key = r.string()
         if key in metadata:
@@ -122,12 +152,14 @@ def read_gguf(mm: mmap.mmap, path: Path) -> tuple[dict, dict[str, TensorInfo]]:
         raise CheckpointError(f"{path}: invalid general.alignment {alignment!r}")
 
     records = []
+    r.charge(tensor_count * 512)
     for _ in range(tensor_count):
         name = r.string()
         n_dims = r.take("<I")
         if n_dims > MAX_DIMS:
             raise CheckpointError(f"{path}: tensor {name} has {n_dims} dims; GGML supports at most {MAX_DIMS}")
         r.need(n_dims * 8)
+        r.charge(64 + n_dims * 32)
         dims = [r.take("<Q") for _ in range(n_dims)]
         ggml_type, offset = r.take("<I"), r.take("<Q")
         records.append((name, dims, ggml_type, offset))
@@ -141,6 +173,8 @@ def read_gguf(mm: mmap.mmap, path: Path) -> tuple[dict, dict[str, TensorInfo]]:
         dtype, block, block_bytes = GGML_TYPES[ggml_type]
         if 0 in dims:
             raise CheckpointError(f"{path}: tensor {name} has a zero-width dimension {dims}")
+        if block > 1 and not dims:
+            raise CheckpointError(f"{path}: quantized tensor {name} has no dimensions")
         if dims and dims[0] % block:
             raise CheckpointError(f"{path}: tensor {name} has row width {dims[0]}, not a multiple of the {dtype} block size {block}")
         if offset % alignment:
@@ -158,6 +192,13 @@ def read_gguf(mm: mmap.mmap, path: Path) -> tuple[dict, dict[str, TensorInfo]]:
         if b.start < a.end:
             raise CheckpointError(f"{path}: tensors {a.name} and {b.name} overlap")
     return metadata, tensors
+
+
+def read_gguf(mm: mmap.mmap, path: Path) -> tuple[dict, dict[str, TensorInfo]]:
+    try:
+        return _read_gguf(mm, path)
+    except RecursionError:
+        raise CheckpointError(f"{path}: metadata arrays nested deeper than {MAX_ARRAY_DEPTH}") from None
 
 
 class GGUFCheckpoint(Checkpoint):

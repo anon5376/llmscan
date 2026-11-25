@@ -12,6 +12,7 @@ import numpy as np
 
 from llmscan import core
 from llmscan._blas import BlasThreadCap
+from llmscan.csv_safety import csv_fieldnames, encode_row
 from llmscan.gguf_io import GGUFCheckpoint
 from llmscan.inventory import CHANGED, DTYPE_MISMATCH, IDENTICAL, InventoryRow
 from llmscan.names import RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind
@@ -187,7 +188,7 @@ def _write_delta_row(
     for i, s in enumerate(stats.singular_values[:k]):
         row[sv_field(i + 1)] = f"{float(s):.6g}"
     log(f"[{done}/{n_core}] {r.name}  eff_rank={row['effective_rank']}  ({row['seconds']}s)")
-    w.writerow(row)
+    w.writerow(encode_row(row))
     f.flush()
 
 
@@ -207,7 +208,7 @@ def _scan_serial(
     done = 0
     for r in todo:
         if r.status == IDENTICAL:
-            w.writerow({"name": r.name, "layer": r.layer, "kind": r.kind, "status": r.status, "shape": r.base_shape})
+            w.writerow(encode_row({"name": r.name, "layer": r.layer, "kind": r.kind, "status": r.status, "shape": r.base_shape}))
             f.flush()
             continue
         t0 = time.perf_counter()
@@ -263,7 +264,7 @@ def _scan_concurrent(
             while write_pos < len(todo):
                 r = todo[write_pos]
                 if r.status == IDENTICAL:
-                    w.writerow({"name": r.name, "layer": r.layer, "kind": r.kind, "status": r.status, "shape": r.base_shape})
+                    w.writerow(encode_row({"name": r.name, "layer": r.layer, "kind": r.kind, "status": r.status, "shape": r.base_shape}))
                     f.flush()
                     write_pos += 1
                 elif write_pos in completed:
@@ -391,7 +392,7 @@ def scan(
     eff_workers = _max_parallelism(costs, jobs, max_memory_bytes) if costs else 1
 
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS + [sv_field(i + 1) for i in range(k)] + EXTRA_FIELDS)
+        w = csv.DictWriter(f, fieldnames=csv_fieldnames(FIELDS + [sv_field(i + 1) for i in range(k)] + EXTRA_FIELDS))
         w.writeheader()
         if eff_workers <= 1:
             return _scan_serial(

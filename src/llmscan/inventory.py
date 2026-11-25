@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from llmscan.csv_safety import csv_fieldnames, encode_row
 from llmscan.names import EMBEDDINGS, RESIDUAL_WRITERS, canonical_kind, kind_of, layer_of
 from llmscan.safetensors_io import FLOAT_DTYPES, Checkpoint
 
@@ -132,10 +133,10 @@ def compare(base: Checkpoint, suspect: Checkpoint) -> list[InventoryRow]:
 
 def write_csv(rows: list[InventoryRow], path: Path) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(InventoryRow.__dataclass_fields__))
+        w = csv.DictWriter(f, fieldnames=csv_fieldnames(list(InventoryRow.__dataclass_fields__)))
         w.writeheader()
         for r in rows:
-            w.writerow(asdict(r))
+            w.writerow(encode_row(asdict(r)))
 
 
 def summarize(rows: list[InventoryRow]) -> str:

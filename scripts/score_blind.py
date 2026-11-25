@@ -14,10 +14,14 @@ import csv
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from llmscan.csv_safety import decode_row
+
 
 def read_ranking(path: Path) -> list[str]:
     with open(path, newline="", encoding="utf-8") as f:
-        return [row["name"] for row in csv.DictReader(f)]
+        return [row["name"] for row in map(decode_row, csv.DictReader(f))]
 
 
 def read_key(path: Path) -> list[str]:

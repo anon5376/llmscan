@@ -14,6 +14,7 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.figure import Figure
 
+from llmscan.csv_safety import decode_row
 from llmscan.delta import sv_field
 
 SURFACE = "#fcfcfb"
@@ -34,7 +35,7 @@ LAYER_CMAP = LinearSegmentedColormap.from_list(
 
 def read_rows(path: Path) -> list[dict]:
     with open(path, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        return [decode_row(row) for row in csv.DictReader(f)]
 
 
 def kind_colors(kinds: list[str]) -> dict[str, str]:

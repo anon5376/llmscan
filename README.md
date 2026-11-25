@@ -110,6 +110,11 @@ Output goes to `out/<suspect>-vs-<base>/`:
 - `delta.csv`: for each 2-D tensor, the top-k singular values of ΔW and its effective rank;
 - `spectra.png`, `effective_rank.png`.
 
+CSV string cells that begin with `=`, `+`, `-`, `@`, tab, carriage return, line feed or an apostrophe
+are prefixed with an apostrophe for spreadsheet safety. The writers append a
+`llmscan_csv_encoding` column containing `apostrophe-v1`; llmscan readers remove exactly that one
+prefix on marked rows. Legacy CSV files without the marker are read unchanged.
+
 Safetensors checkpoints (single file or sharded directory) are memory-mapped and read one tensor at
 a time. The inventory compares same-dtype tensors byte for byte in 64 KiB chunks, and float
 re-saves by value in bounded chunks; neither comparison needs a tensor-sized copy. By default the
@@ -119,7 +124,13 @@ RAM must hold twice the float32 size of the largest 2-D tensor (4 bytes per elem
 estimated in-flight working memory (decoded arrays plus float64 Gram/block workspace) within
 `--max-memory` MiB (default 512; a single larger tensor still runs alone, and single-matrix or
 zero-change scans stay on the serial path). CPU only; the only
-dependencies are numpy and matplotlib, no torch. GGUF support is next.
+dependencies are numpy and matplotlib, no torch. GGUF files are parsed directly.
+
+Parser materialization is bounded independently of checkpoint payload size: safetensors headers are
+limited to 16 MiB per file and checkpoints to 300,000 tensors across shards. GGUF headers limit
+strings to 16 MiB, arrays to 4,000,000 elements, metadata entries to 100,000, tensors to 300,000,
+and estimated decoded allocations to 512 MiB. These limits do not impose a blanket size limit on
+sparse or ordinary tensor payloads.
 
 `scripts/fetch_hf.sh <org/name> <revision> <dir>` downloads a model's safetensors at a pinned revision.
 
