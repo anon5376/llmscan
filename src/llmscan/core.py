@@ -139,14 +139,25 @@ def _scaled_weights(weights: np.ndarray, exponent: int) -> np.ndarray:
     return np.ldexp(weights, -exponent, dtype=np.float64)
 
 
-def _storage_radius(weights: np.ndarray, dtype: str, exponent: int, arithmetic: float) -> np.ndarray:
+def _storage_spacing(weights: np.ndarray, dtype: str, exponent: int) -> np.ndarray:
     # For w = mantissa * 2**e, half the larger adjacent spacing is
     # 2**(e-2) times the spacing at one. Include the subnormal grid.
     relative, absolute = _SPACING[dtype]
-    radius = np.ldexp(relative / 4, np.frexp(weights)[1])
-    radius[weights == 0] = 0.
-    np.maximum(radius, math.ldexp(absolute, -exponent), out=radius)
-    return radius + arithmetic * np.abs(weights)
+    floor = math.ldexp(absolute, -exponent)
+    # Scaled blocks are native binary64. The exponent field alone is the
+    # lower power-of-two boundary of each normal value, and zero for ±0.
+    binade = (weights.view(np.uint64) & np.uint64(0x7ff0000000000000)).view(np.float64)
+    if floor < np.finfo(float).tiny * (relative / 2):
+        # In mixed extreme-scale checkpoints a scaled subnormal's binade
+        # can still matter above the storage floor.
+        sub = (binade == 0) & (weights != 0)
+        binade[sub] = np.ldexp(1., np.frexp(weights[sub])[1] - 1)
+    binade *= relative / 2
+    return np.maximum(binade, floor, out=binade)
+
+
+def _storage_radius(weights: np.ndarray, dtype: str, exponent: int, arithmetic: float) -> np.ndarray:
+    return _storage_spacing(weights, dtype, exponent) + arithmetic * np.abs(weights)
 
 
 def difference_rounding_budget(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspect_dtype: str) -> float:
@@ -256,15 +267,21 @@ def _fit_storage_box(weights, dtype, exponent, arithmetic):
 
 
 def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspect_dtype: str) -> float | None:
+    return removal_bounds(base, suspect, base_dtype, suspect_dtype, difference=False)[0]
+
+
+def removal_bounds(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspect_dtype: str,
+                   *, difference: bool) -> tuple[float | None, float]:
     """Test the symmetric negative semidefinite form SᵀΔ of a partial removal.
 
     For S = (I − P)B, 0 ≼ P ≼ I, (Sx)ᵀΔx = −(Bx)ᵀ(I − P)P(Bx) ≤ 0.
     Return the fraction of a witnessed violation left after bounding rounding
     of both stored checkpoints, on a single input or jointly across inputs.
+    Also return the difference rounding budget if requested, otherwise infinity.
     """
     extrema = [base.min(), base.max(), suspect.min(), suspect.max()]
     if not np.isfinite(extrema).all():
-        return None
+        return None, math.inf
     b_step = _SPACING[base_dtype][1]
     s_step = _SPACING[suspect_dtype][1]
     # A common power of two preserves the sign, including for subnormal
@@ -285,44 +302,65 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
             action += s.T @ (d @ probes) + d.T @ (s @ probes)
         return np.linalg.qr(action)[0]
 
-    def leading(basis):
+    def leading(basis, refine=False):
         form = np.zeros((basis.shape[1], basis.shape[1]))
+        action = np.zeros_like(basis) if refine else None
         for b, s in blocks():
-            form += (s @ basis).T @ ((s - b) @ basis)
+            d = s - b
+            sp, dp = s @ basis, d @ basis
+            form += sp.T @ dp
+            if refine:
+                action += s.T @ dp + d.T @ sp
         values, vectors = np.linalg.eigh((form + form.T) / 2)
-        return values[-1], basis @ vectors[:, -1]
+        return values[-1], basis @ vectors[:, -1], action
 
     sketch_width = 8
     basis = (np.eye(cols) if cols <= sketch_width else
              range_basis(np.random.default_rng(0).standard_normal((cols, sketch_width))))
-    value, x = leading(basis)
+    value, x, action = leading(basis, refine=cols > sketch_width)
     abs_x = np.abs(x)
 
     arithmetic = 8 * math.ulp(1.) * (rows + cols + 2)
+    diff_arithmetic = 2 * np.finfo(base.dtype).eps + arithmetic
+
+    def project_radius(weights, dtype):
+        spacing = _storage_spacing(weights, dtype, exponent)
+        magnitude = np.abs(weights)
+        projected = (spacing + arithmetic * magnitude) @ abs_x
+        if difference:
+            spacing += diff_arithmetic * magnitude
+            return projected, spacing
+        return projected, None
 
     gap = 0.
+    energy = 0.
     # An absolute float64 floor also covers underflow in scaled arithmetic.
     budget = 16 * base.size * float(np.finfo(float).tiny)
     for b, s in blocks():
         bx, sx = b @ x, s @ x
         dx = sx - bx
         gap += float(sx @ dx)
-        eb = _storage_radius(b, base_dtype, exponent, arithmetic) @ abs_x
-        es = _storage_radius(s, suspect_dtype, exponent, arithmetic) @ abs_x
+        eb, br = project_radius(b, base_dtype)
+        es, sr = project_radius(s, suspect_dtype)
+        if difference:
+            br += sr
+            energy += float(np.einsum("ij,ij->", br, br))
+            del br, sr
         # Expanding (s+δs)(s+δs−b−δb) row by row gives (2s−b)δs
         # − sδb − δsδb + δs². The final square is nonnegative.
         budget += float(np.abs(sx + dx) @ es + np.abs(sx) @ eb + es @ eb
                         + arithmetic * (np.abs(sx) @ np.abs(dx)))
+    refined = float(np.nextafter(np.ldexp(math.sqrt(energy), exponent), math.inf)) if difference else math.inf
     if gap > budget:
-        return 1. - budget / gap
+        return 1. - budget / gap, refined
 
     # Refine the probe, then restrict the expensive joint interval test to
     # influential columns. These limits cap work and never relax a bound.
-    if cols > sketch_width:
-        value, x = leading(range_basis(basis))
+    if action is not None:
+        value, x, _ = leading(np.linalg.qr(action)[0])
     width = min(cols, 1024, (1 << 20) // rows)
     if not width:
-        return 0.
+        return 0., refined
     selected = np.argsort(-np.abs(x), kind="stable")[:width]
     b = _scaled_weights(base[:, selected], exponent)
     s = _scaled_weights(suspect[:, selected], exponent)
@@ -342,7 +380,7 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
         excess = fit_excess(b, s, rb, rs)
     # The peer ranker compares margins. A weak skew certificate must not
     # replace a stronger certificate from the quadratic response.
-    return max(skew, excess)
+    return max(skew, excess), refined
 
 
 def reciprocity_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,

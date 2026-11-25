@@ -85,6 +85,17 @@ def _negative_definite(a):
     return np.max(np.abs(remainder).sum(axis=1)) + guard < shift
 
 
+def _correction_adjoint(sw, dw, w, residual, skew_only):
+    """Gradient in the two storage boxes for a residual in whitened coordinates."""
+    if skew_only:
+        # RᵀWᵀ = -RWᵀ. Both gradients can use the same right product.
+        right = residual @ w.T
+        base = sw @ right
+        return -base, base - dw @ right
+    gb = -sw @ residual @ w.T
+    return gb, dw @ residual.T @ w.T - gb
+
+
 def fit_excess(b, s, rb, rs):
     """Seek a separating witness by fitting interval corrections to the Gram form."""
     d = s - b
@@ -105,7 +116,7 @@ def fit_excess(b, s, rb, rs):
     correction = np.zeros_like(form)
     extrapolated = correction
     step = floor / 2
-    try_cholesky = False
+    negative_spectrum = False
     for iteration in range(1, 513):
         # Fit the *linearized* corrected form to the cone of symmetric NSD
         # matrices. Its residual is a PSD factor plus a skew matrix. Only
@@ -113,20 +124,19 @@ def fit_excess(b, s, rb, rs):
         trial = form + extrapolated
         symmetric = (trial + trial.T) / 2
         skew = (trial - trial.T) / 2
-        if try_cholesky and _negative_definite(symmetric):
+        if negative_spectrum and _negative_definite(symmetric):
             factor = w[:, :0]
             residual = skew
         else:
             vals, vecs = np.linalg.eigh(symmetric)
-            try_cholesky = vals[-1] < 0.
+            negative_spectrum = vals[-1] < 0.
             factor = vecs * np.sqrt(np.maximum(0., vals))
             residual = factor @ factor.T + skew
         if iteration & (iteration - 1) == 0:
             excess = _box_excess(b, s, rb, rs, w @ factor, w @ skew @ w.T)
             if excess:
                 return excess
-        gb = -sw @ residual @ w.T
-        gs = dw @ residual.T @ w.T - gb
+        gb, gs = _correction_adjoint(sw, dw, w, residual, negative_spectrum)
         # Accelerated projected gradient on the two boxes. The projection
         # onto the cone is nonexpansive, so the linear map bounds curvature.
         for _ in range(16):

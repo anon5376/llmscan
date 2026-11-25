@@ -64,12 +64,14 @@ def scan(
                 if token_matrix:
                     a, b = a.T, b.T
                 # This certificate needs both original checkpoint rounding intervals.
-                removal = core.removal_excess(a, b, r.base_dtype, r.suspect_dtype) if projection else None
-                budget = core.rounding_budget(a, r.base_dtype, r.suspect_dtype)
                 compare_spaces = subspaces is not None and kind in RESIDUAL_WRITERS
+                removal, refined = (None, float("inf"))
+                if projection:
+                    removal, refined = core.removal_bounds(a, b, r.base_dtype, r.suspect_dtype,
+                                                           difference=compare_spaces)
+                budget = core.rounding_budget(a, r.base_dtype, r.suspect_dtype)
                 space_budget = float("inf")
                 if compare_spaces:
-                    refined = core.difference_rounding_budget(a, b, r.base_dtype, r.suspect_dtype)
                     space_budget = (budget, refined) if refined < budget else budget
                 stats = core.analyze_delta(a, b, k, space_budget)
                 excess = stats.tail_excess(budget)

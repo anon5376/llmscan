@@ -374,6 +374,19 @@ class TestProjectionMeasurements(unittest.TestCase):
             np.testing.assert_array_equal(f @ f.T, g @ g.T)
             np.testing.assert_array_equal(k, j)
 
+    def test_shared_skew_gradient_is_the_adjoint_of_the_full_correction(self):
+        rng = np.random.default_rng(37)
+        for m, n in ((7, 11), (11, 7)):
+            sw, dw, eb, es = rng.normal(size=(4, m, n))
+            w, r = rng.normal(size=(2, n, n))
+            skew = r - r.T
+            gb, gs = interval_fit._correction_adjoint(sw, dw, w, skew, True)
+            db, ds = interval_fit._correction_adjoint(sw, dw, w, skew, False)
+            np.testing.assert_allclose(gb, db, atol=1e-12)
+            np.testing.assert_allclose(gs, ds, atol=1e-12)
+            correction = (es @ w).T @ dw + sw.T @ ((es - eb) @ w)
+            self.assertAlmostEqual(np.sum(skew * correction), np.sum(gb * eb + gs * es), places=11)
+
 
 class TestAnomalySignals(unittest.TestCase):
     def setUp(self):

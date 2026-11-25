@@ -48,6 +48,31 @@ class TestAnalyzeDelta(unittest.TestCase):
         measured = core.analyze_delta(base, suspect, 1, refined)
         self.assertEqual(measured.output_subspace.shape, (32, 4))
 
+    def test_storage_spacing_matches_frexp_across_binary64_binades(self):
+        powers = np.ldexp(1., np.arange(-1074, 1024))
+        values = np.r_[0., powers, np.nextafter(powers, 0.), np.finfo(float).max]
+        values = np.stack([values, -values]).T
+        for dtype, (relative, absolute) in core._SPACING.items():
+            for exponent in (-10, 0, 1000, 1024):
+                with self.subTest(dtype=dtype, exponent=exponent), np.errstate(under="ignore"):
+                    expected = np.ldexp(relative / 4, np.frexp(values)[1])
+                    expected[values == 0.] = 0.
+                    expected = np.maximum(expected, np.ldexp(absolute, -exponent))
+                    np.testing.assert_array_equal(core._storage_spacing(values, dtype, exponent), expected)
+
+    def test_streamed_difference_budget_matches_independent_pass(self):
+        for dtype, formats in [(np.float32, ("BF16", "F16")), (np.float64, ("F64", "F32"))]:
+            b = self.rng.normal(size=(13, 9)).astype(dtype)
+            for s in (b * 0.5, b * 1.5):
+                for base, suspect in [(b, s), (b.T, s.T)]:
+                    with self.subTest(dtype=dtype, shape=base.shape), mock.patch.object(core, "_ROWS_PER_BLOCK", 2):
+                        args = (base, suspect, *formats)
+                        joint, refined = core.removal_bounds(*args, difference=True)
+                        self.assertEqual(joint, core.removal_excess(*args))
+                        self.assertEqual(refined, core.difference_rounding_budget(*args))
+        b[0, 0] = np.nan
+        self.assertEqual(core.removal_bounds(b, b, *formats, difference=True), (None, float("inf")))
+
     def test_full_width_refinement_keeps_a_previously_resolved_prefix(self):
         base = np.full((4, 4), 1.9375, dtype=np.float32)
         suspect = base - np.diag(np.array([1., .15625, .046875, .046875], dtype=np.float32))
