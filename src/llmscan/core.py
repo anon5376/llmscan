@@ -126,7 +126,7 @@ def rounding_budget(base: np.ndarray, base_dtype: str, suspect_dtype: str) -> fl
         rows = base if base.shape[0] >= base.shape[1] else base.T
         energy = 0.
         for start in range(0, len(rows), _ROWS_PER_BLOCK):
-            block = rows[start:start + _ROWS_PER_BLOCK].astype(np.float64) / scale
+            block = np.divide(rows[start:start + _ROWS_PER_BLOCK], scale, dtype=np.float64)
             energy += float(np.einsum("ij,ij->", block, block))
         budget += (relative * math.sqrt(energy)) * scale
     return budget
@@ -203,8 +203,8 @@ def contraction_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
     block_rows = max(1, _ROWS_PER_BLOCK * min(base.shape) // base.shape[1])
     for start in range(0, len(base), block_rows):
         sl = slice(start, start + block_rows)
-        b = base[sl].astype(np.float64) / scale
-        d = delta[sl].astype(np.float64) / scale
+        b = np.divide(base[sl], scale, dtype=np.float64)
+        d = np.divide(delta[sl], scale, dtype=np.float64)
         x = b @ z
         reflected = x + 2 * (d @ z)
         envelope = (np.abs(b) + np.abs(d)) @ abs_z
@@ -240,8 +240,8 @@ def _skew_columns(base: np.ndarray, delta: np.ndarray, scale: float) -> tuple[in
         result = np.zeros(base.shape[1])
         for start in range(0, len(base), block_rows):
             sl = slice(start, start + block_rows)
-            b = base[sl].astype(np.float64) / scale
-            d = delta[sl].astype(np.float64) / scale
+            b = np.divide(base[sl], scale, dtype=np.float64)
+            d = np.divide(delta[sl], scale, dtype=np.float64)
             bx, dx = (b @ z, d @ z) if column is None else (b[:, column], d[:, column])
             result += b.T @ dx - d.T @ bx
         return result
@@ -425,8 +425,8 @@ def reciprocity_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
     block_rows = max(1, _ROWS_PER_BLOCK * min(base.shape) // base.shape[1])
     for start in range(0, len(base), block_rows):
         sl = slice(start, start + block_rows)
-        b = base[sl].astype(np.float64) / scale
-        d = delta[sl].astype(np.float64) / scale
+        b = np.divide(base[sl], scale, dtype=np.float64)
+        d = np.divide(delta[sl], scale, dtype=np.float64)
         bp = b @ probes
         dp = d @ probes
         sp = bp + dp
@@ -521,21 +521,28 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int,
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
     np.subtract(w_suspect, w_base, out=w_suspect)  # ΔW, in place: the caller's copy is ours
-    dw = w_suspect if w_suspect.shape[0] >= w_suspect.shape[1] else w_suspect.T
-    if not np.isfinite(dw).all():
+    return analyze_difference(w_base, w_suspect, k, subspace_budget)
+
+
+def analyze_difference(w_base, difference, k, subspace_budget):
+    """Gram spectrum and witnesses from row-addressable base and difference blocks."""
+    if k < 1:
+        raise ValueError(f"k must be >= 1, got {k}")
+    dw = difference if difference.shape[0] >= difference.shape[1] else difference.T
+    scale = max(float(dw.max()), -float(dw.min()))
+    if not math.isfinite(scale):
         return DeltaStats(np.full(min(k, dw.shape[1]), np.nan), float("nan"))
 
-    scale = max(float(dw.max()), -float(dw.min()))  # largest |ΔW| entry, without an abs() copy
     if scale == 0.0:
         return DeltaStats(np.zeros(min(k, dw.shape[1])), 0.0)
 
     # Orient the Gram on the small side, but report the direction in the
     # original output space. The caller puts embeddings in residual x token order.
-    tall = w_suspect.shape[0] >= w_suspect.shape[1]
+    tall = difference.shape[0] >= difference.shape[1]
     gram = np.zeros((dw.shape[1], dw.shape[1]))
-    column_energy = np.empty(w_suspect.shape[1])
+    column_energy = np.empty(difference.shape[1])
     for start in range(0, dw.shape[0], _ROWS_PER_BLOCK):
-        block = dw[start:start + _ROWS_PER_BLOCK].astype(np.float64) / scale  # entries in [-1, 1]
+        block = np.divide(dw[start:start + _ROWS_PER_BLOCK], scale, dtype=np.float64)  # entries in [-1, 1]
         gram += block.T @ block
         if not tall:
             column_energy[start:start + len(block)] = np.einsum("ij,ij->i", block, block)
@@ -561,12 +568,12 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int,
         direction, right = (other, small) if tall else (small, other)
         base = w_base if tall else w_base.T
         base_scale = max(float(w_base.max()), -float(w_base.min()))
-        projected = np.zeros(w_suspect.shape[1])
+        projected = np.zeros(difference.shape[1])
         for start in range(0, dw.shape[0], _ROWS_PER_BLOCK):
             sl = slice(start, start + _ROWS_PER_BLOCK)
-            other[sl] = ((dw[sl].astype(np.float64) / scale) @ small) / np.sqrt(energy[0])
+            other[sl] = (np.divide(dw[sl], scale, dtype=np.float64) @ small) / np.sqrt(energy[0])
             if base_scale:
-                block = base[sl].astype(np.float64) / base_scale
+                block = np.divide(base[sl], base_scale, dtype=np.float64)
                 if tall:
                     projected += block.T @ direction[sl]
                 else:
@@ -584,23 +591,23 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int,
     floors = [None if b is None else b / scale for b in budgets]
     # A tighter floor may land inside a spectral cluster or admit the whole
     # output space. Keep a separated prefix resolved at either storage bound.
-    dim = max(_subspace_dimension(energy, total, w_suspect.shape, f) for f in floors)
-    if dim == 1 and direction is not None and len(w_suspect) > 1:
+    dim = max(_subspace_dimension(energy, total, difference.shape, f) for f in floors)
+    if dim == 1 and direction is not None and len(difference) > 1:
         output_subspace = direction[:, None]
-    elif 2 <= dim < len(w_suspect):
+    elif 2 <= dim < len(difference):
         small = vectors[:, -dim:]
         if tall:
             output_subspace = np.empty((len(dw), dim))
             singular = np.sqrt(energy[:dim][::-1])
             for start in range(0, len(dw), _ROWS_PER_BLOCK):
                 sl = slice(start, start + _ROWS_PER_BLOCK)
-                output_subspace[sl] = ((dw[sl].astype(np.float64) / scale) @ small) / singular
+                output_subspace[sl] = (np.divide(dw[sl], scale, dtype=np.float64) @ small) / singular
         else:
             output_subspace = small.copy()
 
     spectrum = None
     if output_subspace is not None and subspace_budget is not None:
-        floor = max(min(floors), math.sqrt(math.ulp(1.) * sum(w_suspect.shape) * total))
+        floor = max(min(floors), math.sqrt(math.ulp(1.) * sum(difference.shape) * total))
         spectrum = OutputSpectrum(np.sqrt(energy[:dim][::-1]),
                                   math.sqrt(energy[dim]) if dim < len(energy) else 0., floor, scale)
     return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),

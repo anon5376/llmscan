@@ -210,28 +210,40 @@ class Checkpoint:
                     out = np.frombuffer(buf, dtype=FLOAT_DTYPES[t.dtype]).astype(np.float64)
             yield out
 
+    def _float_values(self, t, start, stop, shape, columns, dtype):
+        if t.dtype not in FLOAT_DTYPES:
+            raise CheckpointError(f"{t.name}: dtype {t.dtype} is not a supported float type")
+        with self._buffer(t, start, stop) as buf:
+            values = np.frombuffer(buf, FLOAT_DTYPES[t.dtype] or "<u2").reshape(shape)
+            if columns is not None:
+                values = values[:, columns]
+            if t.dtype == "BF16":
+                bits = values.astype(np.uint32)
+                bits <<= 16
+                return bits.view(np.float32).astype(dtype, copy=False)
+            return values.astype(dtype)  # own the data after the mapping closes
+
+    def matrix_rows(self, name, start, stop, columns, dtype):
+        """Decode a rectangle of a stored matrix, selecting columns before conversion."""
+        t = self.tensors[name]
+        rows, width = t.shape
+        if not 0 <= start <= stop <= rows:
+            raise IndexError("row range outside the tensor")
+        stride = width * DTYPE_BYTES[t.dtype]
+        return self._float_values(t, t.start + start * stride, t.start + stop * stride,
+                                  (stop - start, width), columns, dtype)
+
     def to_float32(self, name: str) -> np.ndarray:
         """A fresh, writable float32 copy of one tensor, in its stored shape."""
         t = self.tensors[name]
-        if t.dtype not in FLOAT_DTYPES:
-            raise CheckpointError(f"{name}: dtype {t.dtype} is not a supported float type")
-        with self._buffer(t, t.start, t.end) as buf:
-            if t.dtype == "BF16":
-                bits = np.frombuffer(buf, dtype="<u2").astype(np.uint32)
-                bits <<= 16  # bf16 is the top half of a float32
-                out = bits.view(np.float32)
-            else:
-                out = np.frombuffer(buf, dtype=FLOAT_DTYPES[t.dtype]).astype(np.float32)
-        return out.reshape(t.shape)
+        return self._float_values(t, t.start, t.end, t.shape, None, np.float32)
 
     def to_float64(self, name: str) -> np.ndarray:
         """Like `to_float32`, but exact for F64 tensors, whose differences float32 would round away."""
         t = self.tensors[name]
         if t.dtype != "F64":
             return self.to_float32(name).astype(np.float64)
-        with self._buffer(t, t.start, t.end) as buf:
-            out = np.frombuffer(buf, dtype="<f8").copy()
-        return out.reshape(t.shape)
+        return self._float_values(t, t.start, t.end, t.shape, None, np.float64)
 
     def close(self) -> None:
         for _, mm in self._maps.values():

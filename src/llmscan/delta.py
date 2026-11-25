@@ -10,9 +10,11 @@ from typing import Callable
 import numpy as np
 
 from llmscan import core
+from llmscan.gguf_io import GGUFCheckpoint
 from llmscan.inventory import CHANGED, DTYPE_MISMATCH, IDENTICAL, InventoryRow
 from llmscan.names import RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind
 from llmscan.safetensors_io import FLOAT_DTYPES, Checkpoint
+from llmscan.token_blocks import token_blocks
 
 FIELDS = ["name", "layer", "kind", "status", "shape", "effective_rank", "seconds"]
 EXTRA_FIELDS = ["frobenius", "projection_gain", "second_tail_share", "token_row_fraction",
@@ -22,6 +24,25 @@ EXTRA_FIELDS = ["frobenius", "projection_gain", "second_tail_share", "token_row_
 
 def sv_field(i: int) -> str:
     return f"sv_{i:03d}"
+
+
+# Stream token matrices when decoding both checkpoints would exceed this size.
+_TOKEN_WORKING_BYTES = 64 << 20
+
+
+def _tensor_inputs(base, suspect, row, token_matrix):
+    """Return both weights and, for streamed inputs, a blockwise difference."""
+    wide_dtype = "F64" in (row.base_dtype, row.suspect_dtype)
+    if token_matrix and row.numel * (16 if wide_dtype else 8) > _TOKEN_WORKING_BYTES:
+        tokens, features = map(int, row.base_shape.split("x"))
+        # Virtual readers can override whole-tensor decoding. Only read
+        # mapped bytes directly for the two built-in checkpoint formats.
+        if tokens > features and all(type(c) in (Checkpoint, GGUFCheckpoint) for c in (base, suspect)):
+            return token_blocks(base, suspect, row.name, core._ROWS_PER_BLOCK)
+
+    load = "to_float64" if wide_dtype else "to_float32"
+    a, b = getattr(base, load)(row.name), getattr(suspect, load)(row.name)
+    return (a.T, b.T, None) if token_matrix else (a, b, None)
 
 
 def scan(
@@ -56,29 +77,28 @@ def scan(
             row = {"name": r.name, "layer": r.layer, "kind": r.kind, "status": r.status, "shape": r.base_shape}
             if r.status != IDENTICAL:
                 t0 = time.perf_counter()
-                load = "to_float64" if "F64" in (r.base_dtype, r.suspect_dtype) else "to_float32"
-                a, b = getattr(base, load)(r.name), getattr(suspect, load)(r.name)
                 kind = canonical_kind(r.kind)
                 token_matrix = kind in TOKEN_MATRICES and r.layer is None
                 projection = token_matrix or kind in RESIDUAL_WRITERS
-                if token_matrix:
-                    a, b = a.T, b.T
-                # This certificate needs both original checkpoint rounding intervals.
                 compare_spaces = subspaces is not None and kind in RESIDUAL_WRITERS
-                removal, refined = (None, float("inf"))
+                a, b, difference = _tensor_inputs(base, suspect, r, token_matrix)
+                dtypes = r.base_dtype, r.suspect_dtype
+                removal, refined = None, float("inf")
                 if projection:
-                    removal, refined = core.removal_bounds(a, b, r.base_dtype, r.suspect_dtype,
-                                                           difference=compare_spaces)
-                budget = core.rounding_budget(a, r.base_dtype, r.suspect_dtype)
+                    removal, refined = core.removal_bounds(a, b, *dtypes, difference=compare_spaces)
+                budget = core.rounding_budget(a, *dtypes)
                 space_budget = float("inf")
                 if compare_spaces:
                     space_budget = (budget, refined) if refined < budget else budget
-                stats = core.analyze_delta(a, b, k, space_budget)
+                if difference is None:
+                    stats = core.analyze_delta(a, b, k, space_budget)
+                    difference = b  # analyze_delta subtracted the base in place
+                else:
+                    stats = core.analyze_difference(a, difference, k, space_budget)
                 excess = stats.tail_excess(budget)
-                # analyze_delta has replaced b with the checkpoint difference.
-                contraction = core.contraction_excess(a, b, stats, r.base_dtype, r.suspect_dtype) if projection else None
-                reciprocity = core.reciprocity_excess(a, b, stats, r.base_dtype, r.suspect_dtype) if projection else None
-                del a, b
+                contraction = core.contraction_excess(a, difference, stats, *dtypes) if projection else None
+                reciprocity = core.reciprocity_excess(a, difference, stats, *dtypes) if projection else None
+                del a, b, difference
                 if directions is not None and projection and stats.direction is not None:
                     directions[r.name] = stats.direction
                 if subspaces is not None and kind in RESIDUAL_WRITERS and stats.output_subspace is not None:

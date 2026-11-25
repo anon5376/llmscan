@@ -176,6 +176,65 @@ class TestAnalyzeDelta(unittest.TestCase):
 
 
 class TestScanPrecision(unittest.TestCase):
+    def test_streamed_token_certificates_match_dense_scan(self):
+        rng = np.random.default_rng(13)
+        name = "model.embed_tokens.weight"
+        # Uneven final blocks along both axes. Exercise a genuine removal,
+        # an expanding leading axis and a multi-mode nonreciprocal edit.
+        base = rng.integers(-16, 17, size=(73, 13)) / 16
+        edits = [base.copy(), base.copy(), np.roll(base, 1, axis=1)]
+        edits[0][:, 0] = 0.
+        edits[1][:, 0] *= 4.
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(core, "_ROWS_PER_BLOCK", 19):
+            tmp = Path(tmp)
+            for formats in [("F64", "F32"), ("BF16", "F16")]:
+                for suspect in edits:
+                    with self.subTest(formats=formats):
+                        write_safetensors(tmp / "a", {name: (formats[0], base)})
+                        write_safetensors(tmp / "b", {name: (formats[1], suspect)})
+                        with Checkpoint(tmp / "a") as a, Checkpoint(tmp / "b") as b:
+                            rows = inventory.compare(a, b)
+                            def measure(label):
+                                dirs = {}
+                                delta.scan(a, b, rows, tmp / label, directions=dirs, log=lambda _: None)
+                                with (tmp / label).open() as f:
+                                    row, = csv.DictReader(f)
+                                del row["seconds"]
+                                return row, dirs
+
+                            expected, dense_dirs = measure("dense")
+                            with (mock.patch.object(delta, "_TOKEN_WORKING_BYTES", 0),
+                                  mock.patch.object(Checkpoint, "to_float32", side_effect=AssertionError),
+                                  mock.patch.object(Checkpoint, "to_float64", side_effect=AssertionError)):
+                                actual, dirs = measure("stream")
+                            self.assertEqual(actual, expected)
+                            self.assertEqual(dirs.keys(), dense_dirs.keys())
+                            for key in dirs:
+                                np.testing.assert_array_equal(dirs[key], dense_dirs[key])
+                            if suspect is edits[1]:
+                                self.assertGreater(float(actual["removal_excess"]), 0.)
+
+    def test_streamed_token_blocks_preserve_working_precision_and_extrema(self):
+        from llmscan.token_blocks import token_blocks
+
+        base = np.ones((23, 7))
+        suspect = base.copy()
+        suspect[14, 2] += 2.**-40
+        suspect[22, 6] = np.nan
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            write_safetensors(tmp / "a", {"x": ("BF16", base)})
+            write_safetensors(tmp / "b", {"x": ("F64", suspect)})
+            with Checkpoint(tmp / "a") as ca, Checkpoint(tmp / "b") as cb:
+                a, b, d = token_blocks(ca, cb, "x", 5)
+                for view, dense in zip((a, b, d), (base.T, suspect.T, (suspect - base).T)):
+                    for cols in (slice(10, 16), [22, 3, 14, 3]):
+                        np.testing.assert_array_equal(view[:, cols], dense[:, cols])
+                    np.testing.assert_array_equal(view[2:5], dense[2:5])
+                    np.testing.assert_equal(view.min(), dense.min())
+                    np.testing.assert_equal(view.max(), dense.max())
+                self.assertTrue(np.isnan(core.analyze_difference(a, d, 2, np.inf).effective_rank))
+
     def test_f64_change_below_float32_resolution_keeps_its_rank(self):
         base = np.ones((16, 16))
         suspect = base + np.eye(16) * 5e-8  # a full-rank change that float32 would round to zero
