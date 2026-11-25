@@ -1229,6 +1229,24 @@ class TestAnomalySignals(unittest.TestCase):
             with self.subTest(tilt=tilt):
                 self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
 
+    def test_reproducible_full_width_span_has_no_complement(self):
+        rows = [row(layer_name(i)) for i in range(30)]
+        eye = np.eye(4)
+        angle = np.radians(16.)
+        spaces, spectra = {}, {}
+        for r in rows:
+            i = r.layer
+            # Both signs recur on each background plane, resolving the fourth
+            # direction even when any one observation is removed.
+            tilt = angle if i % 4 < 2 else -angle
+            line = np.cos(tilt) * eye[1 + i % 2] + np.sin(tilt) * eye[3]
+            axes, values = [eye[0], line], [5., 12.]
+            if 12 <= i < 18:
+                axes, values = list(eye), [5., 5., 5., 16.]
+            spaces[r.name] = np.column_stack(axes)
+            spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .25, 1.)
+        self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
+
     def test_random_high_dimensional_background_has_no_predictive_span(self):
         rng = np.random.default_rng(511)
         rows = [row(layer_name(i)) for i in range(30)]

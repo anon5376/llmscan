@@ -811,15 +811,15 @@ def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, toler
     # orientation for measuring ordinary complement motion. Centering it
     # between two alternating anchors could erase that motion from the bounds.
     minimum = p + 1 if fixed_plane else p
-    largest = min(rank, axes.shape[0] - 1)
-    if largest < minimum:
+    if rank < minimum:
         return None
-    common = _ambient_frame(planes)[:, :largest]
+    common = _ambient_frame(planes)[:, :rank]
     for j, fold in enumerate(folds):
-        if fold.shape[1] < largest:
-            folds[j] = _ambient_frame(planes[:j] + planes[j+1:])[:, :largest].copy()
+        if fold.shape[1] < rank:
+            folds[j] = _ambient_frame(planes[:j] + planes[j+1:])[:, :rank].copy()
     stable = _stable_ambient_rank(common, folds, planes, minimum, tolerance, radius)
-    if stable is None:
+    # A reproducible full-width span leaves no orthogonal complement.
+    if stable is None or stable == axes.shape[0]:
         return None
     frames = [axes @ common[:, :stable]] * len(bases)
     for i, fold in zip(background, folds):
