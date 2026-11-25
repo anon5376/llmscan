@@ -315,9 +315,8 @@ def _scan_concurrent(
                         stop_submitting = True
                     del a, b, difference
                     completed[idx] = (fut, load_sec)
-                    if stop_submitting:
-                        break
-                    continue
+                    # Return to the outer loop so completed rows flush before the next tensor starts.
+                    break
                 fut = ex.submit(_analyze_tensor, a, b, None, r, k, projection, compare_spaces)
                 del a, b
                 running[fut] = (idx, cost, load_sec)

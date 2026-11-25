@@ -503,6 +503,39 @@ class TestInterruptionAndErrors(unittest.TestCase):
             names = [r["name"] for r in csv.DictReader(f)]
         self.assertEqual(names, ["model.layers.0.self_attn.o_proj.weight"])
 
+    def test_streamed_token_matrix_flushes_before_next_streamed_matrix(self):
+        rng = np.random.default_rng(10)
+        base = {
+            "model.embed_tokens.weight": ("F32", rng.standard_normal((64, 16)).astype(np.float32)),
+            "lm_head.weight": ("F32", rng.standard_normal((64, 16)).astype(np.float32)),
+        }
+        suspect = {k: (dt, w + 0.1) for k, (dt, w) in base.items()}
+        write_safetensors(self.tmp / "b.safetensors", base)
+        write_safetensors(self.tmp / "s.safetensors", suspect)
+
+        seen = 0
+        orig_analyze_diff = core.analyze_difference
+
+        def interrupt_second(*args, **kwargs):
+            nonlocal seen
+            seen += 1
+            if seen == 2:
+                raise KeyboardInterrupt
+            return orig_analyze_diff(*args, **kwargs)
+
+        out_csv = self.tmp / "delta.csv"
+        with Checkpoint(self.tmp / "b.safetensors") as b, Checkpoint(self.tmp / "s.safetensors") as s:
+            rows = inventory.compare(b, s)
+            with mock.patch.object(delta, "_TOKEN_WORKING_BYTES", 0), mock.patch.object(
+                core, "analyze_difference", interrupt_second
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    delta.scan(b, s, rows, out_csv, k=4, log=lambda _: None, jobs=2)
+
+        with out_csv.open(encoding="utf-8") as f:
+            names = [r["name"] for r in csv.DictReader(f)]
+        self.assertEqual(names, [rows[0].name])
+
 
 class TestCliValidation(unittest.TestCase):
     def setUp(self):
