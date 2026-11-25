@@ -112,9 +112,13 @@ Output goes to `out/<suspect>-vs-<base>/`:
 
 Safetensors checkpoints (single file or sharded directory) are memory-mapped and read one tensor at
 a time. The inventory compares same-dtype tensors byte for byte in 64 KiB chunks, and float
-re-saves by value in bounded chunks; neither comparison needs a tensor-sized copy. The ΔW scan
-loads the two copies of one 2-D tensor at a time as float32, so
-RAM must hold twice the float32 size of the largest 2-D tensor (4 bytes per element each). CPU only; the only
+re-saves by value in bounded chunks; neither comparison needs a tensor-sized copy. By default the
+ΔW scan loads the two copies of one 2-D tensor at a time as float32, so
+RAM must hold twice the float32 size of the largest 2-D tensor (4 bytes per element each). Pass
+`-j`/`--jobs N` to analyse up to `N` independent changed 2-D tensors concurrently while keeping
+estimated in-flight working memory (decoded arrays plus float64 Gram/block workspace) within
+`--max-memory` MiB (default 512; a single larger tensor still runs alone, and single-matrix or
+zero-change scans stay on the serial path). CPU only; the only
 dependencies are numpy and matplotlib, no torch. GGUF support is next.
 
 `scripts/fetch_hf.sh <org/name> <revision> <dir>` downloads a model's safetensors at a pinned revision.

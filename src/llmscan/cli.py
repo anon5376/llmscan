@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import stat
 import sys
@@ -107,9 +108,19 @@ def main(argv: list[str] | None = None) -> int:
                          + ",".join(sorted(rank.DEFAULT_EXPECTED_KINDS)) + ")")
     ap.add_argument("--outlier-factor", type=rank.parse_factor, default=rank.DEFAULT_OUTLIER_FACTOR, metavar="X",
                     help="effective rank above X times the median of its kind is an outlier (default: 3)")
+    ap.add_argument("-j", "--jobs", type=int, default=1,
+                    help="concurrent tensor workers for ΔW scan (at least 1; default: 1, serial)")
+    ap.add_argument("--max-memory", type=float, default=float(delta.DEFAULT_MAX_MEMORY_MIB), metavar="MIB",
+                    help=f"working-memory budget in MiB for concurrent ΔW tensors "
+                         f"(default: {delta.DEFAULT_MAX_MEMORY_MIB}; a single larger tensor still runs alone)")
     args = ap.parse_args(argv)
     if args.k < 1:
         ap.error("-k must be at least 1")
+    if args.jobs < 1:
+        ap.error("--jobs must be at least 1")
+    if not math.isfinite(args.max_memory) or args.max_memory <= 0:
+        ap.error("--max-memory must be a finite number above 0")
+    max_memory_bytes = max(1, int(args.max_memory * 1024 * 1024))
     for stream in (sys.stdout, sys.stderr):  # a redirected Windows console may not encode every path
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
@@ -156,7 +167,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"wrote {out / 'inventory.csv'}\nwrote {out / 'ranking.csv'}")
             return 0
         try:
-            atomic.write(out / "delta.csv", lambda tmp: delta.scan(base, suspect, rows, tmp, k=args.k), keep_partial=True)
+            atomic.write(
+                out / "delta.csv",
+                lambda tmp: delta.scan(
+                    base, suspect, rows, tmp, k=args.k,
+                    jobs=args.jobs, max_memory_bytes=max_memory_bytes,
+                ),
+                keep_partial=True,
+            )
         except NotImplementedError as e:
             print(f"ΔW scan stopped: {e}", file=sys.stderr)
             print(top + "\n")
