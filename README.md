@@ -250,7 +250,9 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      measurable secondary modes. Each retained singular value must exceed a storage
      rounding allowance and the numerical floor of the Gram matrix. For writer
      subspaces the scanner can tighten the whole-tensor allowance by summing the two
-     checkpoints' entrywise rounding radii and taking their Frobenius norm.
+     checkpoints' entrywise rounding radii and taking their Frobenius norm. It retains
+     the largest leading group resolved under either allowance, including when the
+     tighter allowance falls inside a cluster of similar singular values.
      A twofold gap separates the selected modes from the remaining spectrum. A tall matrix
      can also have a measurable output space spanning all its input modes.
      The scanner compares resolved output spaces across layers of the same stack, writer kind,

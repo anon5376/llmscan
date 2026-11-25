@@ -38,6 +38,19 @@ class TestAnalyzeDelta(unittest.TestCase):
         measured = core.analyze_delta(base, suspect, 1, refined)
         self.assertEqual(measured.output_subspace.shape, (32, 4))
 
+    def test_full_width_refinement_keeps_a_previously_resolved_prefix(self):
+        base = np.full((4, 4), 1.9375, dtype=np.float32)
+        suspect = base - np.diag(np.array([1., .15625, .046875, .046875], dtype=np.float32))
+        coarse = core.rounding_budget(base, "BF16", "BF16")
+        refined = core.difference_rounding_budget(base, suspect, "BF16", "BF16")
+        self.assertLess(refined, .046875)
+        self.assertGreater(coarse, .046875)
+        measured = core.analyze_delta(base, suspect, 1, (coarse, refined))
+        basis = measured.output_subspace
+        np.testing.assert_allclose(basis @ basis.T, np.diag([1, 1, 0, 0]))
+        self.assertAlmostEqual(measured.output_spectrum.omitted, .046875)
+        self.assertAlmostEqual(measured.output_spectrum.noise, refined)
+
     def test_entrywise_allowance_encloses_mixed_precision_resaves(self):
         original = self.rng.uniform(-3., 3., size=(60, 45))
         original[::3] *= 2.**-24

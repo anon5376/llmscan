@@ -69,7 +69,8 @@ def scan(
                 compare_spaces = subspaces is not None and kind in RESIDUAL_WRITERS
                 space_budget = float("inf")
                 if compare_spaces:
-                    space_budget = min(budget, core.difference_rounding_budget(a, b, r.base_dtype, r.suspect_dtype))
+                    refined = core.difference_rounding_budget(a, b, r.base_dtype, r.suspect_dtype)
+                    space_budget = (budget, refined) if refined < budget else budget
                 stats = core.analyze_delta(a, b, k, space_budget)
                 excess = stats.tail_excess(budget)
                 # analyze_delta has replaced b with the checkpoint difference.

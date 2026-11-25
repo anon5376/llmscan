@@ -440,7 +440,8 @@ def _subspace_dimension(energy: np.ndarray, total: float, shape: tuple[int, int]
     return int(gaps[-1] + 1) if gaps.size else 0
 
 
-def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int, subspace_budget: float | None = None) -> DeltaStats:
+def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int,
+                  subspace_budget: float | tuple[float, float] | None = None) -> DeltaStats:
     """Spectrum of the change from `w_base` to `w_suspect` for one weight matrix.
 
     Inputs
@@ -448,8 +449,9 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int, subspace_bu
             dtype, as stored in the checkpoint: float32, or float64 when either side is F64.
             Both are fresh copies; modifying them is fine.
         k: how many leading singular values to return, k >= 1.
-        subspace_budget: Frobenius bound on checkpoint rounding in physical units. Without
-            storage metadata, retain the leading-cluster heuristic. Infinity skips extraction.
+        subspace_budget: Frobenius bound on checkpoint rounding in physical units, or
+            the whole-tensor bound and its entrywise refinement. Without storage metadata,
+            retain the leading-cluster heuristic. Infinity skips extraction.
 
     Returns DeltaStats
         singular_values: 1-D float64 array of the k largest singular values of
@@ -534,8 +536,11 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int, subspace_bu
             base_probe = projected
         projection_error, column_spike, fit_residual = _projection_fit(right, projected, gain)
 
-    noise = None if subspace_budget is None else subspace_budget / scale
-    dim = _subspace_dimension(energy, total, w_suspect.shape, noise)
+    budgets = subspace_budget if isinstance(subspace_budget, tuple) else (subspace_budget,)
+    floors = [None if b is None else b / scale for b in budgets]
+    # A tighter floor may land inside a spectral cluster or admit the whole
+    # output space. Keep a separated prefix resolved at either storage bound.
+    dim = max(_subspace_dimension(energy, total, w_suspect.shape, f) for f in floors)
     if dim == 1 and direction is not None and len(w_suspect) > 1:
         output_subspace = direction[:, None]
     elif 2 <= dim < len(w_suspect):
@@ -550,8 +555,8 @@ def analyze_delta(w_base: np.ndarray, w_suspect: np.ndarray, k: int, subspace_bu
             output_subspace = small.copy()
 
     spectrum = None
-    if output_subspace is not None and noise is not None:
-        floor = max(noise, math.sqrt(math.ulp(1.) * sum(w_suspect.shape) * total))
+    if output_subspace is not None and subspace_budget is not None:
+        floor = max(min(floors), math.sqrt(math.ulp(1.) * sum(w_suspect.shape) * total))
         spectrum = OutputSpectrum(np.sqrt(energy[:dim][::-1]),
                                   math.sqrt(energy[dim]) if dim < len(energy) else 0., floor, scale)
     return DeltaStats(np.sqrt(energy[:k]) * scale, effective_rank, float(np.sqrt(total) * scale),
