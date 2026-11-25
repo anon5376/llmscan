@@ -46,7 +46,7 @@ test("reads the demo, a full llmscan run", async () => {
   assert.equal(r.inventory.length, 112);
   assert.equal(r.ranking.length, 27);
   assert.equal(r.delta.length, 84);
-  assert.deepEqual(Object.keys(r.inventory[0]), INVENTORY_HEADER.split(","));
+  assert.deepEqual(Object.keys(r.inventory[0]), [...INVENTORY_HEADER.split(","), "resave_dtype"]);
   assert.deepEqual(Object.keys(r.ranking[0]), RANKING_HEADER.split(","));
   assert.ok("sv_032" in r.delta[0]);
   assert.deepEqual(r.ranking[5], {
