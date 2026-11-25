@@ -111,8 +111,9 @@ Output goes to `out/<suspect>-vs-<base>/`:
 - `spectra.png`, `effective_rank.png`.
 
 Safetensors checkpoints (single file or sharded directory) are memory-mapped and read one tensor at
-a time. The inventory compares tensors in chunks, so it needs a few megabytes of RAM
-whatever the model size (4.2 MB of allocations measured on a pair of 160 MB tensors); the ΔW scan loads the two copies of one 2-D tensor at a time as float32, so
+a time. The inventory compares same-dtype tensors byte for byte in 64 KiB chunks, and float
+re-saves by value in bounded chunks; neither comparison needs a tensor-sized copy. The ΔW scan
+loads the two copies of one 2-D tensor at a time as float32, so
 RAM must hold twice the float32 size of the largest 2-D tensor (4 bytes per element each). CPU only; the only
 dependencies are numpy and matplotlib, no torch. GGUF support is next.
 
@@ -432,6 +433,38 @@ rank first, then larger top singular value, then name (unusable stats sort as mi
 scores a ranking against an answer key of planted tensor names; it rejects a ranking that lists a tensor twice.
 `--outlier-factor` must be a finite number above 0. `ranking.csv` is written only into an `--out` that is new, empty
 or already marked for the same pair by `pair.txt`; llmscan never deletes or overwrites a `ranking.csv` it did not write.
+
+## Workbench
+
+`web/` is a local page for reading a finished comparison: the ranking with the reason behind every row, the
+tensor inventory, and the ΔW stats as tables and charts. From a clone:
+
+```sh
+python3 -m http.server 8000 --bind 127.0.0.1 --directory web   # then open http://127.0.0.1:8000/
+```
+
+It opens on a demo. `web/demo/` holds the output of a real llmscan run on two tiny synthetic checkpoints: an
+honest abliteration with six planted changes on top (`python web/demo/generate.py` regenerates it). To read
+your own run, choose **Import report folder** and pick `out/<suspect>-vs-<base>/`, drop that folder on the
+page, or pick its files.
+
+- **Ranking:** `ranking.csv`, most suspicious first, filtered by tier or text. Selecting a tensor shows its
+  reason, what its tier means, the base and suspect shape and dtype, the median the ranking judged it by, and
+  its singular values drawn over the other changed tensors of its kind. Kinds are grouped as the ranking
+  groups them: MoE expert and shared-expert down projections count as one.
+- **Inventory:** every tensor by status and kind, with a kind-by-status table that filters the list.
+- **ΔW stats:** effective rank by layer and singular values by kind, in the colours of `effective_rank.png`
+  and `spectra.png`, above a sortable table of `delta.csv`. Without a compatible `delta.csv`, the workbench
+  still shows the ΔW summaries in `ranking.csv`, if present. An inventory-only rerun can leave an old
+  `delta.csv` in the folder; incompatible spectra are hidden. If the file matches the inventory but the ranking
+  has no summaries to verify it against, the spectra are marked unverified and kept separate from the ranking.
+
+The page reads `pair.txt`, `inventory.csv`, `ranking.csv` and `delta.csv` inside your browser tab and opens
+no other file of the folder. Nothing is uploaded: there is no server-side code, and the page's content
+security policy only allows requests to its own origin. There is no build step and no dependency; the HTTP
+server is needed only because browsers do not load ES modules from `file://`. Like the command line, the
+workbench ranks suspicion and never certifies a model clean. Its tests (`tests/web/`) run with the unit
+tests when Node 20 or newer is installed.
 
 ## Safety
 

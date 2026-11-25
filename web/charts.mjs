@@ -1,0 +1,271 @@
+// SVG charts in the palette of the CLI's PNG figures (src/llmscan/plots.py).
+import { append, svg } from './dom.mjs';
+import { canonicalKind, formatNumber, naturalCompare, plural } from './model.mjs';
+
+export const PALETTE = {
+  surface: '#fcfcfb', ink: '#0b0b0b', ink2: '#52514e', muted: '#898781', grid: '#e1e0d9', axis: '#c3c2b7',
+};
+// fixed categorical slots: a kind keeps its colour across every report, as in the PNGs
+const SERIES = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];
+const KIND_ORDER = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj', 'embed_tokens'];
+// sequential blue: early layers light, late layers dark
+const LAYER_STOPS = ['#86b6ef', '#5598e7', '#2a78d6', '#1c5cab', '#104281', '#0d366b'];
+
+export function kindOrder(kinds) {
+  const slot = (k) => (KIND_ORDER.includes(k) ? KIND_ORDER.indexOf(k) : KIND_ORDER.length);
+  return [...new Set(kinds)].sort((a, b) => slot(a) - slot(b) || naturalCompare(a, b));
+}
+
+/** Known kinds take their fixed slot; unknown kinds fill the remaining slots, then gray. */
+export function kindColors(kinds) {
+  const colors = new Map(KIND_ORDER.filter((k) => kinds.includes(k)).map((k) => [k, SERIES[KIND_ORDER.indexOf(k)]]));
+  const free = SERIES.filter((c) => ![...colors.values()].includes(c));
+  for (const k of kindOrder(kinds)) if (!colors.has(k)) colors.set(k, free.shift() ?? PALETTE.muted);
+  return colors;
+}
+
+/** Colour for a position t in [0, 1] along the layer ramp. */
+export function layerColor(t) {
+  const x = Math.min(Math.max(t, 0), 1) * (LAYER_STOPS.length - 1);
+  const i = Math.min(Math.floor(x), LAYER_STOPS.length - 2);
+  const channel = (stop, at) => parseInt(stop.slice(at, at + 2), 16);
+  const mix = (at) => Math.round(channel(LAYER_STOPS[i], at) + (channel(LAYER_STOPS[i + 1], at) - channel(LAYER_STOPS[i], at)) * (x - i));
+  return `rgb(${mix(1)}, ${mix(3)}, ${mix(5)})`;
+}
+
+export const layerGradient = `linear-gradient(to right, ${LAYER_STOPS.join(', ')})`;
+
+/** [min, max] by iteration: `Math.min(...values)` throws once a report holds more values than a call takes arguments. */
+export function extent(values) {
+  let lo = Infinity, hi = -Infinity;
+  for (const v of values) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  return [lo, hi];
+}
+
+/** About `count` round ticks covering [lo, hi]. */
+export function linearTicks(lo, hi, count = 5) {
+  if (!(hi > lo)) return [lo];
+  const raw = (hi - lo) / count;
+  const power = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 5, 10].map((m) => m * power).find((s) => s >= raw);
+  const ticks = [];
+  for (let i = Math.ceil(lo / step - 1e-9); i * step <= hi + step * 1e-9; i++) ticks.push(Number((i * step).toPrecision(12)));
+  return ticks;
+}
+
+/** Powers of ten inside [lo, hi] (both positive). */
+export function logTicks(lo, hi) {
+  const ticks = [];
+  for (let e = Math.ceil(Math.log10(lo) - 1e-9); e <= Math.floor(Math.log10(hi) + 1e-9); e++) ticks.push(Number(`1e${e}`)); // 10 ** -4 is 0.00009999999999999999
+  return ticks;
+}
+
+/** Value -> pixel; log scales clamp non-positive values to the bottom of the domain. */
+export function scale([d0, d1], [r0, r1], log = false) {
+  const f = log ? (v) => Math.log10(Math.max(v, d0)) : (v) => v;
+  const span = f(d1) - f(d0) || 1;
+  return (v) => r0 + (f(v) - f(d0)) / span * (r1 - r0);
+}
+
+function padded(lo, hi, log) {
+  if (log) return [lo / 1.6, hi * 1.6];
+  const pad = (hi - lo || Math.abs(hi) || 1) * 0.08;
+  return [lo - pad, hi + pad];
+}
+
+const tickLabel = (v, log) => (log ? `1e${Math.round(Math.log10(v))}` : String(v));
+
+/** Plot frame: gridlines, tick labels and axis titles. Returns the scales and the plot group. */
+function frame({ width, height, x, y, xLabel, yLabel, xTicks, label }) {
+  const m = { top: 12, right: 14, bottom: 40, left: 58 };
+  const sx = scale(x.domain, [m.left, width - m.right]);
+  const sy = scale(y.domain, [height - m.bottom, m.top], y.log);
+  const yTicks = (y.log ? logTicks(...y.domain) : linearTicks(...y.domain)).filter((t) => t >= y.domain[0] && t <= y.domain[1]);
+  const text = (props, value) => svg('text', { fill: PALETTE.ink2, 'font-size': 11, ...props }, value);
+  const root = svg('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': label, class: 'chart' },
+    yTicks.map((t) => [
+      svg('line', { x1: m.left, x2: width - m.right, y1: sy(t), y2: sy(t), stroke: PALETTE.grid }),
+      text({ x: m.left - 8, y: sy(t) + 4, 'text-anchor': 'end' }, tickLabel(t, y.log)),
+    ]),
+    xTicks.map((t) => [
+      svg('line', { x1: sx(t), x2: sx(t), y1: m.top, y2: height - m.bottom, stroke: PALETTE.grid }),
+      text({ x: sx(t), y: height - m.bottom + 16, 'text-anchor': 'middle' }, String(t)),
+    ]),
+    svg('line', { x1: m.left, x2: width - m.right, y1: height - m.bottom, y2: height - m.bottom, stroke: PALETTE.axis }),
+    svg('line', { x1: m.left, x2: m.left, y1: m.top, y2: height - m.bottom, stroke: PALETTE.axis }),
+    text({ x: (m.left + width - m.right) / 2, y: height - 6, 'text-anchor': 'middle' }, xLabel),
+    text({ x: 14, y: (m.top + height - m.bottom) / 2, 'text-anchor': 'middle', transform: `rotate(-90 14 ${(m.top + height - m.bottom) / 2})` }, yLabel),
+  );
+  return { root, sx, sy };
+}
+
+const integerTicks = (lo, hi, count) => [...new Set(linearTicks(lo, hi, count).map(Math.round))].filter((t) => t >= lo && t <= hi);
+
+/**
+ * Offset, in layers, of kind `i` of `count`: kinds sit side by side inside a layer, so two kinds with the
+ * same rank do not hide each other. It stays within 0.3 of the layer, inside the axis' half-layer margin.
+ */
+export function kindOffset(i, count) {
+  return (i - (count - 1) / 2) * Math.min(0.16, 0.6 / count);
+}
+
+/** Distance from a point to the polyline through `points`; to the point itself when there is only one. */
+export function distanceToPath([px, py], points) {
+  let nearest = Infinity;
+  points.forEach(([x1, y1], i) => {
+    const [x0, y0] = points[i - 1] ?? [x1, y1];
+    const dx = x1 - x0, dy = y1 - y0;
+    const along = dx || dy ? Math.min(1, Math.max(0, ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy))) : 0;
+    nearest = Math.min(nearest, Math.hypot(px - x0 - along * dx, py - y0 - along * dy));
+  });
+  return nearest;
+}
+
+const REACH = 22; // CSS px around the pointer or fingertip in which a mark can be picked: a 44px touch target
+
+/**
+ * A click picks the tensor of the mark nearest the pointer, and hovering shows which one that is, so a thin
+ * line or a small dot needs no exact aim. `marks`: {tensor, node, paths}, paths in chart units, drawn in order.
+ */
+function pickNearest(root, width, marks, onPick) {
+  const nearest = (event) => {
+    const box = root.getBoundingClientRect();
+    const unit = width / box.width;
+    const at = [(event.clientX - box.left) * unit, (event.clientY - box.top) * unit];
+    let found = null, reach = REACH * unit;
+    for (const mark of marks) {
+      const distance = extent(mark.paths.map((path) => distanceToPath(at, path)))[0];
+      if (distance <= reach) [found, reach] = [mark, distance]; // a tie goes to the mark drawn on top
+    }
+    return found;
+  };
+  let near = null;
+  const show = (mark) => {
+    if (mark === near) return;
+    near?.node.classList.remove('near');
+    mark?.node.classList.add('near');
+    root.classList.toggle('picking', mark != null);
+    near = mark;
+  };
+  root.addEventListener('pointermove', (event) => show(nearest(event)));
+  root.addEventListener('pointerleave', () => show(null));
+  root.addEventListener('click', (event) => {
+    const mark = nearest(event);
+    if (mark) onPick(mark.tensor.name);
+  });
+}
+
+/** Effective rank of ΔW against layer, one line per matrix kind; a point opens its tensor. */
+export function rankByLayerChart(tensors, { selected, onPick }) {
+  const points = tensors.filter((t) => t.layer != null);
+  const kinds = kindOrder(points.map((t) => t.kind));
+  const colors = kindColors(kinds);
+  const [firstLayer, lastLayer] = extent(points.map((t) => t.layer));
+  const [lowRank, highRank] = extent(points.map((t) => t.effectiveRank));
+  const log = highRank / lowRank > 30;
+  const x = { domain: [firstLayer - 0.5, lastLayer + 0.5] };
+  const y = { domain: padded(lowRank, highRank, log), log };
+  const { root, sx, sy } = frame({
+    width: 720, height: 300, x, y, xLabel: 'layer', yLabel: 'effective rank of ΔW',
+    xTicks: integerTicks(firstLayer, lastLayer, 12),
+    label: `Effective rank of ΔW by layer for ${plural(points.length, 'changed tensor')} of ${plural(kinds.length, 'kind')}. The table below lists the same values.`,
+  });
+  const marks = [];
+  for (const [i, kind] of kinds.entries()) {
+    const series = points.filter((t) => t.kind === kind).sort((a, b) => a.layer - b.layer);
+    const at = (t) => [sx(t.layer + kindOffset(i, kinds.length)), sy(t.effectiveRank)];
+    root.append(svg('polyline', { points: series.map((t) => at(t).join(',')).join(' '), fill: 'none', stroke: colors.get(kind), 'stroke-width': 1.5 }));
+    for (const t of series) {
+      const [cx, cy] = at(t);
+      const node = svg('circle', {
+        cx, cy, r: t.name === selected ? 6.5 : 4.5,
+        fill: colors.get(kind), stroke: t.name === selected ? PALETTE.ink : PALETTE.surface, 'stroke-width': t.name === selected ? 2 : 1.5,
+      }, svg('title', null, `${t.name}\neffective rank ${formatNumber(t.effectiveRank)}`));
+      root.append(node);
+      marks.push({ tensor: t, node, paths: [[[cx, cy]]] });
+    }
+  }
+  pickNearest(root, 720, marks, onPick);
+  return { chart: root, legend: kinds.map((kind) => ({ kind, color: colors.get(kind) })) };
+}
+
+const drawable = (v) => Number.isFinite(v) && v > 0;
+
+/**
+ * The stretches of a spectrum a log axis can show, as [index, value] pairs. A zero or a non-finite value
+ * (the CLI writes `nan` when ΔW has a non-finite entry) has no place on it and is left as a gap.
+ */
+export function spectrumRuns(spectrum) {
+  const runs = [];
+  let run = null;
+  spectrum.forEach((v, i) => {
+    if (!drawable(v)) run = null;
+    else {
+      if (!run) runs.push(run = []);
+      run.push([i + 1, v]);
+    }
+  });
+  return runs;
+}
+
+/** A spectrum as lines, with a dot for a value that stands alone (`-k 1`, or between two gaps); null when nothing can be drawn. */
+function spectrumMark(t, sx, sy, color, width) {
+  const runs = spectrumRuns(t.spectrum);
+  if (!runs.length) return null;
+  return svg('g', null, runs.map((run) => (run.length === 1
+    ? svg('circle', { cx: sx(run[0][0]), cy: sy(run[0][1]), r: width + 2, fill: color })
+    : svg('polyline', {
+      points: run.map(([i, v]) => `${sx(i)},${sy(v)}`).join(' '),
+      fill: 'none', stroke: color, 'stroke-width': width, 'stroke-linejoin': 'round',
+    }))));
+}
+
+/** Axes that hold every spectrum in `tensors`: one domain for all the panels of a report keeps them comparable. */
+export function spectrumDomain(tensors) {
+  const values = tensors.flatMap((t) => t.spectrum).filter(drawable);
+  const longest = Math.max(2, extent(tensors.map((t) => t.spectrum.length))[1]);
+  return {
+    x: { domain: [1, longest] },
+    y: { domain: values.length ? padded(...extent(values), true) : [0.1, 10], log: true },
+    xTicks: integerTicks(1, longest, 6),
+  };
+}
+
+/** Singular values of the changed tensors the ranking compares with each other; lines run light (early layer) to dark (late). */
+export function kindSpectraChart(kind, tensors, { domain: { x, y, xTicks }, layerRange: [lo, hi], selected, onPick }) {
+  const { root, sx, sy } = frame({
+    width: 360, height: 250, x, y, xTicks, xLabel: 'singular value index i', yLabel: 'σᵢ(ΔW)',
+    label: `Singular values of ΔW for ${plural(tensors.length, `changed ${kind} tensor`)}, log scale.`,
+  });
+  const ordered = [...tensors].sort((a, b) => (a.name === selected) - (b.name === selected) || (a.layer ?? -1) - (b.layer ?? -1));
+  const marks = [];
+  for (const t of ordered) {
+    const color = t.layer == null ? PALETTE.ink2 : layerColor((t.layer - lo) / Math.max(hi - lo, 1));
+    const node = t.name === selected ? spectrumMark(t, sx, sy, PALETTE.ink, 2.5) : spectrumMark(t, sx, sy, color, 1.3);
+    if (!node) continue;
+    root.append(append(node, svg('title', null, `${t.name}\neffective rank ${formatNumber(t.effectiveRank)}`)));
+    marks.push({ tensor: t, node, paths: spectrumRuns(t.spectrum).map((run) => run.map(([i, v]) => [sx(i), sy(v)])) });
+  }
+  pickNearest(root, 360, marks, onPick);
+  return root;
+}
+
+/** One tensor's spectrum in `color`, drawn over the other changed tensors the ranking groups it with in gray. */
+export function tensorSpectrumChart(tensor, peers, color) {
+  const { x, y, xTicks } = spectrumDomain([tensor, ...peers]);
+  const { root, sx, sy } = frame({
+    width: 360, height: 220, x, y, xTicks, xLabel: 'singular value index i', yLabel: 'σᵢ(ΔW)',
+    label: `Singular values of ΔW for ${tensor.name}, log scale`
+      + (peers.length ? `, over ${plural(peers.length, `other changed ${canonicalKind(tensor.kind)} tensor`)} in gray.` : '.'),
+  });
+  append(root,
+    peers.map((t) => spectrumMark(t, sx, sy, PALETTE.axis, 1)),
+    spectrumMark(tensor, sx, sy, color, 2.2),
+    tensor.spectrum.length > 1 && tensor.spectrum.length <= 12
+      && spectrumRuns(tensor.spectrum).flat().map(([i, v]) => svg('circle', { cx: sx(i), cy: sy(v), r: 3, fill: color })),
+  );
+  return root;
+}

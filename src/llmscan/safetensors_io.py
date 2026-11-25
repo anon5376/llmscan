@@ -24,6 +24,7 @@ DTYPE_BYTES = {
     "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
 }
 FLOAT_DTYPES = {"F64": "<f8", "F32": "<f4", "F16": "<f2", "BF16": None}  # BF16 decoded by hand
+VALUE_CHUNK = 1 << 14  # 128 KiB per decoded float64 array during mixed-dtype comparison
 MAX_OPEN_MAPS = 4  # per checkpoint; each mmap holds a file descriptor, and sharded models have hundreds of files
 
 
@@ -57,9 +58,11 @@ def shard_files(path: Path) -> list[Path]:
         raise CheckpointError(f"{path}: no such file or directory")
     if (path / "model.safetensors").is_file():  # transformers loads this before any index
         return [path / "model.safetensors"]
-    indexes = sorted(path.glob("*.safetensors.index.json"))
-    if indexes:
-        weight_map = json.loads(indexes[0].read_text(encoding="utf-8"))["weight_map"]
+    index = path / "model.safetensors.index.json"
+    if not index.is_file():
+        index = min(path.glob("*.safetensors.index.json"), default=None)
+    if index is not None:
+        weight_map = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
         return [path / f for f in sorted(set(weight_map.values()))]
     files = sorted(path.glob("*.safetensors"))
     if not files:
@@ -192,7 +195,7 @@ class Checkpoint:
                 data = bytes(buf)
             yield data
 
-    def iter_values(self, name: str, chunk: int = 1 << 16) -> Iterator[np.ndarray]:
+    def iter_values(self, name: str, chunk: int = VALUE_CHUNK) -> Iterator[np.ndarray]:
         """The tensor's values as flat float64 chunks of at most `chunk` elements. Every supported
         float dtype converts to float64 without loss, and memory stays bounded by the chunk."""
         t = self.tensors[name]
