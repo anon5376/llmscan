@@ -41,7 +41,9 @@ def estimate_tensor_bytes(row: InventoryRow) -> int:
     finite_mask = m * n
     gram = 2 * n * n * 8
     block = 2 * min(m, core._ROWS_PER_BLOCK) * n * 8
-    return decoded + decode_temp + finite_mask + gram + block
+    # The widening temporary, the finite-value mask, and the Gram/block workspace live in
+    # separate phases while the two decoded arrays stay resident.
+    return decoded + max(decode_temp, finite_mask, gram + block)
 
 
 def _max_parallelism(costs: list[int], jobs: int, max_memory_bytes: int) -> int:

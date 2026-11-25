@@ -41,27 +41,46 @@ def make_pair(tmp: Path, changed_layers: tuple[int, ...] = (0, 1, 2, 3), d: int 
 
 
 class TestMemoryEstimator(unittest.TestCase):
-    def test_estimate_accounts_for_decoded_mask_gram_and_block(self):
+    def test_estimate_accounts_for_decoded_and_peak_phase_workspace(self):
         row = inventory.InventoryRow(
             name="m.weight", layer=0, kind="o_proj", status=inventory.CHANGED,
             base_dtype="BF16", suspect_dtype="F32", base_shape="1024x2048", suspect_shape="1024x2048", numel=1024 * 2048,
         )
-        # m=2048, n=1024, itemsize=4 -> decoded=16 MiB, finite_mask=2 MiB, gram=16 MiB, block=32 MiB -> 66 MiB
-        self.assertEqual(delta.estimate_tensor_bytes(row), 66 * 1024 * 1024)
+        # m=2048, n=1024, itemsize=4 -> decoded=16 MiB, max(0, finite_mask=2 MiB, gram+block=48 MiB) -> 64 MiB
+        self.assertEqual(delta.estimate_tensor_bytes(row), 64 * 1024 * 1024)
 
-    def test_estimate_accounts_for_mixed_precision_f64_temporary(self):
-        mixed = inventory.InventoryRow(
-            name="m.weight", layer=0, kind="o_proj", status=inventory.CHANGED,
-            base_dtype="F32", suspect_dtype="F64", base_shape="16x8", suspect_shape="16x8", numel=128,
+        # Two 2560x2560 BF16 tensors fit in the default 512 MiB budget because finite_mask and gram+block do not coexist.
+        sq = inventory.InventoryRow(
+            name="q.weight", layer=0, kind="q_proj", status=inventory.CHANGED,
+            base_dtype="BF16", suspect_dtype="BF16", base_shape="2560x2560", suspect_shape="2560x2560", numel=2560 * 2560,
         )
-        pure_f64 = inventory.InventoryRow(
-            name="m.weight", layer=0, kind="o_proj", status=inventory.CHANGED,
-            base_dtype="F64", suspect_dtype="F64", base_shape="16x8", suspect_shape="16x8", numel=128,
+        self.assertEqual(delta.estimate_tensor_bytes(sq), 250 * 1024 * 1024)
+        self.assertEqual(
+            delta._max_parallelism([delta.estimate_tensor_bytes(sq)] * 2, jobs=2, max_memory_bytes=512 * 1024 * 1024),
+            2,
         )
-        # m=16, n=8, itemsize=8 -> decoded=2048, finite_mask=128, gram=1024, block=2048
-        # mixed also includes the float32 widening temporary: 128 * 4 = 512
-        self.assertEqual(delta.estimate_tensor_bytes(pure_f64), 2048 + 128 + 1024 + 2048)
-        self.assertEqual(delta.estimate_tensor_bytes(mixed), 2048 + 512 + 128 + 1024 + 2048)
+
+    def test_estimate_accounts_for_tall_mask_and_mixed_precision_f64_temporary(self):
+        tall_bf16 = inventory.InventoryRow(
+            name="e.weight", layer=None, kind="embed", status=inventory.CHANGED,
+            base_dtype="BF16", suspect_dtype="BF16", base_shape="1000000x8", suspect_shape="1000000x8", numel=8_000_000,
+        )
+        # m=1_000_000, n=8 -> finite_mask=8_000_000 > gram+block (~525 KiB)
+        self.assertEqual(delta.estimate_tensor_bytes(tall_bf16), 2 * 8_000_000 * 4 + 8_000_000)
+
+        tall_mixed = inventory.InventoryRow(
+            name="e.weight", layer=None, kind="embed", status=inventory.CHANGED,
+            base_dtype="F32", suspect_dtype="F64", base_shape="1000000x8", suspect_shape="1000000x8", numel=8_000_000,
+        )
+        # mixed F64 decode_temp=32_000_000 > finite_mask=8_000_000 > gram+block
+        self.assertEqual(delta.estimate_tensor_bytes(tall_mixed), 2 * 8_000_000 * 8 + 8_000_000 * 4)
+
+        tall_f64 = inventory.InventoryRow(
+            name="e.weight", layer=None, kind="embed", status=inventory.CHANGED,
+            base_dtype="F64", suspect_dtype="F64", base_shape="1000000x8", suspect_shape="1000000x8", numel=8_000_000,
+        )
+        # pure F64 has no widening temporary, so finite_mask=8_000_000 dominates
+        self.assertEqual(delta.estimate_tensor_bytes(tall_f64), 2 * 8_000_000 * 8 + 8_000_000)
 
     def test_max_parallelism_bounds_by_jobs_and_memory(self):
         self.assertEqual(delta._max_parallelism([100, 100, 100], jobs=1, max_memory_bytes=1000), 1)
