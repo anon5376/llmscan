@@ -67,7 +67,10 @@ def scan(
                 removal = core.removal_excess(a, b, r.base_dtype, r.suspect_dtype) if projection else None
                 budget = core.rounding_budget(a, r.base_dtype, r.suspect_dtype)
                 compare_spaces = subspaces is not None and kind in RESIDUAL_WRITERS
-                stats = core.analyze_delta(a, b, k, budget if compare_spaces else float("inf"))
+                space_budget = float("inf")
+                if compare_spaces:
+                    space_budget = min(budget, core.difference_rounding_budget(a, b, r.base_dtype, r.suspect_dtype))
+                stats = core.analyze_delta(a, b, k, space_budget)
                 excess = stats.tail_excess(budget)
                 # analyze_delta has replaced b with the checkpoint difference.
                 contraction = core.contraction_excess(a, b, stats, r.base_dtype, r.suspect_dtype) if projection else None

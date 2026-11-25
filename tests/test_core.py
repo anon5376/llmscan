@@ -27,6 +27,27 @@ class TestAnalyzeDelta(unittest.TestCase):
     def setUp(self):
         self.rng = np.random.default_rng(0)
 
+    def test_entrywise_allowance_resolves_a_separated_pair_of_modes(self):
+        base = np.full((32, 32), 1.9375, dtype=np.float32)
+        suspect = base.copy()
+        suspect[np.diag_indices(4)] -= [1.25, .75, .375, .375]
+        coarse = core.rounding_budget(base, "BF16", "BF16")
+        refined = core.difference_rounding_budget(base, suspect, "BF16", "BF16")
+        self.assertLess(refined, .375)
+        self.assertGreater(coarse, .375)
+        measured = core.analyze_delta(base, suspect, 1, refined)
+        self.assertEqual(measured.output_subspace.shape, (32, 4))
+
+    def test_entrywise_allowance_encloses_mixed_precision_resaves(self):
+        original = self.rng.uniform(-3., 3., size=(60, 45))
+        original[::3] *= 2.**-24
+        original[::5] = 0.
+        base = to_bf16(original)
+        suspect = original.astype(np.float16).astype(np.float32)
+        budget = core.difference_rounding_budget(base, suspect, "BF16", "F16")
+        self.assertGreaterEqual(budget, np.linalg.norm(suspect.astype(np.float64) - base))
+        self.assertIsNone(core.analyze_delta(base, suspect, 1, budget).output_subspace)
+
     def test_known_spectrum_and_participation_ratio(self):
         s = np.array([5.0, 3.0, 1.0])
         dw = orthonormal(self.rng, 64, 3) @ np.diag(s) @ orthonormal(self.rng, 32, 3).T

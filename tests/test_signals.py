@@ -1149,6 +1149,51 @@ class TestAnomalySignals(unittest.TestCase):
         findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
         self.assertFalse(any("subspace expansion" in why for why in findings.values()), findings)
 
+    def test_jittered_planes_use_held_out_directions_and_strength(self):
+        rows = [row(layer_name(i)) for i in range(30)]
+        eye = np.eye(40)
+        for start, mixed, extra in product([0, 12, 24], [False, True], [0., 2., 16.]):
+            with self.subTest(start=start, mixed=mixed, extra=extra):
+                run = range(start, start + 6)
+                spaces, spectra = {}, {}
+                for r in rows:
+                    if r.layer in run:
+                        axes, values = list(eye[:4]), [5.] * 4
+                        if extra:
+                            axes.append(eye[-1])
+                            values.append(extra)
+                    else:
+                        anchor = 1 + r.layer % 3
+                        angle = np.radians(11. + r.layer % 6)
+                        axis = np.cos(angle) * eye[anchor] + np.sin(angle) * eye[5 + r.layer]
+                        axes, values = [axis], [12.]
+                        if not mixed or r.layer % 4:
+                            axes.append(eye[0])
+                            values.append(5.)
+                    spaces[r.name] = np.column_stack(axes)
+                    spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .25, 1.)
+                findings = subspace_outliers(rows, spaces, 3., spectra=spectra)
+                # The small orthogonal mode is weaker than ordinary held-out
+                # jitter. The large one must clear every background writer.
+                expected = {layer_name(i) for i in run} if extra == 16. else set()
+                self.assertEqual(set(findings), expected)
+                self.assertTrue(all("24/24 reference layers against the majority ambient span" in why
+                                    for why in findings.values()))
+
+    def test_random_high_dimensional_background_has_no_predictive_span(self):
+        rng = np.random.default_rng(511)
+        rows = [row(layer_name(i)) for i in range(30)]
+        spaces, spectra = {}, {}
+        for r in rows:
+            # Every writer shares a line, but the other axes wander
+            # independently, including where the measured rank increases.
+            rank = 4 if 10 <= r.layer < 16 else 2
+            axes = rng.normal(size=(80, rank))
+            axes[:, 0] = np.eye(80)[0]
+            spaces[r.name], _ = np.linalg.qr(axes)
+            spectra[r.name] = core.OutputSpectrum(np.full(rank, 8.), 0., .25, 1.)
+        self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
+
     def test_identical_majority_planes_do_not_require_an_ambient_fit(self):
         rows = [row(layer_name(i)) for i in range(28)]
         eye = np.eye(70)

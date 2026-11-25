@@ -132,6 +132,37 @@ def rounding_budget(base: np.ndarray, base_dtype: str, suspect_dtype: str) -> fl
     return budget
 
 
+def _storage_radius(weights: np.ndarray, dtype: str, exponent: int, arithmetic: float) -> np.ndarray:
+    # For w = mantissa * 2**e, half the larger adjacent spacing is
+    # 2**(e-2) times the spacing at one. Include the subnormal grid.
+    relative, absolute = _SPACING[dtype]
+    radius = np.ldexp(relative / 4, np.frexp(weights)[1])
+    radius[weights == 0] = 0.
+    np.maximum(radius, math.ldexp(absolute, -exponent), out=radius)
+    return radius + arithmetic * np.abs(weights)
+
+
+def difference_rounding_budget(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspect_dtype: str) -> float:
+    """Frobenius bound on the error in a difference of two stored matrices."""
+    extrema = [base.min(), base.max(), suspect.min(), suspect.max()]
+    if not np.isfinite(extrema).all():
+        return math.inf
+    _, exponent = math.frexp(max(_SPACING[base_dtype][1], _SPACING[suspect_dtype][1],
+                                 *(abs(float(v)) for v in extrema)))
+    rows, cols = base.shape
+    block_rows = max(1, _ROWS_PER_BLOCK * min(rows, cols) // cols)
+    arithmetic = 2 * np.finfo(base.dtype).eps + 8 * math.ulp(1.) * (rows + cols + 2)
+    energy = 0.
+    for start in range(0, rows, block_rows):
+        sl = slice(start, start + block_rows)
+        b = np.ldexp(base[sl], -exponent, dtype=np.float64)
+        s = np.ldexp(suspect[sl], -exponent, dtype=np.float64)
+        radii = _storage_radius(b, base_dtype, exponent, arithmetic)
+        radii += _storage_radius(s, suspect_dtype, exponent, arithmetic)
+        energy += float(np.einsum("ij,ij->", radii, radii))
+    return float(np.nextafter(np.ldexp(math.sqrt(energy), exponent), math.inf))
+
+
 def contraction_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
                        base_dtype: str, suspect_dtype: str) -> float | None:
     """Test one input direction against the contraction 2W_suspect − W_base.
@@ -263,15 +294,6 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
 
     arithmetic = 8 * math.ulp(1.) * (rows + cols + 2)
 
-    def storage_radius(weights: np.ndarray, dtype: str) -> np.ndarray:
-        # For a stored normal w = mantissa * 2**e, |mantissa| in [1/2,1),
-        # half the larger adjacent spacing is 2**(e-2) times spacing at 1.
-        relative, absolute = _SPACING[dtype]
-        radius = np.ldexp(relative / 4, np.frexp(weights)[1])
-        radius[weights == 0] = 0.
-        np.maximum(radius, math.ldexp(absolute, -exponent), out=radius)
-        return radius + arithmetic * np.abs(weights)
-
     gap = 0.
     # An absolute float64 floor also covers underflow in scaled arithmetic.
     budget = 16 * base.size * float(np.finfo(float).tiny)
@@ -279,8 +301,8 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
         bx, sx = b @ x, s @ x
         dx = sx - bx
         gap += float(sx @ dx)
-        eb = storage_radius(b, base_dtype) @ abs_x
-        es = storage_radius(s, suspect_dtype) @ abs_x
+        eb = _storage_radius(b, base_dtype, exponent, arithmetic) @ abs_x
+        es = _storage_radius(s, suspect_dtype, exponent, arithmetic) @ abs_x
         # Expanding (s+δs)(s+δs−b−δb) row by row gives (2s−b)δs
         # − sδb − δsδb + δs². The final square is nonnegative.
         budget += float(np.abs(sx + dx) @ es + np.abs(sx) @ eb + es @ eb
@@ -298,7 +320,8 @@ def removal_excess(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     selected = np.argsort(-np.abs(x), kind="stable")[:width]
     b = np.ldexp(base[:, selected], -exponent, dtype=np.float64)
     s = np.ldexp(suspect[:, selected], -exponent, dtype=np.float64)
-    rb, rs = storage_radius(b, base_dtype), storage_radius(s, suspect_dtype)
+    rb = _storage_radius(b, base_dtype, exponent, arithmetic)
+    rs = _storage_radius(s, suspect_dtype, exponent, arithmetic)
     z = x[selected]
     # Symmetry is required even if every quadratic response is nonpositive.
     skew, try_fit = skew_probe(b, s, rb, rs)

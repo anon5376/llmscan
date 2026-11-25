@@ -247,8 +247,10 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      stack of matching width. Output heads retain their location tier. The scanner uses a direction only
      when σ₁ > 2σ₂ or there is a single mode.
    - **Multi-direction edits.** A writer can have both a unique leading direction and several
-     measurable secondary modes. Each retained singular value must exceed the checkpoint
-     rounding budget used for `rank_one_excess` and the numerical floor of the Gram matrix.
+     measurable secondary modes. Each retained singular value must exceed a storage
+     rounding allowance and the numerical floor of the Gram matrix. For writer
+     subspaces the scanner can tighten the whole-tensor allowance by summing the two
+     checkpoints' entrywise rounding radii and taking their Frobenius norm.
      A twofold gap separates the selected modes from the remaining spectrum. A tall matrix
      can also have a measurable output space spanning all its input modes.
      The scanner compares resolved output spaces across layers of the same stack, writer kind,
@@ -292,11 +294,13 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      scanner tests for an abrupt expansion. A distance without a measured
      comparison supplies no forecast.
      The scanner also fits a principal ambient span to the majority observations,
-     independently of their depth order or adjacent angular steps. Its dimension
-     is the smallest whose maximum projection residual on every training writer
-     is within the angular tolerance. Each majority writer is held out in turn.
-     Every held-out fit must reproduce the full fit's dimension and orientation,
-     and must contain the held-out observation within that tolerance.
+     independently of their depth order or adjacent angular steps. Each writer is
+     held out in turn and projected onto the span of the remaining writers.
+     The scanner selects the smallest common number of principal axes that explains
+     each such projection within the angular tolerance and contains the whole
+     held-out writer within the coherence radius. At that dimension, every fit
+     must agree with the full fit's orientation. A direction unique to one writer
+     contributes its measured strength to the held-out bound.
      Additional modes must lie within the coherence radius of
      the orthogonal complement. Only their component outside the span counts
      toward expansion strength. The scanner can also track a majority plane

@@ -741,22 +741,32 @@ class _ExpansionReference(NamedTuple):
     ambient_aligned: bool = True
 
 
-def _ambient_frame(planes: list[np.ndarray], tolerance: float) -> np.ndarray:
-    """Smallest principal span containing every training plane within tolerance."""
-    axes, values, right = np.linalg.svd(np.column_stack(planes), full_matrices=False)
-    # A rarely repeated plane still counts as a whole observation. Test the
-    # largest residual of each writer, rather than the mean over writers.
-    cuts = np.cumsum([q.shape[1] for q in planes[:-1]])
-    coordinates = np.split(values[:, None] * right, cuts, axis=1)
-    low, high = max(q.shape[1] for q in planes), len(values)
-    limit = math.sin(tolerance)
+def _ambient_frame(planes: list[np.ndarray]) -> np.ndarray:
+    """Principal axes supported by the training writers, excluding the numerical null space."""
+    data = np.column_stack(planes)
+    axes, values, _ = np.linalg.svd(data, full_matrices=False)
+    floor = values[0] * max(data.shape) * np.finfo(values.dtype).eps
+    return axes[:, values > floor]
+
+
+def _predictive_rank(training: np.ndarray, plane: np.ndarray, rank: int,
+                     tolerance: float, radius: float) -> int | None:
+    """Smallest principal prefix explaining the held-out writer's predictable component."""
+    overlap = training.T @ plane
+    match = math.cos(radius)
+    if training.shape[1] < rank or np.linalg.svd(overlap, compute_uv=False).min() < match:
+        return None
+    low, high = rank, training.shape[1]
     while low < high:
-        rank = (low + high) // 2
-        if all(np.linalg.norm(q[rank:], ord=2) <= limit for q in coordinates):
-            high = rank
+        k = (low + high) // 2
+        # The tail contains only directions measured in other writers.
+        # The angle to the prefix also charges the one-off component.
+        if (np.linalg.norm(overlap[k:], ord=2) <= math.sin(tolerance)
+                and np.linalg.svd(overlap[:k], compute_uv=False).min() >= match):
+            high = k
         else:
-            low = rank + 1
-    return axes[:, :low]
+            low = k + 1
+    return low
 
 
 def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, tolerance: float, radius: float,
@@ -767,16 +777,27 @@ def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, toler
     # all of its columns from the fit, even if it is the only writer at its rank.
     axes, coordinates = np.linalg.qr(np.column_stack([bases[i] for i in background]))
     planes = np.split(coordinates, np.cumsum(ranks[background][:-1]), axis=1)
-    common = _ambient_frame(planes, tolerance)
+    rank = p
+    folds = []
+    for j, plane in enumerate(planes):
+        training = _ambient_frame(planes[:j] + planes[j+1:])
+        rank = _predictive_rank(training, plane, rank, tolerance, radius)
+        if rank is None or rank >= axes.shape[0]:
+            return None
+        # Keep only the shared prefix. A later writer may resolve an
+        # additional direction, in which case revisit the smaller fits.
+        folds.append(training[:, :rank].copy())
     # A single plane with repeated full anchors already has an observed
     # orientation for measuring ordinary complement motion. Centering it
     # between two alternating anchors could erase that motion from the bounds.
-    if common.shape[1] == axes.shape[0] or (common.shape[1] == p and fixed_plane):
+    if rank == p and fixed_plane:
         return None
+    common = _ambient_frame(planes)[:, :rank]
     frames = [axes @ common] * len(bases)
-    for j, i in enumerate(background):
-        held_out = _ambient_frame(planes[:j] + planes[j+1:], tolerance)
-        if common.shape != held_out.shape:
+    for j, (i, held_out) in enumerate(zip(background, folds)):
+        if held_out.shape[1] < rank:
+            held_out = _ambient_frame(planes[:j] + planes[j+1:])[:, :rank]
+        if held_out.shape[1] != rank or common.shape[1] != rank:
             return None
         agreement = np.linalg.svd(common.T @ held_out, compute_uv=False)
         if agreement.min() < math.cos(tolerance):
@@ -786,8 +807,6 @@ def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, toler
     for i, (frame, basis) in enumerate(zip(frames, bases)):
         cosines = np.linalg.svd(frame.T @ basis, compute_uv=False)
         paired = min(p, basis.shape[1])
-        if ranks[i] <= p and cosines[paired-1] < math.cos(tolerance):
-            return None
         # Alignment determines whether this span can certify a continuation.
         # Its complement is still measurable when the continued axes leave it.
         aligned = cosines[paired-1] >= math.cos(radius)
