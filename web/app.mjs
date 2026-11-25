@@ -210,11 +210,16 @@ function emptyState(title, ...body) {
   return h('div', { class: 'empty' }, h('h3', null, title), body);
 }
 
-function staleDeltaNote(model) {
-  return model.deltaUnranked && h('p', { class: 'note warning' },
+function deltaProvenanceNote(model) {
+  if (model.deltaSource === 'incompatible') return h('p', { class: 'note warning' },
     h('strong', null, 'Ignored incompatible delta.csv. '),
     'It does not match this inventory or ranking and may be left over from an earlier run. '
     + 'The ranking and inventory remain available. Run llmscan without ', h('code', null, '--inventory-only'), ' to refresh the spectra.');
+  if (model.deltaSource === 'unverified') return h('p', { class: 'note warning' },
+    h('strong', null, 'Unverified ΔW scan. '),
+    'These values may come from an interrupted scan or an earlier run. They were not used in this ranking. '
+    + 'Run llmscan without ', h('code', null, '--inventory-only'), ' for a fresh scan.');
+  return null;
 }
 
 const rankingStatsStatus = (model) => model.hasRankingStats
@@ -271,7 +276,7 @@ function pager(page, total, onPage) {
 const reshaped = (t) => t.baseDtype !== '' && t.suspectDtype !== '' && t.baseShape !== t.suspectShape;
 const parameterSides = (t) => [t.baseShape, t.suspectShape].map((shape) => formatCount(shapeCount(shape)));
 
-const SORT_NAMES = { tier: 'tier', name: 'tensor name', layer: 'layer', kind: 'kind', effectiveRank: 'effective rank', sv1: 'σ₁' };
+const SORT_NAMES = { tier: 'tier', name: 'tensor name', layer: 'layer', kind: 'kind', rankEffectiveRank: 'effective rank', rankSv1: 'σ₁' };
 
 const COLUMNS = {
   rank: { key: 'rank', label: '#', class: 'num narrow', cell: (t) => formatCount(t.rank) },
@@ -352,7 +357,9 @@ function rankingView(model) {
         { disabled: count === 0 && !view.tiers.has(id) }))),
     searchBox('ranking-filter', view.query, (query) => { view.query = query; view.page = 0; state.refresh(); }),
   ];
-  const columns = [COLUMNS.rank, COLUMNS.tier, COLUMNS.reason, COLUMNS.layer, COLUMNS.kind, COLUMNS.effectiveRank, COLUMNS.sv1];
+  const columns = [COLUMNS.rank, COLUMNS.tier, COLUMNS.reason, COLUMNS.layer, COLUMNS.kind,
+    { ...COLUMNS.effectiveRank, key: 'rankEffectiveRank', cell: (t) => formatNumber(t.rankEffectiveRank) },
+    { ...COLUMNS.sv1, key: 'rankSv1', cell: (t) => formatNumber(t.rankSv1) }];
   return [
     !model.hasDelta && h('p', { class: 'note' },
       h('strong', null, 'Full ΔW spectra unavailable. '), rankingStatsStatus(model)),
@@ -494,9 +501,9 @@ function deltaView(model) {
   state.rows = [];
   if (!model.hasDelta) {
     return emptyState('Full ΔW spectra unavailable',
-      !model.deltaUnranked && h('p', null, 'delta.csv was not included or has no tensor rows.'),
+      model.deltaSource === 'absent' && h('p', null, 'delta.csv was not included or has no tensor rows.'),
       h('p', null, rankingStatsStatus(model)),
-      !model.deltaUnranked && h('p', null, 'If this was an inventory-only run, rerun llmscan without ',
+      model.deltaSource === 'absent' && h('p', null, 'If this was an inventory-only run, rerun llmscan without ',
         h('code', null, '--inventory-only'), ' to scan for spectra.'));
   }
   const s = model.deltaSummary;
@@ -575,18 +582,20 @@ function deltaFacts(model, t) {
   if (!t.scanned) {
     const hasSummary = t.effectiveRank != null || t.sv1 != null;
     return [
-      staleDeltaNote(model),
+      deltaProvenanceNote(model),
       h('p', null, model.hasDelta ? `Not in delta.csv. ${SCAN_SCOPE}` : 'No spectrum available for this tensor.'),
       hasSummary && [h('p', { class: 'fine' }, 'ΔW summary from ranking.csv'), h('dl', { class: 'facts' }, summaryFacts(), yardstickFact(t))],
     ];
   }
   if (!t.spectrum.length && t.effectiveRank == null) {
-    return h('p', null, t.status === 'identical' ? 'ΔW = 0: identical tensors are listed in delta.csv without stats.' : 'delta.csv lists this tensor without stats.');
+    return [deltaProvenanceNote(model),
+      h('p', null, t.status === 'identical' ? 'ΔW = 0: identical tensors are listed in delta.csv without stats.' : 'delta.csv lists this tensor without stats.')];
   }
   const kind = canonicalKind(t.kind);
   const peers = model.measured.filter((p) => canonicalKind(p.kind) === kind && p !== t && hasSpectrum(p));
   const drawn = spectrumRuns(t.spectrum).flat().length;
   return [
+    deltaProvenanceNote(model),
     h('dl', { class: 'facts' },
       summaryFacts(),
       fact('σ₁ / σ₂', formatNumber(t.gap)),
@@ -685,7 +694,7 @@ function renderPanel() {
   state.refresh = null;
   state.redrawCharts = null;
   panel.setAttribute('aria-labelledby', `tab-${state.tab}`);
-  keepFocus(panel, () => panel.replaceChildren(...[staleDeltaNote(state.model), VIEWS[state.tab](state.model)].flat(Infinity).filter(Boolean)));
+  keepFocus(panel, () => panel.replaceChildren(...[deltaProvenanceNote(state.model), VIEWS[state.tab](state.model)].flat(Infinity).filter(Boolean)));
   for (const tab of main.querySelectorAll('[role="tab"]')) {
     const active = tab.id === `tab-${state.tab}`;
     tab.setAttribute('aria-selected', String(active));

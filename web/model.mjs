@@ -110,24 +110,32 @@ function blankTensor(name) {
     name, layer: null, kind: '', status: '',
     baseDtype: '', suspectDtype: '', baseShape: '', suspectShape: '', numel: null,
     rank: null, tier: null, reason: '', yardstick: null,
+    rankEffectiveRank: null, rankSv1: null,
     scanned: false, effectiveRank: null, sv1: null, spectrum: [], gap: null, seconds: null,
   };
 }
 
-const hasStats = (row) => row?.effectiveRank != null || row?.sv1 != null;
+const hasRankStats = (tensor) => tensor.rankEffectiveRank != null || tensor.rankSv1 != null;
 
-function deltaDisagrees(rows, tensors, ranking) {
-  if (!rows.length) return false;
+function scanProvenance(rows, tensors, ranking, hasRankingStats) {
+  if (!rows.length) return 'absent';
   // An inventory-only rerun leaves the prior delta.csv untouched. Check the current inventory and
   // both summary columns before joining, so an incompatible scan cannot supply any tensor facts.
   const seen = new Set();
+  let unverified = false;
   for (const row of rows) {
     const t = tensors.get(row.name);
-    if (!t || t.status !== row.status || t.kind !== row.kind || t.layer !== parseNumber(row.layer) || t.baseShape !== row.shape) return true;
-    if (!Object.is(t.effectiveRank, parseNumber(row.effective_rank)) || !Object.is(t.sv1, parseNumber(row.sv_001))) return true;
+    if (!t || t.status !== row.status || t.kind !== row.kind || t.layer !== parseNumber(row.layer) || t.baseShape !== row.shape) return 'incompatible';
+    const er = parseNumber(row.effective_rank), sv1 = parseNumber(row.sv_001);
+    if (!Object.is(t.rankEffectiveRank, er) || !Object.is(t.rankSv1, sv1)) {
+      if (hasRankingStats || t.status === 'identical') return 'incompatible';
+      // The CLI writes the same ranking both when it skips a scan and when it stops one early.
+      unverified = true;
+    }
     seen.add(row.name);
   }
-  return ranking.some((t) => hasStats(t) && !seen.has(t.name));
+  if (ranking.some((t) => hasRankStats(t) && !seen.has(t.name))) return 'incompatible';
+  return unverified ? 'unverified' : 'compatible';
 }
 
 /**
@@ -157,17 +165,20 @@ export function buildWorkbench(report) {
     t.rank = parseNumber(row.rank) ?? i + 1;
     t.tier = row.tier ?? '';
     t.reason = row.reason ?? '';
-    t.effectiveRank = parseNumber(row.effective_rank);
-    t.sv1 = parseNumber(row.sv_001);
+    t.rankEffectiveRank = t.effectiveRank = parseNumber(row.effective_rank);
+    t.rankSv1 = t.sv1 = parseNumber(row.sv_001);
     return t;
   });
 
   const deltaRows = report.delta ?? [];
-  const deltaUnranked = deltaDisagrees(deltaRows, tensors, ranking);
-  const delta = (deltaUnranked ? [] : deltaRows).map((row) => {
+  const hasRankingStats = ranking.some(hasRankStats);
+  const deltaSource = scanProvenance(deltaRows, tensors, ranking, hasRankingStats);
+  const delta = (deltaSource === 'incompatible' ? [] : deltaRows).map((row) => {
     const spectrum = spectrumOf(row);
     return Object.assign(tensors.get(row.name), {
       scanned: true,
+      effectiveRank: parseNumber(row.effective_rank),
+      sv1: parseNumber(row.sv_001),
       spectrum,
       gap: usable(spectrum[0]) && usable(spectrum[1]) ? spectrum[0] / spectrum[1] : null,
       seconds: parseNumber(row.seconds),
@@ -204,7 +215,7 @@ export function buildWorkbench(report) {
   // Only expected kinds are judged this way, and a changed tensor of any other kind is the one ranked T2.
   const groups = new Map();
   for (const t of ranking) {
-    if (t.status !== 'changed' || t.tier === 'T2' || !judgeable(t)) continue;
+    if (t.status !== 'changed' || t.tier === 'T2' || !hasRankStats(t) || !judgeable(t)) continue;
     const stat = t.effectiveRank != null ? 'effectiveRank' : 'sv1';
     const key = `${stat} ${canonicalKind(t.kind)}`;
     if (!groups.has(key)) groups.set(key, { stat, kind: canonicalKind(t.kind), members: [] });
@@ -219,7 +230,7 @@ export function buildWorkbench(report) {
     base: report.base ?? '', suspect: report.suspect ?? '',
     baseName: shortName(report.base) || 'base', suspectName: shortName(report.suspect) || 'suspect',
     tensors, inventory, ranking, delta,
-    hasDelta: delta.length > 0, deltaUnranked, hasRankingStats: ranking.some(hasStats),
+    hasDelta: delta.length > 0, deltaSource, hasRankingStats,
     tierCounts, statusCounts, statuses,
     kinds: [...kinds.values()].sort((a, b) => changedOf(b) - changedOf(a) || naturalCompare(a.kind, b.kind)),
     totalParams, identicalParams,
