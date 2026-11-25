@@ -117,6 +117,12 @@ function blankTensor(name) {
 
 const hasRankStats = (tensor) => tensor.rankEffectiveRank != null || tensor.rankSv1 != null;
 
+// Eligibility in delta.py: only matching 2-D shapes with a float dtype on both sides.
+const FLOAT_DTYPES = new Set(['F64', 'F32', 'F16', 'BF16']);
+const SCAN_STATUSES = new Set(['identical', 'changed', 'dtype_mismatch']);
+const canScan = (t) => SCAN_STATUSES.has(t.status) && /^\d+x\d+$/.test(t.baseShape) && t.baseShape === t.suspectShape
+  && FLOAT_DTYPES.has(t.baseDtype) && FLOAT_DTYPES.has(t.suspectDtype);
+
 function scanProvenance(rows, tensors, ranking, hasRankingStats) {
   if (!rows.length) return 'absent';
   // An inventory-only rerun leaves the prior delta.csv untouched. Check the current inventory and
@@ -125,7 +131,8 @@ function scanProvenance(rows, tensors, ranking, hasRankingStats) {
   let unverified = false;
   for (const row of rows) {
     const t = tensors.get(row.name);
-    if (!t || t.status !== row.status || t.kind !== row.kind || t.layer !== parseNumber(row.layer) || t.baseShape !== row.shape) return 'incompatible';
+    if (!t || !canScan(t) || t.status !== row.status || t.kind !== row.kind
+      || t.layer !== parseNumber(row.layer) || t.baseShape !== row.shape) return 'incompatible';
     const er = parseNumber(row.effective_rank), sv1 = parseNumber(row.sv_001);
     if (!Object.is(t.rankEffectiveRank, er) || !Object.is(t.rankSv1, sv1)) {
       if (hasRankingStats || t.status === 'identical') return 'incompatible';

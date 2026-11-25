@@ -194,6 +194,18 @@ test("an interrupted scan can supply unverified spectra without changing the ran
   assert.deepEqual(model.measured, [tensor]);
 });
 
+test("a rerun cannot show obsolete spectra for tensors the CLI no longer scans", () => {
+  const [row] = REPORT.delta;
+  const ranking = REPORT.ranking.map((r) => ({ ...r, effective_rank: "", sv_001: "" }));
+  const oldInventory = REPORT.inventory.find((r) => r.name === row.name);
+  for (const update of [{ base_dtype: "Q4_0", suspect_dtype: "Q4_0" }, { suspect_shape: "8x9" }]) {
+    const inventory = REPORT.inventory.map((r) => r === oldInventory ? { ...r, ...update } : r);
+    const model = buildWorkbench({ ...REPORT, inventory, ranking, delta: [row] });
+    assert.equal(model.deltaSource, "incompatible");
+    assert.deepEqual(model.tensors.get(row.name).spectrum, []);
+  }
+});
+
 test("a completed ranking without delta keeps its summaries but not spectra", () => {
   const model = buildWorkbench({ ...REPORT, delta: [] });
   const tensor = model.tensors.get("model.layers.10.mlp.down_proj.weight");
