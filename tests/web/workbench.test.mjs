@@ -146,16 +146,73 @@ test("an inventory-only report keeps its ranking and has no ΔW stats", () => {
 
 test("a delta.csv left behind by an earlier run is flagged, not presented as this ranking's stats", () => {
   const withoutStats = REPORT.ranking.map((r) => ({ ...r, effective_rank: "", sv_001: "" }));
-  assert.equal(buildWorkbench(REPORT).deltaUnranked, false);
-  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats }).deltaUnranked, true); // --inventory-only rerun
-  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats, delta: [] }).deltaUnranked, false);
+  assert.equal(buildWorkbench(REPORT).deltaSource, "compatible");
+  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats }).deltaSource, "unverified"); // --inventory-only rerun or interrupted scan
+  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats, delta: [] }).deltaSource, "absent");
   // the suspect was replaced before the rerun: what the old scan measured is identical now, so no longer ranked
   const moved = REPORT.ranking.slice(0, 1); // only a T1 row: it never has stats
-  assert.equal(buildWorkbench({ ...REPORT, ranking: moved }).deltaUnranked, true);
+  const inventory = REPORT.inventory.map((r) => r.status === "changed" ? { ...r, status: "identical" } : r);
+  assert.equal(buildWorkbench({ ...REPORT, inventory, ranking: moved }).deltaSource, "incompatible");
   // the earlier scan compared identical weights: no stats to miss, but its rows call changed tensors identical
   const identical = REPORT.delta.map((r) => ({ ...r, status: "identical", effective_rank: "", sv_001: "" }));
-  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats, delta: identical }).deltaUnranked, true);
-  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats, delta: identical.slice(-1) }).deltaUnranked, false);
+  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats, delta: identical }).deltaSource, "incompatible");
+  assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats, delta: identical.slice(-1) }).deltaSource, "compatible");
+});
+
+test("an incompatible delta never contributes scan rows, spectra or ranking stats", () => {
+  const ranking = REPORT.ranking.map((r) => ({ ...r, effective_rank: "", sv_001: "" }));
+  const orphan = deltaRow("lm_head.old.weight", "", "lm_head", "identical", "");
+  const stale = buildWorkbench({ ...REPORT, ranking, delta: [...REPORT.delta, orphan] });
+  assert.equal(stale.deltaSource, "incompatible");
+  assert.equal(stale.hasDelta, false);
+  assert.equal(stale.hasRankingStats, false);
+  assert.deepEqual(stale.delta, []);
+  assert.equal(stale.tensors.has(orphan.name), false);
+  assert.ok(stale.ranking.every((t) => !t.scanned && t.effectiveRank === null && t.sv1 === null && !t.spectrum.length));
+
+  const mismatches = [
+    { ...REPORT.delta[0], effective_rank: "9" },
+    { ...REPORT.delta[0], shape: "4x16" },
+  ];
+  for (const row of mismatches) {
+    const report = buildWorkbench({ ...REPORT, delta: [row, ...REPORT.delta.slice(1)] });
+    assert.equal(report.deltaSource, "incompatible");
+    assert.equal(report.tensors.get(row.name).effectiveRank, 1.01);
+    assert.equal(report.hasRankingStats, true);
+    assert.deepEqual(report.measured, []);
+  }
+});
+
+test("an interrupted scan can supply unverified spectra without changing the ranking", () => {
+  const ranking = REPORT.ranking.map((r) => ({ ...r, effective_rank: "", sv_001: "" }));
+  const model = buildWorkbench({ ...REPORT, ranking, delta: REPORT.delta.slice(0, 1) });
+  const tensor = model.ranking.find((t) => t.name === REPORT.delta[0].name);
+  assert.equal(model.deltaSource, "unverified");
+  assert.equal(model.hasRankingStats, false);
+  assert.deepEqual([tensor.rankEffectiveRank, tensor.rankSv1, tensor.yardstick], [null, null, null]);
+  assert.deepEqual([tensor.effectiveRank, tensor.sv1, tensor.spectrum], [1.01, 0.5, [0.5, 0.005, 0.004]]);
+  assert.deepEqual(model.measured, [tensor]);
+});
+
+test("a rerun cannot show obsolete spectra for tensors the CLI no longer scans", () => {
+  const [row] = REPORT.delta;
+  const ranking = REPORT.ranking.map((r) => ({ ...r, effective_rank: "", sv_001: "" }));
+  const oldInventory = REPORT.inventory.find((r) => r.name === row.name);
+  for (const update of [{ base_dtype: "Q4_0", suspect_dtype: "Q4_0" }, { suspect_shape: "8x9" }]) {
+    const inventory = REPORT.inventory.map((r) => r === oldInventory ? { ...r, ...update } : r);
+    const model = buildWorkbench({ ...REPORT, inventory, ranking, delta: [row] });
+    assert.equal(model.deltaSource, "incompatible");
+    assert.deepEqual(model.tensors.get(row.name).spectrum, []);
+  }
+});
+
+test("a completed ranking without delta keeps its summaries but not spectra", () => {
+  const model = buildWorkbench({ ...REPORT, delta: [] });
+  const tensor = model.tensors.get("model.layers.10.mlp.down_proj.weight");
+  assert.equal(model.hasDelta, false);
+  assert.equal(model.hasRankingStats, true);
+  assert.deepEqual([tensor.effectiveRank, tensor.sv1, tensor.scanned, tensor.spectrum], [6, 0.9, false, []]);
+  assert.equal(tensor.yardstick.median, 1.005);
 });
 
 test("a scan that had nothing to analyse keeps its T3 rows and is not called stale", () => {
@@ -167,7 +224,7 @@ test("a scan that had nothing to analyse keeps its T3 rows and is not called sta
     inventory: [{ name, layer: "0", kind: "down_proj", status: "changed", base_dtype: "F32", suspect_dtype: "F32", base_shape: "32x64x1", suspect_shape: "32x64x1", numel: "2048" }],
     ranking: [{ rank: "1", tier: "T3", name, layer: "0", kind: "down_proj", status: "changed", effective_rank: "", sv_001: "", reason }],
   });
-  assert.deepEqual([model.hasDelta, model.deltaUnranked, model.tierCounts.get("T3")], [false, false, 1]);
+  assert.deepEqual([model.hasDelta, model.deltaSource, model.tierCounts.get("T3")], [false, "absent", 1]);
   assert.deepEqual([model.ranking[0].tier, model.ranking[0].reason, model.ranking[0].scanned], ["T3", reason, false]);
 });
 

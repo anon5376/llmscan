@@ -26,7 +26,8 @@ const REPORT_FILES = new Set([PAIR, INVENTORY, RANKING, DELTA]);
  *
  * @param {Iterable<File>} files the files of one output folder, e.g. the FileList of an
  *   `<input type="file" webkitdirectory>`; unrelated files are ignored without being read.
- * @returns {Promise<Report>} `delta` is empty when the folder has no delta.csv (`--inventory-only`).
+ * @returns {Promise<Report>} `delta` is empty when the folder has no delta.csv. Its rows are parsed but
+ *   may come from an earlier run; the workbench checks them before use.
  *   Rejects with an Error whose message can be shown to the user as is.
  */
 export async function readReport(files) {
@@ -39,14 +40,16 @@ export async function readReport(files) {
   const pair = parsePair(await text(found.get(PAIR), PAIR));
   const inventory = await table(found.get(INVENTORY), INVENTORY);
   const ranking = await table(found.get(RANKING), RANKING);
-  const delta = found.has(DELTA) ? await table(found.get(DELTA), DELTA) : [];
-  const known = tensorNames(inventory, INVENTORY);
-  for (const [rows, name] of [[ranking, RANKING], [delta, DELTA]]) {
-    const stray = [...tensorNames(rows, name)].find((tensor) => !known.has(tensor));
-    if (stray !== undefined) {
-      throw new Error(`${name} lists the tensor ${quote(stray)}, which ${INVENTORY} does not have, so these files come from different comparisons.`);
+  const known = indexTensors(inventory, INVENTORY);
+  for (const [name, row] of indexTensors(ranking, RANKING)) {
+    const entry = known.get(name);
+    if (!entry) throw new Error(`${RANKING} lists the tensor ${quote(name)}, which ${INVENTORY} does not have, so these files come from different comparisons.`);
+    for (const field of ["layer", "kind", "status"]) {
+      if (row[field] !== entry[field]) throw new Error(`${RANKING} and ${INVENTORY} disagree on the ${field} of ${quote(name)}. Choose files from one comparison.`);
     }
   }
+  const delta = found.has(DELTA) ? await table(found.get(DELTA), DELTA) : [];
+  indexTensors(delta, DELTA);
   return { ...pair, inventory, ranking, delta };
 }
 
@@ -118,11 +121,11 @@ async function table(file, name) {
   });
 }
 
-function tensorNames(rows, name) {
-  const names = new Set();
+function indexTensors(rows, name) {
+  const names = new Map();
   for (const row of rows) {
     if (names.has(row.name)) throw new Error(`${name} lists the tensor ${quote(row.name)} twice.`);
-    names.add(row.name);
+    names.set(row.name, row);
   }
   return names;
 }

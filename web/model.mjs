@@ -110,8 +110,39 @@ function blankTensor(name) {
     name, layer: null, kind: '', status: '',
     baseDtype: '', suspectDtype: '', baseShape: '', suspectShape: '', numel: null,
     rank: null, tier: null, reason: '', yardstick: null,
+    rankEffectiveRank: null, rankSv1: null,
     scanned: false, effectiveRank: null, sv1: null, spectrum: [], gap: null, seconds: null,
   };
+}
+
+const hasRankStats = (tensor) => tensor.rankEffectiveRank != null || tensor.rankSv1 != null;
+
+// Eligibility in delta.py: only matching 2-D shapes with a float dtype on both sides.
+const FLOAT_DTYPES = new Set(['F64', 'F32', 'F16', 'BF16']);
+const SCAN_STATUSES = new Set(['identical', 'changed', 'dtype_mismatch']);
+const canScan = (t) => SCAN_STATUSES.has(t.status) && /^\d+x\d+$/.test(t.baseShape) && t.baseShape === t.suspectShape
+  && FLOAT_DTYPES.has(t.baseDtype) && FLOAT_DTYPES.has(t.suspectDtype);
+
+function scanProvenance(rows, tensors, ranking, hasRankingStats) {
+  if (!rows.length) return 'absent';
+  // An inventory-only rerun leaves the prior delta.csv untouched. Check the current inventory and
+  // both summary columns before joining, so an incompatible scan cannot supply any tensor facts.
+  const seen = new Set();
+  let unverified = false;
+  for (const row of rows) {
+    const t = tensors.get(row.name);
+    if (!t || !canScan(t) || t.status !== row.status || t.kind !== row.kind
+      || t.layer !== parseNumber(row.layer) || t.baseShape !== row.shape) return 'incompatible';
+    const er = parseNumber(row.effective_rank), sv1 = parseNumber(row.sv_001);
+    if (!Object.is(t.rankEffectiveRank, er) || !Object.is(t.rankSv1, sv1)) {
+      if (hasRankingStats || t.status === 'identical') return 'incompatible';
+      // The CLI writes the same ranking both when it skips a scan and when it stops one early.
+      unverified = true;
+    }
+    seen.add(row.name);
+  }
+  if (ranking.some((t) => hasRankStats(t) && !seen.has(t.name))) return 'incompatible';
+  return unverified ? 'unverified' : 'compatible';
 }
 
 /**
@@ -136,37 +167,30 @@ export function buildWorkbench(report) {
     numel: parseNumber(row.numel),
   }));
 
-  const delta = (report.delta ?? []).map((row) => {
-    const spectrum = spectrumOf(row);
-    return Object.assign(tensor(row), {
-      scanned: true,
-      baseShape: tensors.get(row.name ?? '').baseShape || (row.shape ?? ''),
-      effectiveRank: parseNumber(row.effective_rank),
-      sv1: spectrum[0] ?? null,
-      spectrum,
-      gap: usable(spectrum[0]) && usable(spectrum[1]) ? spectrum[0] / spectrum[1] : null,
-      seconds: parseNumber(row.seconds),
-    });
-  });
-
   const ranking = (report.ranking ?? []).map((row, i) => {
     const t = tensor(row);
     t.rank = parseNumber(row.rank) ?? i + 1;
     t.tier = row.tier ?? '';
     t.reason = row.reason ?? '';
-    t.effectiveRank ??= parseNumber(row.effective_rank);
-    t.sv1 ??= parseNumber(row.sv_001);
+    t.rankEffectiveRank = t.effectiveRank = parseNumber(row.effective_rank);
+    t.rankSv1 = t.sv1 = parseNumber(row.sv_001);
     return t;
   });
 
-  // Every run rewrites inventory.csv and ranking.csv, but only a scan rewrites delta.csv. A scan copies each
-  // tensor's status from the inventory, and the ranking computed from it lists every tensor it has stats for,
-  // with them. A row that breaks either rule means this delta.csv is not the one the ranking was computed from.
-  const hasStats = (row) => (row.effective_rank ?? '') !== '' || (row.sv_001 ?? '') !== '';
-  const rankedWithStats = new Set((report.ranking ?? []).filter(hasStats).map((row) => row.name));
-  const inventoryStatus = new Map((report.inventory ?? []).map((row) => [row.name, row.status]));
-  const deltaUnranked = (report.delta ?? []).some((row) =>
-    (hasStats(row) && !rankedWithStats.has(row.name)) || inventoryStatus.get(row.name) !== row.status);
+  const deltaRows = report.delta ?? [];
+  const hasRankingStats = ranking.some(hasRankStats);
+  const deltaSource = scanProvenance(deltaRows, tensors, ranking, hasRankingStats);
+  const delta = (deltaSource === 'incompatible' ? [] : deltaRows).map((row) => {
+    const spectrum = spectrumOf(row);
+    return Object.assign(tensors.get(row.name), {
+      scanned: true,
+      effectiveRank: parseNumber(row.effective_rank),
+      sv1: parseNumber(row.sv_001),
+      spectrum,
+      gap: usable(spectrum[0]) && usable(spectrum[1]) ? spectrum[0] / spectrum[1] : null,
+      seconds: parseNumber(row.seconds),
+    });
+  });
 
   const tierCounts = new Map(TIERS.map((t) => [t.id, 0]));
   for (const t of ranking) tierCounts.set(t.tier, (tierCounts.get(t.tier) ?? 0) + 1);
@@ -198,7 +222,7 @@ export function buildWorkbench(report) {
   // Only expected kinds are judged this way, and a changed tensor of any other kind is the one ranked T2.
   const groups = new Map();
   for (const t of ranking) {
-    if (t.status !== 'changed' || t.tier === 'T2' || !judgeable(t)) continue;
+    if (t.status !== 'changed' || t.tier === 'T2' || !hasRankStats(t) || !judgeable(t)) continue;
     const stat = t.effectiveRank != null ? 'effectiveRank' : 'sv1';
     const key = `${stat} ${canonicalKind(t.kind)}`;
     if (!groups.has(key)) groups.set(key, { stat, kind: canonicalKind(t.kind), members: [] });
@@ -213,7 +237,7 @@ export function buildWorkbench(report) {
     base: report.base ?? '', suspect: report.suspect ?? '',
     baseName: shortName(report.base) || 'base', suspectName: shortName(report.suspect) || 'suspect',
     tensors, inventory, ranking, delta,
-    hasDelta: delta.length > 0, deltaUnranked,
+    hasDelta: delta.length > 0, deltaSource, hasRankingStats,
     tierCounts, statusCounts, statuses,
     kinds: [...kinds.values()].sort((a, b) => changedOf(b) - changedOf(a) || naturalCompare(a.kind, b.kind)),
     totalParams, identicalParams,
