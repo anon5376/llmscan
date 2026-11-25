@@ -87,6 +87,16 @@ class TestBlasThreadCap(unittest.TestCase):
             cap.restore()
         discover.assert_not_called()
 
+    def test_mmapped_blas_named_checkpoint_is_never_discovered(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "libopenblas.so.safetensors"
+            write_safetensors(p, {"w": ("F32", np.ones((4, 4), np.float32))})
+            with Checkpoint(p) as ck:
+                _ = ck.to_float32("w")  # force mmap of the checkpoint file
+                discovered = _blas._loaded_blas_paths()
+        self.assertNotIn(str(p), discovered)
+        self.assertIsNone(_blas._open_loaded_lib(str(p)))
+
 
 class TestSerialFallbacks(unittest.TestCase):
     def setUp(self):

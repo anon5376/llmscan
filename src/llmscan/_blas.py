@@ -1,9 +1,10 @@
 """Best-effort runtime BLAS thread cap without third-party dependencies.
 
 Used only when multiple tensor workers run concurrently so nested BLAS threads do not
-oversubscribe CPU cores. Leaves single-threaded / serial scans untouched, never raises an
-existing lower BLAS limit, and degrades to a no-op on backends without a runtime setter
-(such as Apple Accelerate).
+oversubscribe CPU cores. Only inspects shared libraries already loaded by the dynamic
+linker (never data mmaps or unverified filesystem paths), leaves serial scans untouched,
+never raises an existing lower BLAS limit, and degrades to a no-op on backends without a
+runtime setter (such as Apple Accelerate).
 """
 
 from __future__ import annotations
@@ -11,10 +12,7 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
-from pathlib import Path
 from typing import Callable
-
-import numpy as np
 
 _LIB_MARKERS = ("openblas", "mkl_rt", "blis")
 _BLAS_SYMBOLS = (
@@ -26,33 +24,56 @@ _BLAS_SYMBOLS = (
     ("bli_thread_get_num_threads", "bli_thread_set_num_threads"),
 )
 
+_RTLD_NOLOAD_LINUX = 4
+_RTLD_NOLOAD_DARWIN = 0x10
 
-def _matches_blas(path: str) -> bool:
+
+def _matches_blas_lib(path: str) -> bool:
     name = os.path.basename(path).lower()
-    return any(marker in name for marker in _LIB_MARKERS)
+    if not any(marker in name for marker in _LIB_MARKERS):
+        return False
+    if sys.platform.startswith("linux"):
+        return name.endswith(".so") or ".so." in name
+    if sys.platform == "darwin":
+        return name.endswith(".dylib")
+    if os.name == "nt":
+        return name.endswith(".dll")
+    return False
 
 
 def _loaded_blas_paths() -> list[str]:
+    """Paths of BLAS shared libraries already loaded by the dynamic linker."""
     paths: list[str] = []
     seen: set[str] = set()
 
     def add(p: str) -> None:
-        if p and p not in seen and _matches_blas(p) and os.path.isfile(p):
+        if p and p not in seen and _matches_blas_lib(p):
             seen.add(p)
             paths.append(p)
 
     if sys.platform.startswith("linux"):
         try:
-            with open("/proc/self/maps", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    parts = line.strip().split(maxsplit=5)
-                    if len(parts) == 6 and parts[5].startswith("/"):
-                        add(parts[5])
-        except OSError:
+            class _DlPhdrInfo(ctypes.Structure):
+                _fields_ = [("dlpi_addr", ctypes.c_void_p), ("dlpi_name", ctypes.c_char_p)]
+
+            cb_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(_DlPhdrInfo), ctypes.c_size_t, ctypes.c_void_p)
+            libc = ctypes.CDLL(None)
+            libc.dl_iterate_phdr.argtypes = [cb_type, ctypes.c_void_p]
+            libc.dl_iterate_phdr.restype = ctypes.c_int
+
+            def _cb(info, _size, _data):
+                raw = info.contents.dlpi_name
+                if raw:
+                    add(os.fsdecode(raw))
+                return 0
+
+            libc.dl_iterate_phdr(cb_type(_cb), None)
+        except (OSError, AttributeError):
             pass
     elif sys.platform == "darwin":
         try:
             libc = ctypes.CDLL(None)
+            libc._dyld_image_count.argtypes = []
             libc._dyld_image_count.restype = ctypes.c_uint32
             libc._dyld_get_image_name.argtypes = [ctypes.c_uint32]
             libc._dyld_get_image_name.restype = ctypes.c_char_p
@@ -91,21 +112,36 @@ def _loaded_blas_paths() -> list[str]:
         except (OSError, AttributeError):
             pass
 
-    np_dir = Path(np.__file__).resolve().parent
-    for lib_dir in (np_dir / ".dylibs", np_dir.parent / "numpy.libs"):
-        if lib_dir.is_dir():
-            for entry in sorted(lib_dir.iterdir()):
-                add(str(entry))
-
     return paths
+
+
+def _open_loaded_lib(path: str) -> ctypes.CDLL | None:
+    """Open an already-loaded shared library without ever loading new native code from disk."""
+    try:
+        if sys.platform.startswith("linux"):
+            return ctypes.CDLL(path, mode=ctypes.RTLD_LOCAL | _RTLD_NOLOAD_LINUX)
+        if sys.platform == "darwin":
+            return ctypes.CDLL(path, mode=ctypes.RTLD_LOCAL | _RTLD_NOLOAD_DARWIN)
+        if os.name == "nt":
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("Kernel32.dll")
+            kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+            kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+            handle = kernel32.GetModuleHandleW(path)
+            if not handle:
+                return None
+            return ctypes.CDLL(path, handle=handle)
+    except OSError:
+        return None
+    return None
 
 
 def _discover_controls() -> list[tuple[Callable[[], int], Callable[[int], None]]]:
     controls: list[tuple[Callable[[], int], Callable[[int], None]]] = []
     for path in _loaded_blas_paths():
-        try:
-            lib = ctypes.CDLL(path)
-        except OSError:
+        lib = _open_loaded_lib(path)
+        if lib is None:
             continue
         for get_name, set_name in _BLAS_SYMBOLS:
             get_fn = getattr(lib, get_name, None)
