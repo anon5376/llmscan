@@ -122,6 +122,13 @@ class TestBlasThreadCap(unittest.TestCase):
         self.assertNotIn(str(p), discovered)
         self.assertIsNone(_blas._open_loaded_lib(str(p)))
 
+    def test_matches_system_blas_aliases(self):
+        with mock.patch.object(_blas.sys, "platform", "linux"):
+            self.assertTrue(_blas._matches_blas_lib("/usr/lib/x86_64-linux-gnu/libblas.so.3"))
+            self.assertTrue(_blas._matches_blas_lib("/usr/lib/x86_64-linux-gnu/libcblas.so.3"))
+            self.assertTrue(_blas._matches_blas_lib("/opt/libscipy_openblas64_-1234.so"))
+            self.assertFalse(_blas._matches_blas_lib("/tmp/libblas.safetensors"))
+
 
 class TestSerialFallbacks(unittest.TestCase):
     def setUp(self):

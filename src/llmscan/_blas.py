@@ -14,7 +14,7 @@ import os
 import sys
 from typing import Callable
 
-_LIB_MARKERS = ("openblas", "mkl_rt", "blis")
+_LIB_MARKERS = ("blas", "mkl_rt", "blis")
 _BLAS_SYMBOLS = (
     ("scipy_openblas_get_num_threads64_", "scipy_openblas_set_num_threads64_"),
     ("scipy_openblas_get_num_threads", "scipy_openblas_set_num_threads"),
