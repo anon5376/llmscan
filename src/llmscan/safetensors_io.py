@@ -210,20 +210,29 @@ class Checkpoint:
                     out = np.frombuffer(buf, dtype=FLOAT_DTYPES[t.dtype]).astype(np.float64)
             yield out
 
-    def _float_values(self, t, start, stop, shape, columns, dtype):
+    def _float_values(self, t, start, stop, shape, columns, dtype, out=None):
         if t.dtype not in FLOAT_DTYPES:
             raise CheckpointError(f"{t.name}: dtype {t.dtype} is not a supported float type")
         with self._buffer(t, start, stop) as buf:
             values = np.frombuffer(buf, FLOAT_DTYPES[t.dtype] or "<u2").reshape(shape)
             if columns is not None:
                 values = values[:, columns]
+            if out is not None and (out.shape != values.shape or out.dtype != dtype):
+                raise ValueError("decode destination must match the requested shape and dtype")
             if t.dtype == "BF16":
-                bits = values.astype(np.uint32)
-                bits <<= 16
-                return bits.view(np.float32).astype(dtype, copy=False)
-            return values.astype(dtype)  # own the data after the mapping closes
+                # Place the stored words directly in the high bits of the
+                # float32 destination, including when it is a strip tile.
+                words = out.view(np.uint32) if out is not None and out.dtype == np.float32 else None
+                words = np.left_shift(values, 16, dtype=np.uint32, out=words)
+                values = words.view(np.float32)
+                if dtype == np.float32:
+                    return values
+            if out is None:
+                return values.astype(dtype)
+            np.copyto(out, values, casting="unsafe")
+            return out
 
-    def matrix_rows(self, name, start, stop, columns, dtype):
+    def matrix_rows(self, name, start, stop, columns, dtype, *, out=None):
         """Decode a rectangle of a stored matrix, selecting columns before conversion."""
         t = self.tensors[name]
         rows, width = t.shape
@@ -231,7 +240,7 @@ class Checkpoint:
             raise IndexError("row range outside the tensor")
         stride = width * DTYPE_BYTES[t.dtype]
         return self._float_values(t, t.start + start * stride, t.start + stop * stride,
-                                  (stop - start, width), columns, dtype)
+                                  (stop - start, width), columns, dtype, out)
 
     def to_float32(self, name: str) -> np.ndarray:
         """A fresh, writable float32 copy of one tensor, in its stored shape."""

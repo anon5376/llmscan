@@ -39,7 +39,8 @@ class _TokenTable:
             block = np.empty((self.tokens, end - start), self.dtype)
             for token in range(0, self.tokens, self.rows_per_block):
                 tail = min(token + self.rows_per_block, self.tokens)
-                block[token:tail] = self.checkpoint.matrix_rows(self.name, token, tail, slice(start, end), self.dtype)
+                self.checkpoint.matrix_rows(self.name, token, tail, slice(start, end), self.dtype,
+                                            out=block[token:tail])
             self.strip_start, self.strip = start, block.T
             offset = 0
         return self.strip[offset:offset + width]

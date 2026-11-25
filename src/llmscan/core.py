@@ -24,6 +24,8 @@ from .interval_fit import fit_excess
 from .removal import joint_excess, promising_symmetric_response, skew_probe
 
 _ROWS_PER_BLOCK = 4096
+_REMOVAL_CACHE_BYTES = 64 << 20
+_RADIUS_TILE_ELEMENTS = 32 << 10
 
 
 class OutputSpectrum(NamedTuple):
@@ -181,52 +183,6 @@ def difference_rounding_budget(base: np.ndarray, suspect: np.ndarray, base_dtype
     return float(np.nextafter(np.ldexp(math.sqrt(energy), exponent), math.inf))
 
 
-def contraction_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
-                       base_dtype: str, suspect_dtype: str) -> float | None:
-    """Test one input direction against the contraction 2W_suspect − W_base.
-
-    For a partial removal P = αuuᵀ, I − 2P has operator norm at most one.
-    For any unit z, (‖(B + 2Δ)z‖ − ‖Bz‖)/2 thus lower bounds the norm of
-    the error on this input, even if the estimated removal axis was wrong.
-    """
-    residual, total = stats.fit_residual, stats.frobenius
-    if residual is None or not total or not math.isfinite(total):
-        return None
-    length = np.linalg.norm(residual)
-    if not length:
-        return 0.
-    z = residual / length
-    abs_z = np.abs(z)
-    scale = max(total, float(base.max()), -float(base.min()))
-    base_norm = reflected_norm = envelope_norm = 0.
-    # Bound temporary memory for wide matrices, especially residual × vocabulary.
-    block_rows = max(1, _ROWS_PER_BLOCK * min(base.shape) // base.shape[1])
-    for start in range(0, len(base), block_rows):
-        sl = slice(start, start + block_rows)
-        b = np.divide(base[sl], scale, dtype=np.float64)
-        d = np.divide(delta[sl], scale, dtype=np.float64)
-        x = b @ z
-        reflected = x + 2 * (d @ z)
-        envelope = (np.abs(b) + np.abs(d)) @ abs_z
-        base_norm = math.hypot(base_norm, *x)
-        reflected_norm = math.hypot(reflected_norm, *reflected)
-        envelope_norm = math.hypot(envelope_norm, *envelope)
-
-    # Triangle inequality charges rounding of *both* checkpoints. One ULP
-    # at the coarser precision covers their two half-ULPs. Charge the
-    # subtraction at its working precision, then the scaled float64 products
-    # and summations. |B| + |Δ| bounds the entrywise magnitude of B + Δ.
-    relative, absolute = map(max, zip(_SPACING[base_dtype], _SPACING[suspect_dtype]))
-    arithmetic = float(np.finfo(delta.dtype).eps) + 4 * math.ulp(1.) * (sum(base.shape) + 2)
-    budget = (relative + arithmetic) * envelope_norm
-    budget += 2 * (absolute / scale) * math.sqrt(len(base)) * abs_z.sum()
-    growth = (reflected_norm - base_norm) / 2
-    if growth <= budget:
-        return 0.
-    denominator = total / scale + math.ulp(total) / scale
-    return min(1., (growth - budget) / denominator) if denominator else None
-
-
 def _skew_columns(base: np.ndarray, delta: np.ndarray, scale: float) -> tuple[int, int]:
     """Select two coordinates of the skew matrix K = BᵀΔ − ΔᵀB without forming K."""
     # A dense witness samples all modes, including ties. Select a coordinate
@@ -290,10 +246,21 @@ def removal_bounds(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     rows, cols = base.shape
     block_rows = max(1, _ROWS_PER_BLOCK * min(rows, cols) // cols)
 
+    # Every pass visits the same blocks in the same order. Keep a bounded
+    # prefix of the scaled pair and stream the remainder on each pass.
+    cached = []
+    cache_rows = _REMOVAL_CACHE_BYTES // (2 * cols * np.dtype(np.float64).itemsize)
+
     def blocks():
-        for start in range(0, rows, block_rows):
-            sl = slice(start, start + block_rows)
-            yield _scaled_weights(base[sl], exponent), _scaled_weights(suspect[sl], exponent)
+        for i, start in enumerate(range(0, rows, block_rows)):
+            if i < len(cached):
+                yield cached[i]
+                continue
+            sl = slice(start, min(start + block_rows, rows))
+            pair = _scaled_weights(base[sl], exponent), _scaled_weights(suspect[sl], exponent)
+            if sl.stop <= cache_rows:
+                cached.append(pair)
+            yield pair
 
     def range_basis(probes):
         action = np.zeros_like(probes)
@@ -324,13 +291,24 @@ def removal_bounds(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     diff_arithmetic = 2 * np.finfo(base.dtype).eps + arithmetic
 
     def project_radius(weights, dtype):
-        spacing = _storage_spacing(weights, dtype, exponent)
-        magnitude = np.abs(weights)
-        projected = (spacing + arithmetic * magnitude) @ abs_x
-        if difference:
-            spacing += diff_arithmetic * magnitude
-            return projected, spacing
-        return projected, None
+        # Tile the elementwise passes in memory order. Preserve the layout
+        # and full block shape for the original matvec and norm reductions.
+        shape = weights.shape
+        order = "F" if weights.flags.f_contiguous else "C"
+        flat = weights.ravel(order=order)
+        radius = np.empty_like(flat)
+        diff_radius = np.empty_like(flat) if difference else None
+        for start in range(0, len(flat), _RADIUS_TILE_ELEMENTS):
+            sl = slice(start, start + _RADIUS_TILE_ELEMENTS)
+            spacing = _storage_spacing(flat[sl], dtype, exponent)
+            magnitude = np.abs(flat[sl])
+            np.multiply(arithmetic, magnitude, out=radius[sl])
+            radius[sl] += spacing
+            if difference:
+                np.multiply(diff_arithmetic, magnitude, out=diff_radius[sl])
+                diff_radius[sl] += spacing
+        projected = radius.reshape(shape, order=order) @ abs_x
+        return projected, diff_radius.reshape(shape, order=order) if difference else None
 
     gap = 0.
     energy = 0.
@@ -358,6 +336,7 @@ def removal_bounds(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     # influential columns. These limits cap work and never relax a bound.
     if action is not None:
         value, x, _ = leading(np.linalg.qr(action)[0])
+    cached.clear()
     width = min(cols, 1024, (1 << 20) // rows)
     if not width:
         return 0., refined
@@ -383,63 +362,116 @@ def removal_bounds(base: np.ndarray, suspect: np.ndarray, base_dtype: str, suspe
     return max(skew, excess), refined
 
 
-def reciprocity_excess(base: np.ndarray, delta: np.ndarray, stats: DeltaStats,
-                       base_dtype: str, suspect_dtype: str) -> float | None:
-    """Fraction of a two-input reciprocity discrepancy left after bounding rounding.
-
-    If S = (I − P)B for any symmetric P, then BᵀS is symmetric. For any probes,
-    (Bx)ᵀ(Sy) = (By)ᵀ(Sx), even when neither probe recovers the true axis.
-    """
-    x, residual = stats.base_probe, stats.fit_residual
-    scale = stats.frobenius
-    if not scale or not math.isfinite(scale):
-        return None
-    scale = max(scale, float(base.max()), -float(base.min()))
-    if stats.direction is None:
-        if stats.tail_norm_fraction is None:
-            return None
-        i, j = _skew_columns(base, delta, scale)
-        if i == j:
-            return 0.
-        base, delta = base[:, [i, j]], delta[:, [i, j]]
-        probes = np.eye(2)
-    else:
-        if x is None or residual is None:
-            return None
-        y = residual - (x @ residual) * x
-        length = np.linalg.norm(y)
-        if length <= math.sqrt(math.ulp(1.)):
-            return 0.
-        probes = np.column_stack((x, y / length))
-    magnitudes = np.abs(probes)
-    # Half a storage ULP on each side, plus conservative error in the
-    # subtraction, scaled matvecs, inner products and their accumulation.
-    arithmetic = 2 * float(np.finfo(delta.dtype).eps) + 8 * math.ulp(1.) * (sum(base.shape) + 2)
+def _probe_bounds(base, delta, scale, total, base_dtype, suspect_dtype, z, probes):
+    """Evaluate contraction and reciprocity on the same scaled weight blocks."""
     b_rel, b_abs = _SPACING[base_dtype]
     s_rel, s_abs = _SPACING[suspect_dtype]
-    one_norms = magnitudes.sum(axis=0)
-    gap = 0.
-    # Scaled products can still underflow when most of the base's energy is
-    # outside the probe subspace. Charge an absolute arithmetic floor too.
-    budget = 8 * base.size * float(np.finfo(np.float64).tiny)
+    eps = float(np.finfo(delta.dtype).eps)
+    arithmetic = 2 * eps + 8 * math.ulp(1.) * (sum(base.shape) + 2)
+    if z is not None:
+        abs_z = np.abs(z)
+        base_norm = reflected_norm = envelope_norm = 0.
+    if probes is not None:
+        magnitudes = np.abs(probes)
+        one_norms = magnitudes.sum(axis=0)
+        gap = 0.
+        budget = 8 * base.size * float(np.finfo(np.float64).tiny)
+
     block_rows = max(1, _ROWS_PER_BLOCK * min(base.shape) // base.shape[1])
     for start in range(0, len(base), block_rows):
         sl = slice(start, start + block_rows)
         b = np.divide(base[sl], scale, dtype=np.float64)
         d = np.divide(delta[sl], scale, dtype=np.float64)
-        bp = b @ probes
-        dp = d @ probes
-        sp = bp + dp
-        # BᵀB is symmetric, so the measured skew needs only B and Δ.
-        gap += float(bp[:, 0] @ dp[:, 1] - bp[:, 1] @ dp[:, 0])
-        b_mag = np.abs(b) @ magnitudes
-        s_mag = b_mag + np.abs(d) @ magnitudes
-        be = (0.5 * b_rel + arithmetic) * b_mag + (b_abs / scale) * one_norms
-        se = (0.5 * s_rel + arithmetic) * s_mag + (s_abs / scale) * one_norms
-        # Error of each product in (Bx)ᵀ(Sy) − (By)ᵀ(Sx), including
-        # the product of the two input error bounds.
-        budget += float(np.sum(np.abs(bp) * se[:, ::-1] + be * (np.abs(sp[:, ::-1]) + se[:, ::-1])))
-    return 1. - budget / abs(gap) if abs(gap) > budget else 0.
+        if z is not None:
+            x = b @ z
+            base_norm = math.hypot(base_norm, *x)
+            reflected_norm = math.hypot(reflected_norm, *(x + 2 * (d @ z)))
+        if probes is not None:
+            bp, dp = b @ probes, d @ probes
+            sp = bp + dp
+            # BᵀB is symmetric. Only B and Δ contribute to the measured skew.
+            gap += float(bp[:, 0] @ dp[:, 1] - bp[:, 1] @ dp[:, 0])
+
+        # The signed products are finished. Reuse their owned buffers for
+        # the magnitudes needed by both storage-error envelopes.
+        np.abs(b, out=b)
+        np.abs(d, out=d)
+        if probes is not None:
+            b_mag = b @ magnitudes
+            s_mag = b_mag + d @ magnitudes
+            be = (0.5 * b_rel + arithmetic) * b_mag + (b_abs / scale) * one_norms
+            se = (0.5 * s_rel + arithmetic) * s_mag + (s_abs / scale) * one_norms
+            budget += float(np.sum(np.abs(bp) * se[:, ::-1] + be * (np.abs(sp[:, ::-1]) + se[:, ::-1])))
+        if z is not None:
+            b += d
+            envelope_norm = math.hypot(envelope_norm, *(b @ abs_z))
+
+    contraction = reciprocity = None
+    if z is not None:
+        # (I − 2P) is contractive. Charge one ULP at the coarser precision
+        # across both checkpoints, the working subtraction and scaled matvecs.
+        allowance = (max(b_rel, s_rel) + arithmetic / 2) * envelope_norm
+        allowance += 2 * (max(b_abs, s_abs) / scale) * math.sqrt(len(base)) * abs_z.sum()
+        growth = (reflected_norm - base_norm) / 2
+        denominator = total / scale + math.ulp(total) / scale
+        if growth <= allowance:
+            contraction = 0.
+        elif denominator:
+            contraction = min(1., (growth - allowance) / denominator)
+    if probes is not None:
+        reciprocity = 1. - budget / abs(gap) if abs(gap) > budget else 0.
+    return contraction, reciprocity
+
+
+def projection_excesses(base, delta, stats, base_dtype, suspect_dtype, *, contraction=True, reciprocity=True):
+    """Share a traversal when both projection certificates probe the full matrix."""
+    total = stats.frobenius
+    if not total or not math.isfinite(total):
+        return None, None
+    scale = max(total, float(base.max()), -float(base.min()))
+    args = scale, total, base_dtype, suspect_dtype
+    z = probes = None
+    contraction_margin = reciprocity_margin = None
+    residual = stats.fit_residual
+    if contraction and residual is not None:
+        length = np.linalg.norm(residual)
+        if length:
+            z = residual / length
+        else:
+            contraction_margin = 0.
+    if reciprocity:
+        if stats.direction is None:
+            if stats.tail_norm_fraction is not None:
+                i, j = _skew_columns(base, delta, scale)
+                if i == j:
+                    reciprocity_margin = 0.
+                else:
+                    _, reciprocity_margin = _probe_bounds(base[:, [i, j]], delta[:, [i, j]], *args, None, np.eye(2))
+        elif stats.base_probe is not None and residual is not None:
+            x = stats.base_probe
+            y = residual - (x @ residual) * x
+            length = np.linalg.norm(y)
+            if length <= math.sqrt(math.ulp(1.)):
+                reciprocity_margin = 0.
+            else:
+                probes = np.column_stack((x, y / length))
+    if z is not None or probes is not None:
+        measured_contraction, measured_reciprocity = _probe_bounds(base, delta, *args, z, probes)
+        if z is not None:
+            contraction_margin = measured_contraction
+        if probes is not None:
+            reciprocity_margin = measured_reciprocity
+    return contraction_margin, reciprocity_margin
+
+
+def contraction_excess(base, delta, stats, base_dtype, suspect_dtype):
+    """Test one input against the contraction 2W_suspect − W_base."""
+    return projection_excesses(base, delta, stats, base_dtype, suspect_dtype, reciprocity=False)[0]
+
+
+def reciprocity_excess(base, delta, stats, base_dtype, suspect_dtype):
+    """Bound a two-input reciprocity discrepancy over both storage boxes."""
+    return projection_excesses(base, delta, stats, base_dtype, suspect_dtype, contraction=False)[1]
 
 
 def _projection_fit(right: np.ndarray, projected: np.ndarray, gain: float | None) -> tuple[float, float, np.ndarray]:

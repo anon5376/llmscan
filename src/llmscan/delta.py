@@ -96,8 +96,9 @@ def scan(
                 else:
                     stats = core.analyze_difference(a, difference, k, space_budget)
                 excess = stats.tail_excess(budget)
-                contraction = core.contraction_excess(a, difference, stats, *dtypes) if projection else None
-                reciprocity = core.reciprocity_excess(a, difference, stats, *dtypes) if projection else None
+                contraction = reciprocity = None
+                if projection:
+                    contraction, reciprocity = core.projection_excesses(a, difference, stats, *dtypes)
                 del a, b, difference
                 if directions is not None and projection and stats.direction is not None:
                     directions[r.name] = stats.direction

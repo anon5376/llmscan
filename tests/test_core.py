@@ -86,6 +86,44 @@ class TestAnalyzeDelta(unittest.TestCase):
         self.assertAlmostEqual(measured.output_spectrum.omitted, .046875)
         self.assertAlmostEqual(measured.output_spectrum.noise, refined)
 
+    def test_cached_removal_blocks_and_tiled_radii_match_independent_passes(self):
+        base = self.rng.normal(size=(45, 35)).astype(np.float32)
+        suspect = 0.5 * base
+        # Cache two blocks, stream the remainder, and split radius tiles
+        # in the middle of a row or column in the two memory orders.
+        for b, s in ((base, suspect), (base.T, suspect.T)):
+            with self.subTest(shape=b.shape), mock.patch.object(core, "_ROWS_PER_BLOCK", 5):
+                args = b, s, "BF16", "F16"
+                with mock.patch.object(core, "_REMOVAL_CACHE_BYTES", 0), \
+                     mock.patch.object(core, "_scaled_weights", wraps=core._scaled_weights) as uncached:
+                    expected = core.removal_bounds(*args, difference=True)
+                self.assertEqual(expected[1], core.difference_rounding_budget(*args))
+                rows = max(1, 5 * min(b.shape) // b.shape[1])
+                with mock.patch.object(core, "_REMOVAL_CACHE_BYTES", rows * b.shape[1] * 16 * 2), \
+                     mock.patch.object(core, "_RADIUS_TILE_ELEMENTS", 29), \
+                     mock.patch.object(core, "_scaled_weights", wraps=core._scaled_weights) as cached:
+                    self.assertEqual(core.removal_bounds(*args, difference=True), expected)
+                self.assertLess(cached.call_count, uncached.call_count)
+
+    def test_joint_projection_pass_reads_each_strip_once_for_both_positive_margins(self):
+        from llmscan.token_blocks import _BlockView
+
+        base = np.eye(9)
+        change = np.zeros_like(base)
+        change[0, 1] = 2.
+        stats = core.DeltaStats(np.array([2.]), 1., frobenius=2., direction=base[0],
+                                base_probe=base[0], fit_residual=base[1])
+        reads = mock.Mock(wraps=base.__getitem__)
+        view = _BlockView(base.shape, base.dtype, (0., 1.), reads, base.T.__getitem__)
+        args = view, change, stats, "F64", "F64"
+        with mock.patch.object(core, "_ROWS_PER_BLOCK", 4):
+            separate = core.contraction_excess(*args), core.reciprocity_excess(*args)
+            self.assertEqual(reads.call_count, 6)
+            reads.reset_mock()
+            self.assertEqual(core.projection_excesses(*args), separate)
+            self.assertEqual(reads.call_count, 3)
+        self.assertTrue(all(margin > 0. for margin in separate))
+
     def test_entrywise_allowance_encloses_mixed_precision_resaves(self):
         original = self.rng.uniform(-3., 3., size=(60, 45))
         original[::3] *= 2.**-24
