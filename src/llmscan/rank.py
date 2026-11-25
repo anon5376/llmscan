@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 
 from llmscan.core import OutputSpectrum
+from llmscan.csv_safety import csv_fieldnames, decode_row, encode_row
 from llmscan.delta import EXTRA_FIELDS, sv_field
 from llmscan.inventory import CHANGED, IDENTICAL, ONLY_BASE, ONLY_SUSPECT, SHAPE_MISMATCH, InventoryRow, natural_key
 from llmscan.names import EMBEDDINGS, RESIDUAL_WRITERS, TOKEN_MATRICES, canonical_kind
@@ -88,7 +89,7 @@ def read_delta_csv(path: Path) -> dict[str, Measurements]:
 
     with open(path, newline="", encoding="utf-8") as f:
         return {r["name"]: Measurements(*(num(r.get(k)) for k in ("effective_rank", SV1, *EXTRA_FIELDS)))
-                for r in csv.DictReader(f)}
+                for r in map(decode_row, csv.DictReader(f))}
 
 
 def _structure_reason(r: InventoryRow) -> str:
@@ -199,14 +200,14 @@ def rank_tensors(
 
 def write_csv(ranked: list[RankedRow], path: Path) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS)
+        w = csv.DictWriter(f, fieldnames=csv_fieldnames(FIELDS))
         w.writeheader()
         for r in ranked:
             d = asdict(r)
             d["layer"] = "" if r.layer is None else r.layer
             for col in ("effective_rank", SV1):
                 d[col] = "" if d[col] is None else f"{d[col]:.6g}"
-            w.writerow(d)
+            w.writerow(encode_row(d))
 
 
 def summarize(ranked: list[RankedRow], top: int = 10) -> str:

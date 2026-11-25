@@ -1,28 +1,28 @@
-rank,tier,name,layer,kind,status,effective_rank,sv_001,reason,direction_cosine
-1,T1,lm_head.weight,,lm_head,shape_mismatch,,,shape differs: base 128x32 vs suspect 130x32,
-2,T1,model.embed_tokens.weight,,embed_tokens,shape_mismatch,,,shape differs: base 128x32 vs suspect 130x32,
-3,T1,model.layers.8.mlp.down_proj.bias,8,down_proj.bias,only_suspect,,,in suspect but not in base: a tensor the base does not have,
-4,T2,model.layers.8.self_attn.q_proj.weight,8,q_proj,changed,3.55548,0.372757,"changed q_proj: outside expected kinds (attn_output, down_proj, embed_tokens, ffn_down, o_proj, token_embd)",
-5,T2,model.layers.8.self_attn.v_proj.weight,8,v_proj,changed,2.55302,0.500964,"changed v_proj: outside expected kinds (attn_output, down_proj, embed_tokens, ffn_down, o_proj, token_embd)",
-6,T3,model.layers.8.mlp.down_proj.weight,8,down_proj,changed,5.91867,0.730039,"effective_rank 5.919 is 5.9x the median 1 of changed down_proj tensors (threshold 3x); multi-mode change violates projection reciprocity (96.6% of the discrepancy exceeds rounding); abrupt output subspace expansion beyond rank 1 (unpaired strength at least 41.72 exceeds the upper bounds of 10/10 reference layers against the majority space, in units of the largest measurement allowance)",
-7,T4,model.layers.10.self_attn.o_proj.weight,10,o_proj,changed,1.00026,0.229133,"changed o_proj, consistent with abliteration",0.9999974230778803
-8,T4,model.layers.3.mlp.down_proj.weight,3,down_proj,changed,1.00024,0.33071,"changed down_proj, consistent with abliteration",0.9999986037528703
-9,T4,model.layers.5.mlp.down_proj.weight,5,down_proj,changed,1.00024,0.322034,"changed down_proj, consistent with abliteration",0.9999984769820469
-10,T4,model.layers.8.self_attn.o_proj.weight,8,o_proj,changed,1.00023,0.242041,"changed o_proj, consistent with abliteration",0.9999980146016012
-11,T4,model.layers.7.mlp.down_proj.weight,7,down_proj,changed,1.00019,0.374861,"changed down_proj, consistent with abliteration",0.9999987576431688
-12,T4,model.layers.6.self_attn.o_proj.weight,6,o_proj,changed,1.00019,0.244733,"changed o_proj, consistent with abliteration",0.9999975886585992
-13,T4,model.layers.10.mlp.down_proj.weight,10,down_proj,changed,1.00017,0.398362,"changed down_proj, consistent with abliteration",0.9999991174266489
-14,T4,model.layers.9.self_attn.o_proj.weight,9,o_proj,changed,1.00017,0.26411,"changed o_proj, consistent with abliteration",0.999997532424823
-15,T4,model.layers.2.mlp.down_proj.weight,2,down_proj,changed,1.00016,0.408085,"changed down_proj, consistent with abliteration",0.9999986276642474
-16,T4,model.layers.6.mlp.down_proj.weight,6,down_proj,changed,1.00016,0.399125,"changed down_proj, consistent with abliteration",0.9999988362143091
-17,T4,model.layers.11.mlp.down_proj.weight,11,down_proj,changed,1.00016,0.395265,"changed down_proj, consistent with abliteration",0.999998833568867
-18,T4,model.layers.4.mlp.down_proj.weight,4,down_proj,changed,1.00016,0.392198,"changed down_proj, consistent with abliteration",0.9999983434608779
-19,T4,model.layers.2.self_attn.o_proj.weight,2,o_proj,changed,1.00016,0.28583,"changed o_proj, consistent with abliteration",0.9999985194124588
-20,T4,model.layers.9.mlp.down_proj.weight,9,down_proj,changed,1.00014,0.438803,"changed down_proj, consistent with abliteration",0.9999988073442797
-21,T4,model.layers.1.self_attn.o_proj.weight,1,o_proj,changed,1.00014,0.310946,"changed o_proj, consistent with abliteration",0.9999985642502043
-22,T4,model.layers.3.self_attn.o_proj.weight,3,o_proj,changed,1.00014,0.310125,"changed o_proj, consistent with abliteration",0.9999979939373138
-23,T4,model.layers.5.self_attn.o_proj.weight,5,o_proj,changed,1.00014,0.307381,"changed o_proj, consistent with abliteration",0.9999983914509556
-24,T4,model.layers.1.mlp.down_proj.weight,1,down_proj,changed,1.00013,0.45462,"changed down_proj, consistent with abliteration",0.9999990054272229
-25,T4,model.layers.7.self_attn.o_proj.weight,7,o_proj,changed,1.00012,0.328181,"changed o_proj, consistent with abliteration",0.9999985357263893
-26,T4,model.layers.11.self_attn.o_proj.weight,11,o_proj,changed,1.00012,0.318172,"changed o_proj, consistent with abliteration",0.9999983087895474
-27,T4,model.layers.4.self_attn.o_proj.weight,4,o_proj,changed,1.00011,0.324076,"changed o_proj, consistent with abliteration",0.9999984371231565
+rank,tier,name,layer,kind,status,effective_rank,sv_001,reason,direction_cosine,llmscan_csv_encoding
+1,T1,lm_head.weight,,lm_head,shape_mismatch,,,shape differs: base 128x32 vs suspect 130x32,,apostrophe-v1
+2,T1,model.embed_tokens.weight,,embed_tokens,shape_mismatch,,,shape differs: base 128x32 vs suspect 130x32,,apostrophe-v1
+3,T1,model.layers.8.mlp.down_proj.bias,8,down_proj.bias,only_suspect,,,in suspect but not in base: a tensor the base does not have,,apostrophe-v1
+4,T2,model.layers.8.self_attn.q_proj.weight,8,q_proj,changed,3.55548,0.372757,"changed q_proj: outside expected kinds (attn_output, down_proj, embed_tokens, ffn_down, o_proj, token_embd)",,apostrophe-v1
+5,T2,model.layers.8.self_attn.v_proj.weight,8,v_proj,changed,2.55302,0.500964,"changed v_proj: outside expected kinds (attn_output, down_proj, embed_tokens, ffn_down, o_proj, token_embd)",,apostrophe-v1
+6,T3,model.layers.8.mlp.down_proj.weight,8,down_proj,changed,5.91867,0.730039,"effective_rank 5.919 is 5.9x the median 1 of changed down_proj tensors (threshold 3x); multi-mode change violates projection reciprocity (96.6% of the discrepancy exceeds rounding); abrupt output subspace expansion beyond rank 1 (unpaired strength at least 41.72 exceeds the upper bounds of 10/10 reference layers against the majority space, in units of the largest measurement allowance)",,apostrophe-v1
+7,T4,model.layers.10.self_attn.o_proj.weight,10,o_proj,changed,1.00026,0.229133,"changed o_proj, consistent with abliteration",0.9999974230778803,apostrophe-v1
+8,T4,model.layers.3.mlp.down_proj.weight,3,down_proj,changed,1.00024,0.33071,"changed down_proj, consistent with abliteration",0.9999986037528703,apostrophe-v1
+9,T4,model.layers.5.mlp.down_proj.weight,5,down_proj,changed,1.00024,0.322034,"changed down_proj, consistent with abliteration",0.9999984769820469,apostrophe-v1
+10,T4,model.layers.8.self_attn.o_proj.weight,8,o_proj,changed,1.00023,0.242041,"changed o_proj, consistent with abliteration",0.9999980146016012,apostrophe-v1
+11,T4,model.layers.7.mlp.down_proj.weight,7,down_proj,changed,1.00019,0.374861,"changed down_proj, consistent with abliteration",0.9999987576431688,apostrophe-v1
+12,T4,model.layers.6.self_attn.o_proj.weight,6,o_proj,changed,1.00019,0.244733,"changed o_proj, consistent with abliteration",0.9999975886585992,apostrophe-v1
+13,T4,model.layers.10.mlp.down_proj.weight,10,down_proj,changed,1.00017,0.398362,"changed down_proj, consistent with abliteration",0.9999991174266489,apostrophe-v1
+14,T4,model.layers.9.self_attn.o_proj.weight,9,o_proj,changed,1.00017,0.26411,"changed o_proj, consistent with abliteration",0.999997532424823,apostrophe-v1
+15,T4,model.layers.2.mlp.down_proj.weight,2,down_proj,changed,1.00016,0.408085,"changed down_proj, consistent with abliteration",0.9999986276642474,apostrophe-v1
+16,T4,model.layers.6.mlp.down_proj.weight,6,down_proj,changed,1.00016,0.399125,"changed down_proj, consistent with abliteration",0.9999988362143091,apostrophe-v1
+17,T4,model.layers.11.mlp.down_proj.weight,11,down_proj,changed,1.00016,0.395265,"changed down_proj, consistent with abliteration",0.999998833568867,apostrophe-v1
+18,T4,model.layers.4.mlp.down_proj.weight,4,down_proj,changed,1.00016,0.392198,"changed down_proj, consistent with abliteration",0.9999983434608779,apostrophe-v1
+19,T4,model.layers.2.self_attn.o_proj.weight,2,o_proj,changed,1.00016,0.28583,"changed o_proj, consistent with abliteration",0.9999985194124588,apostrophe-v1
+20,T4,model.layers.9.mlp.down_proj.weight,9,down_proj,changed,1.00014,0.438803,"changed down_proj, consistent with abliteration",0.9999988073442797,apostrophe-v1
+21,T4,model.layers.1.self_attn.o_proj.weight,1,o_proj,changed,1.00014,0.310946,"changed o_proj, consistent with abliteration",0.9999985642502043,apostrophe-v1
+22,T4,model.layers.3.self_attn.o_proj.weight,3,o_proj,changed,1.00014,0.310125,"changed o_proj, consistent with abliteration",0.9999979939373138,apostrophe-v1
+23,T4,model.layers.5.self_attn.o_proj.weight,5,o_proj,changed,1.00014,0.307381,"changed o_proj, consistent with abliteration",0.9999983914509556,apostrophe-v1
+24,T4,model.layers.1.mlp.down_proj.weight,1,down_proj,changed,1.00013,0.45462,"changed down_proj, consistent with abliteration",0.9999990054272229,apostrophe-v1
+25,T4,model.layers.7.self_attn.o_proj.weight,7,o_proj,changed,1.00012,0.328181,"changed o_proj, consistent with abliteration",0.9999985357263893,apostrophe-v1
+26,T4,model.layers.11.self_attn.o_proj.weight,11,o_proj,changed,1.00012,0.318172,"changed o_proj, consistent with abliteration",0.9999983087895474,apostrophe-v1
+27,T4,model.layers.4.self_attn.o_proj.weight,4,o_proj,changed,1.00011,0.324076,"changed o_proj, consistent with abliteration",0.9999984371231565,apostrophe-v1
