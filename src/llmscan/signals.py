@@ -769,8 +769,27 @@ def _predictive_rank(training: np.ndarray, plane: np.ndarray, rank: int,
     return low
 
 
+def _stable_ambient_rank(common: np.ndarray, folds: list[np.ndarray], planes: list[np.ndarray],
+                         minimum: int, tolerance: float, radius: float) -> int | None:
+    """Largest candidate prefix that every held-out writer fits and every fold reproduces."""
+    largest = min(common.shape[1], *(fold.shape[1] for fold in folds))
+    for rank in range(largest, minimum - 1, -1):
+        prefix = common[:, :rank]
+        for fold, plane in zip(folds, planes):
+            held_out = fold[:, :rank]
+            if np.linalg.svd(held_out.T @ plane, compute_uv=False).min() < math.cos(radius):
+                # Every smaller prefix is contained in this one.
+                return None
+            if np.linalg.svd(prefix.T @ held_out, compute_uv=False).min() < math.cos(tolerance):
+                break
+        else:
+            return rank
+    return None
+
+
 def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, tolerance: float, radius: float,
-                       spectra: list[OutputSpectrum | None], fixed_plane: bool) -> list[_ExpansionReference] | None:
+                       spectra: list[OutputSpectrum | None], fixed_plane: bool
+                       ) -> tuple[list[_ExpansionReference], bool] | None:
     """Fit an ambient span independent of depth and validate it on every held-out writer."""
     background = np.flatnonzero(ranks <= p)
     # Work in lossless thin-QR coordinates. Holding out a writer removes
@@ -781,28 +800,30 @@ def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, toler
     folds = []
     for j, plane in enumerate(planes):
         training = _ambient_frame(planes[:j] + planes[j+1:])
-        rank = _predictive_rank(training, plane, rank, tolerance, radius)
-        if rank is None or rank >= axes.shape[0]:
+        preferred = _predictive_rank(training, plane, p, tolerance, radius)
+        if preferred is None:
             return None
+        rank = max(rank, preferred)
         # Keep only the shared prefix. A later writer may resolve an
         # additional direction, in which case revisit the smaller fits.
         folds.append(training[:, :rank].copy())
     # A single plane with repeated full anchors already has an observed
     # orientation for measuring ordinary complement motion. Centering it
     # between two alternating anchors could erase that motion from the bounds.
-    if rank == p and fixed_plane:
+    minimum = p + 1 if fixed_plane else p
+    largest = min(rank, axes.shape[0] - 1)
+    if largest < minimum:
         return None
-    common = _ambient_frame(planes)[:, :rank]
-    frames = [axes @ common] * len(bases)
-    for j, (i, held_out) in enumerate(zip(background, folds)):
-        if held_out.shape[1] < rank:
-            held_out = _ambient_frame(planes[:j] + planes[j+1:])[:, :rank]
-        if held_out.shape[1] != rank or common.shape[1] != rank:
-            return None
-        agreement = np.linalg.svd(common.T @ held_out, compute_uv=False)
-        if agreement.min() < math.cos(tolerance):
-            return None
-        frames[i] = axes @ held_out
+    common = _ambient_frame(planes)[:, :largest]
+    for j, fold in enumerate(folds):
+        if fold.shape[1] < largest:
+            folds[j] = _ambient_frame(planes[:j] + planes[j+1:])[:, :largest].copy()
+    stable = _stable_ambient_rank(common, folds, planes, minimum, tolerance, radius)
+    if stable is None:
+        return None
+    frames = [axes @ common[:, :stable]] * len(bases)
+    for i, fold in zip(background, folds):
+        frames[i] = axes @ fold[:, :stable]
     references = []
     for i, (frame, basis) in enumerate(zip(frames, bases)):
         cosines = np.linalg.svd(frame.T @ basis, compute_uv=False)
@@ -810,7 +831,7 @@ def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, toler
         # Alignment determines whether this span can certify a continuation.
         # Its complement is still measurable when the continued axes leave it.
         aligned = cosines[paired-1] >= math.cos(radius)
-        if common.shape[1] == p:
+        if stable == p:
             references.append(_ExpansionReference(frame, ambient_aligned=aligned))
             continue
         # More than p axes can be supported by a wider hull. A weak axis
@@ -822,7 +843,7 @@ def _majority_envelope(bases: list[np.ndarray], ranks: np.ndarray, p: int, toler
             strength = spectra[i].outside_continuation(frame, basis, radius)
         references.append(_ExpansionReference(frame, supported_strength=strength, paired_rank=supported,
                                               ambient_aligned=aligned))
-    return references
+    return references, stable == rank
 
 
 def _tracked_references(ids: list[int], bases: list[np.ndarray], peers: np.ndarray,
@@ -922,9 +943,16 @@ def _expansion_references(ids: list[int], bases: list[np.ndarray], angles: np.nd
     # An observed ceiling-rank anchor already contains every background
     # writer to numerical precision. Their union cannot identify a wider span.
     if not fixed_plane or widths.min() > floor:
-        envelope = _majority_envelope(bases, ranks, p, radius / factor, radius, spectra, fixed_plane)
-    if envelope is not None:
-        yield [frame if frame.ambient_aligned else None for frame in envelope], "majority ambient span"
+        fit = _majority_envelope(bases, ranks, p, radius / factor, radius, spectra, fixed_plane)
+        if fit is not None:
+            frames, complete = fit
+            # A truncated span can certify an expansion via its held-out
+            # residuals. Predictable motion outside it can still be tracked
+            # locally, so only a complete span constrains the tracker below.
+            if complete:
+                envelope = frames
+            description = "majority ambient span" if complete else "stable majority ambient span"
+            yield [frame if frame.ambient_aligned else None for frame in frames], description
     if len(peers) < 2:
         return
     if fixed_plane:
@@ -1174,6 +1202,7 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
     """Test unpaired modes against the measured complement of the majority."""
     factor = max(1., factor)
     findings = {}
+    stable_prefix_findings = {}
     observations = [spectra.get(n) for n in names]
     # Partial layers vote on measured strength and containment. A direction
     # missing from a layer cannot anchor the orientation of a full plane.
@@ -1185,12 +1214,15 @@ def _subspace_expansions(ids: list[int], names: list[str], bases: list[np.ndarra
         for references, description in _expansion_references(ids, bases, angles, ranks, peers, factor, observations):
             found = _expansions_against(ids, names, bases, ranks, p, references, description,
                                         layer_count, extent, spectra, factor)
+            if description == "stable majority ambient span":
+                stable_prefix_findings.update(found)
+                continue
             # Prefer the depth-independent explanation wherever both the
             # envelope and the local tracker certify the expansion.
             if description == "tracked majority space":
                 found = {n: why for n, why in found.items() if n not in findings}
             findings.update(found)
-    return findings
+    return stable_prefix_findings | findings
 
 
 def subspace_outliers(rows: list[InventoryRow], subspaces: dict[str, np.ndarray], factor: float,

@@ -14,7 +14,8 @@ from llmscan import core, rank
 from llmscan.interval_fit import _box_excess, fit_excess
 from llmscan.names import stack_of
 from llmscan.removal import joint_excess, promising_symmetric_response, skew_excess
-from llmscan.signals import Measurements, _endpoint_references, _isolated_cliques, _trajectory_groups, subspace_outliers
+from llmscan.signals import (Measurements, _endpoint_references, _isolated_cliques, _majority_envelope,
+                             _trajectory_groups, subspace_outliers)
 from test_core import to_bf16
 from test_rank import layer_name, row, run_cli
 
@@ -1179,6 +1180,54 @@ class TestAnomalySignals(unittest.TestCase):
                 self.assertEqual(set(findings), expected)
                 self.assertTrue(all("24/24 reference layers against the majority ambient span" in why
                                     for why in findings.values()))
+
+    def test_correlated_jitter_retains_the_largest_reproducible_span(self):
+        eye = np.eye(40)
+        radius = np.arccos(.9)
+        tilt = np.radians(16.)
+        for count, spread, dimension in [(2, 40., 3), (4, 40., 3), (6, 18., 4)]:
+            planes = []
+            for i in range(28):
+                jitter = eye[4 + i]
+                if i % 2 == 0 and i // 2 < count:
+                    a = np.radians(spread)
+                    jitter = np.cos(a) * eye[-1] + np.sin(a) * jitter
+                line = np.cos(tilt) * eye[1 + i % 2] + np.sin(tilt) * jitter
+                planes.append(np.column_stack([eye[0], line]))
+            for ordered in (planes, planes[::-1]):
+                with self.subTest(count=count, reversed=ordered is not planes):
+                    fit = _majority_envelope(ordered, np.full(28, 2), 2, radius / 3, radius, [None] * 28, False)
+                    self.assertIsNotNone(fit)
+                    frames, complete = fit
+                    self.assertEqual(complete, dimension == 4)
+                    self.assertTrue(all(f.basis.shape == (40, dimension) and f.ambient_aligned for f in frames))
+                    # Measure one correlated writer against its own held-out
+                    # frame. Its ordinary residual remains in the strength bound.
+                    j = 0 if ordered is planes else -1
+                    spectrum = core.OutputSpectrum(np.array([1., 10.]), 0., .1, 1.)
+                    low, high, _ = spectrum.outside_bounds(frames[j].basis, ordered[j])
+                    unique_strength = 10 * np.sin(tilt) * np.sin(np.radians(spread))
+                    self.assertGreaterEqual(low + 1e-12, unique_strength)
+                    self.assertGreaterEqual(high, low)
+
+    def test_honest_correlated_jitter_and_wandering_with_a_weak_extra_mode(self):
+        rows = [row(layer_name(i)) for i in range(34)]
+        eye = np.eye(48)
+        for tilt in np.radians([16., 48.]):
+            spaces, spectra = {}, {}
+            for r in rows:
+                i = r.layer
+                jitter = eye[4 + i]
+                if i in (0, 2, 6, 10):
+                    jitter = (eye[-1] + jitter) / np.sqrt(2.)
+                line = np.cos(tilt) * eye[1 + i % 2] + np.sin(tilt) * jitter
+                axes, values = [eye[0], line], [5., 12.]
+                if 14 <= i < 20:
+                    axes, values = [*eye[:3], eye[-2]], [5., 5., 5., 1.]
+                spaces[r.name] = np.column_stack(axes)
+                spectra[r.name] = core.OutputSpectrum(np.array(values), 0., .25, 1.)
+            with self.subTest(tilt=tilt):
+                self.assertEqual(subspace_outliers(rows, spaces, 3., spectra=spectra), {})
 
     def test_random_high_dimensional_background_has_no_predictive_span(self):
         rng = np.random.default_rng(511)

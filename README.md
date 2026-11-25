@@ -298,11 +298,15 @@ dependencies are numpy and matplotlib, no torch. GGUF support is next.
      The scanner also fits a principal ambient span to the majority observations,
      independently of their depth order or adjacent angular steps. Each writer is
      held out in turn and projected onto the span of the remaining writers.
-     The scanner selects the smallest common number of principal axes that explains
+     The scanner estimates the smallest common number of principal axes that explains
      each such projection within the angular tolerance and contains the whole
-     held-out writer within the coherence radius. At that dimension, every fit
-     must agree with the full fit's orientation. A direction unique to one writer
-     contributes its measured strength to the held-out bound.
+     held-out writer within the coherence radius. Starting at that dimension, it
+     takes the largest leading span whose orientation every fold reproduces and
+     that still contains every held-out writer within the coherence radius.
+     Motion outside that span, including correlated jitter, contributes its
+     measured strength to each held-out bound. If unstable axes were dropped,
+     the scanner also evaluates local tracking independently, since it can
+     explain background motion outside the reduced span.
      Additional modes must lie within the coherence radius of
      the orthogonal complement. Only their component outside the span counts
      toward expansion strength. The scanner can also track a majority plane
