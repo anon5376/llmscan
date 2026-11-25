@@ -58,8 +58,10 @@ def estimate_tensor_bytes(row: InventoryRow) -> int:
         rows, cols = (d1, d0) if token_matrix else (d0, d1)
         r_block_rows = min(rows, max(1, core._ROWS_PER_BLOCK * min(rows, cols) // cols))
         r_block = r_block_rows * cols * 8
-        r_cache = min(2 * rows * cols * 8, core._REMOVAL_CACHE_BYTES)
-        r_stream = 2 * r_block if 2 * rows * cols * 8 > core._REMOVAL_CACHE_BYTES else 0
+        cache_rows = core._REMOVAL_CACHE_BYTES // (2 * cols * 8)
+        cached_rows = rows if rows <= cache_rows else (cache_rows // r_block_rows) * r_block_rows
+        r_cache = 2 * cached_rows * cols * 8
+        r_stream = 2 * r_block if cached_rows < rows else 0
         r_radius = (3 if kind in RESIDUAL_WRITERS else 1) * r_block
         removal_ws = r_cache + r_stream + r_radius
     # The widening temporary, removal-check workspace, finite-value mask, and Gram/block

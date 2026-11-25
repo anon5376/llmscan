@@ -68,6 +68,14 @@ class TestMemoryEstimator(unittest.TestCase):
         # decoded=24 MiB; removal_bounds holds cached scaled pair (48 MiB) + 3 radius buffers (72 MiB) = 120 MiB > gram+block (64 MiB)
         self.assertEqual(delta.estimate_tensor_bytes(down), (24 + 120) * 1024 * 1024)
 
+        # When the first block pair exceeds 64 MiB, removal_bounds caches nothing (only streams the block + radius buffers).
+        big_proj = inventory.InventoryRow(
+            name="model.layers.0.self_attn.o_proj.weight", layer=0, kind="o_proj", status=inventory.CHANGED,
+            base_dtype="BF16", suspect_dtype="BF16", base_shape="2560x2560", suspect_shape="2560x2560", numel=2560 * 2560,
+        )
+        # decoded=50 MiB; block=50 MiB; cache_rows < 2560 -> cached_rows=0, stream=100 MiB, radius=150 MiB -> 50 + 250 = 300 MiB
+        self.assertEqual(delta.estimate_tensor_bytes(big_proj), 300 * 1024 * 1024)
+
     def test_estimate_accounts_for_tall_mask_and_mixed_precision_f64_temporary(self):
         tall_bf16 = inventory.InventoryRow(
             name="e.weight", layer=0, kind="q_proj", status=inventory.CHANGED,
