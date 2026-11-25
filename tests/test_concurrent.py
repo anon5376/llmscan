@@ -479,6 +479,13 @@ class TestCliValidation(unittest.TestCase):
                 self.assertEqual(cm.exception.code, 2)
                 self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
 
+    def test_help_is_ascii_encodable(self):
+        stdout = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+        with contextlib.redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as cm:
+                cli.main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

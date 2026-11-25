@@ -109,9 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--outlier-factor", type=rank.parse_factor, default=rank.DEFAULT_OUTLIER_FACTOR, metavar="X",
                     help="effective rank above X times the median of its kind is an outlier (default: 3)")
     ap.add_argument("-j", "--jobs", type=int, default=1,
-                    help="concurrent tensor workers for ΔW scan (at least 1; default: 1, serial)")
+                    help="concurrent tensor workers for the delta scan (at least 1; default: 1, serial)")
     ap.add_argument("--max-memory", type=float, default=float(delta.DEFAULT_MAX_MEMORY_MIB), metavar="MIB",
-                    help=f"working-memory budget in MiB for concurrent ΔW tensors "
+                    help=f"working-memory budget in MiB for concurrent delta tensors "
                          f"(default: {delta.DEFAULT_MAX_MEMORY_MIB}; a single larger tensor still runs alone)")
     args = ap.parse_args(argv)
     if args.k < 1:
