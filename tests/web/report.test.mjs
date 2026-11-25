@@ -127,8 +127,15 @@ test("rejects more than one comparison", async () => {
   await rejects(report({ "pair.txt": "base: a\n" }), /pair\.txt does not name exactly one base and one suspect/);
   await rejects(report({ "ranking.csv": `${RANKING_HEADER}\r\n1,T1,other.weight,,o,only_suspect,,,why\r\n` }),
     /ranking\.csv lists the tensor "other\.weight", which inventory\.csv does not have/);
-  await rejects(report({ "delta.csv": `${DELTA_HEADER}\r\nother.weight,,o,changed,2x2,1,0.00,1\r\n` }),
-    /delta\.csv lists the tensor "other\.weight"/);
+  await rejects(report({ "ranking.csv": `${RANKING_HEADER}\r\n1,T1,a.weight,,a,only_suspect,,,why\r\n` }),
+    /ranking\.csv and inventory\.csv disagree on the status of "a\.weight"/);
+});
+
+test("loads the required files when delta.csv contains a tensor from an earlier run", async () => {
+  const r = await readReport(report({ "delta.csv": `${DELTA_HEADER}\r\nlm_head.weight,,lm_head,identical,2x2,,,\r\n` }));
+  assert.deepEqual(r.ranking.map((row) => row.name), ["a.weight"]);
+  assert.deepEqual(r.inventory.map((row) => row.name), ["a.weight", "b.weight"]);
+  assert.deepEqual(r.delta.map((row) => row.name), ["lm_head.weight"]);
 });
 
 test("rejects files that are not llmscan CSV", async () => {

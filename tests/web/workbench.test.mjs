@@ -158,6 +158,39 @@ test("a delta.csv left behind by an earlier run is flagged, not presented as thi
   assert.equal(buildWorkbench({ ...REPORT, ranking: withoutStats, delta: identical.slice(-1) }).deltaUnranked, false);
 });
 
+test("an incompatible delta never contributes scan rows, spectra or ranking stats", () => {
+  const ranking = REPORT.ranking.map((r) => ({ ...r, effective_rank: "", sv_001: "" }));
+  const orphan = deltaRow("lm_head.old.weight", "", "lm_head", "identical", "");
+  const stale = buildWorkbench({ ...REPORT, ranking, delta: [...REPORT.delta, orphan] });
+  assert.equal(stale.deltaUnranked, true);
+  assert.equal(stale.hasDelta, false);
+  assert.equal(stale.hasRankingStats, false);
+  assert.deepEqual(stale.delta, []);
+  assert.equal(stale.tensors.has(orphan.name), false);
+  assert.ok(stale.ranking.every((t) => !t.scanned && t.effectiveRank === null && t.sv1 === null && !t.spectrum.length));
+
+  const mismatches = [
+    { ...REPORT.delta[0], effective_rank: "9" },
+    { ...REPORT.delta[0], shape: "4x16" },
+  ];
+  for (const row of mismatches) {
+    const report = buildWorkbench({ ...REPORT, delta: [row, ...REPORT.delta.slice(1)] });
+    assert.equal(report.deltaUnranked, true);
+    assert.equal(report.tensors.get(row.name).effectiveRank, 1.01);
+    assert.equal(report.hasRankingStats, true);
+    assert.deepEqual(report.measured, []);
+  }
+});
+
+test("a completed ranking without delta keeps its summaries but not spectra", () => {
+  const model = buildWorkbench({ ...REPORT, delta: [] });
+  const tensor = model.tensors.get("model.layers.10.mlp.down_proj.weight");
+  assert.equal(model.hasDelta, false);
+  assert.equal(model.hasRankingStats, true);
+  assert.deepEqual([tensor.effectiveRank, tensor.sv1, tensor.scanned, tensor.spectrum], [6, 0.9, false, []]);
+  assert.equal(tensor.yardstick.median, 1.005);
+});
+
 test("a scan that had nothing to analyse keeps its T3 rows and is not called stale", () => {
   // what the CLI writes for changed conv-shaped down_proj weights: a header-only delta.csv and "not scanned" T3 rows
   const name = "model.layers.0.mlp.down_proj.weight";

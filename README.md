@@ -166,8 +166,9 @@ page, or pick its files.
   groups them: MoE expert and shared-expert down projections count as one.
 - **Inventory:** every tensor by status and kind, with a kind-by-status table that filters the list.
 - **ΔW stats:** effective rank by layer and singular values by kind, in the colours of `effective_rank.png`
-  and `spectra.png`, above a sortable table of `delta.csv`. A folder written with `--inventory-only` has no
-  `delta.csv`; the page says so and still shows the ranking and inventory.
+  and `spectra.png`, above a sortable table of `delta.csv`. Without a compatible `delta.csv`, the workbench
+  still shows the ΔW summaries in `ranking.csv`, if present. An inventory-only rerun can leave an old
+  `delta.csv` in the folder; spectra are hidden if the file disagrees with the current inventory or ranking.
 
 The page reads `pair.txt`, `inventory.csv`, `ranking.csv` and `delta.csv` inside your browser tab and opens
 no other file of the folder. Nothing is uploaded: there is no server-side code, and the page's content

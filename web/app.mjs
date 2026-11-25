@@ -210,16 +210,16 @@ function emptyState(title, ...body) {
   return h('div', { class: 'empty' }, h('h3', null, title), body);
 }
 
-/** Shown wherever ΔW numbers appear when delta.csv is not the scan this ranking was computed from. */
 function staleDeltaNote(model) {
   return model.deltaUnranked && h('p', { class: 'note warning' },
-    h('strong', null, 'This ranking was not computed from this delta.csv. '),
-    'delta.csv has ΔW stats that ranking.csv does not carry, or gives a tensor another status than inventory.csv. '
-    + 'That is what is left when the last run was ',
-    h('code', null, '--inventory-only'), ', which keeps the delta.csv of an earlier run, or stopped during its scan. '
-    + 'The ΔW numbers shown, and the tensors listed as scanned with ΔW = 0, may describe older weights; rerun llmscan without ',
-    h('code', null, '--inventory-only'), ' to refresh them.');
+    h('strong', null, 'Ignored incompatible delta.csv. '),
+    'It does not match this inventory or ranking and may be left over from an earlier run. '
+    + 'The ranking and inventory remain available. Run llmscan without ', h('code', null, '--inventory-only'), ' to refresh the spectra.');
 }
+
+const rankingStatsStatus = (model) => model.hasRankingStats
+  ? 'The ranking includes ΔW summary values (effective rank or σ₁) from ranking.csv.'
+  : 'The ranking includes no ΔW summary values.';
 
 /** A tensor name that wraps after a dot, slash or underscore instead of in the middle of a word. */
 function breakable(name) {
@@ -354,11 +354,8 @@ function rankingView(model) {
   ];
   const columns = [COLUMNS.rank, COLUMNS.tier, COLUMNS.reason, COLUMNS.layer, COLUMNS.kind, COLUMNS.effectiveRank, COLUMNS.sv1];
   return [
-    staleDeltaNote(model),
     !model.hasDelta && h('p', { class: 'note' },
-      h('strong', null, 'No ΔW stats. '),
-      'delta.csv is missing or lists no tensor, so no row here has singular values behind it '
-      + 'and this ranking cannot tell a rank-1 edit from a diffuse one.'),
+      h('strong', null, 'Full ΔW spectra unavailable. '), rankingStatsStatus(model)),
     listing({
       controls,
       results: () => {
@@ -496,11 +493,11 @@ function deltaView(model) {
   const view = state.view.delta;
   state.rows = [];
   if (!model.hasDelta) {
-    return emptyState('No ΔW stats in this report',
-      h('p', null, 'delta.csv is missing or lists no tensor. ', h('code', null, 'llmscan --inventory-only'),
-        ' writes no delta.csv; a scan that finds no 2-D float tensor to analyse, or stops before its first one, writes an empty one.'),
-      h('p', null, 'The ranking and inventory are complete, but no tensor has singular values to compare with the others of its kind. '
-        + 'If the run was inventory-only, rerun llmscan without ', h('code', null, '--inventory-only'), ' on the same pair to add them.'));
+    return emptyState('Full ΔW spectra unavailable',
+      !model.deltaUnranked && h('p', null, 'delta.csv was not included or has no tensor rows.'),
+      h('p', null, rankingStatsStatus(model)),
+      !model.deltaUnranked && h('p', null, 'If this was an inventory-only run, rerun llmscan without ',
+        h('code', null, '--inventory-only'), ' to scan for spectra.'));
   }
   const s = model.deltaSummary;
   const tiles = h('dl', { class: 'tiles' },
@@ -516,7 +513,6 @@ function deltaView(model) {
   const unscanned = model.inventory.filter((t) => !t.scanned);
   const structural = unscanned.filter(isStructural).length;
   return [
-    staleDeltaNote(model),
     tiles,
     unscanned.length > 0 && h('p', { class: 'note' },
       h('strong', null, `${plural(unscanned.length, 'tensor')} of the ${formatCount(model.inventory.length)} compared ${unscanned.length === 1 ? 'is' : 'are'} not in delta.csv`),
@@ -572,20 +568,27 @@ function yardstickFact(t) {
 }
 
 function deltaFacts(model, t) {
-  if (!model.hasDelta) return h('p', null, 'delta.csv is missing or lists no tensor, so no tensor in this report has ΔW stats.');
-  if (!t.scanned) return [staleDeltaNote(model), h('p', null, `Not in delta.csv. ${SCAN_SCOPE}`)];
+  const summaryFacts = () => [
+    fact('Effective rank', formatNumber(t.effectiveRank)),
+    fact('σ₁', formatNumber(t.sv1)),
+  ];
+  if (!t.scanned) {
+    const hasSummary = t.effectiveRank != null || t.sv1 != null;
+    return [
+      staleDeltaNote(model),
+      h('p', null, model.hasDelta ? `Not in delta.csv. ${SCAN_SCOPE}` : 'No spectrum available for this tensor.'),
+      hasSummary && [h('p', { class: 'fine' }, 'ΔW summary from ranking.csv'), h('dl', { class: 'facts' }, summaryFacts(), yardstickFact(t))],
+    ];
+  }
   if (!t.spectrum.length && t.effectiveRank == null) {
-    return [staleDeltaNote(model),
-      h('p', null, t.status === 'identical' ? 'ΔW = 0: identical tensors are listed in delta.csv without stats.' : 'delta.csv lists this tensor without stats.')];
+    return h('p', null, t.status === 'identical' ? 'ΔW = 0: identical tensors are listed in delta.csv without stats.' : 'delta.csv lists this tensor without stats.');
   }
   const kind = canonicalKind(t.kind);
   const peers = model.measured.filter((p) => canonicalKind(p.kind) === kind && p !== t && hasSpectrum(p));
   const drawn = spectrumRuns(t.spectrum).flat().length;
   return [
-    staleDeltaNote(model),
     h('dl', { class: 'facts' },
-      fact('Effective rank', formatNumber(t.effectiveRank)),
-      fact('σ₁', formatNumber(t.sv1)),
+      summaryFacts(),
       fact('σ₁ / σ₂', formatNumber(t.gap)),
       yardstickFact(t)),
     drawn > 0 && h('figure', null, tensorSpectrumChart(t, peers, PALETTE.ink),
@@ -682,7 +685,7 @@ function renderPanel() {
   state.refresh = null;
   state.redrawCharts = null;
   panel.setAttribute('aria-labelledby', `tab-${state.tab}`);
-  keepFocus(panel, () => panel.replaceChildren(...[VIEWS[state.tab](state.model)].flat(Infinity).filter(Boolean)));
+  keepFocus(panel, () => panel.replaceChildren(...[staleDeltaNote(state.model), VIEWS[state.tab](state.model)].flat(Infinity).filter(Boolean)));
   for (const tab of main.querySelectorAll('[role="tab"]')) {
     const active = tab.id === `tab-${state.tab}`;
     tab.setAttribute('aria-selected', String(active));

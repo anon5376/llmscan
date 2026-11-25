@@ -114,6 +114,22 @@ function blankTensor(name) {
   };
 }
 
+const hasStats = (row) => row?.effectiveRank != null || row?.sv1 != null;
+
+function deltaDisagrees(rows, tensors, ranking) {
+  if (!rows.length) return false;
+  // An inventory-only rerun leaves the prior delta.csv untouched. Check the current inventory and
+  // both summary columns before joining, so an incompatible scan cannot supply any tensor facts.
+  const seen = new Set();
+  for (const row of rows) {
+    const t = tensors.get(row.name);
+    if (!t || t.status !== row.status || t.kind !== row.kind || t.layer !== parseNumber(row.layer) || t.baseShape !== row.shape) return true;
+    if (!Object.is(t.effectiveRank, parseNumber(row.effective_rank)) || !Object.is(t.sv1, parseNumber(row.sv_001))) return true;
+    seen.add(row.name);
+  }
+  return ranking.some((t) => hasStats(t) && !seen.has(t.name));
+}
+
 /**
  * Join the three tables by tensor name into one record per tensor.
  * `ranking` keeps the CLI's order, `inventory` the inventory's, `delta` the scan's.
@@ -136,37 +152,27 @@ export function buildWorkbench(report) {
     numel: parseNumber(row.numel),
   }));
 
-  const delta = (report.delta ?? []).map((row) => {
-    const spectrum = spectrumOf(row);
-    return Object.assign(tensor(row), {
-      scanned: true,
-      baseShape: tensors.get(row.name ?? '').baseShape || (row.shape ?? ''),
-      effectiveRank: parseNumber(row.effective_rank),
-      sv1: spectrum[0] ?? null,
-      spectrum,
-      gap: usable(spectrum[0]) && usable(spectrum[1]) ? spectrum[0] / spectrum[1] : null,
-      seconds: parseNumber(row.seconds),
-    });
-  });
-
   const ranking = (report.ranking ?? []).map((row, i) => {
     const t = tensor(row);
     t.rank = parseNumber(row.rank) ?? i + 1;
     t.tier = row.tier ?? '';
     t.reason = row.reason ?? '';
-    t.effectiveRank ??= parseNumber(row.effective_rank);
-    t.sv1 ??= parseNumber(row.sv_001);
+    t.effectiveRank = parseNumber(row.effective_rank);
+    t.sv1 = parseNumber(row.sv_001);
     return t;
   });
 
-  // Every run rewrites inventory.csv and ranking.csv, but only a scan rewrites delta.csv. A scan copies each
-  // tensor's status from the inventory, and the ranking computed from it lists every tensor it has stats for,
-  // with them. A row that breaks either rule means this delta.csv is not the one the ranking was computed from.
-  const hasStats = (row) => (row.effective_rank ?? '') !== '' || (row.sv_001 ?? '') !== '';
-  const rankedWithStats = new Set((report.ranking ?? []).filter(hasStats).map((row) => row.name));
-  const inventoryStatus = new Map((report.inventory ?? []).map((row) => [row.name, row.status]));
-  const deltaUnranked = (report.delta ?? []).some((row) =>
-    (hasStats(row) && !rankedWithStats.has(row.name)) || inventoryStatus.get(row.name) !== row.status);
+  const deltaRows = report.delta ?? [];
+  const deltaUnranked = deltaDisagrees(deltaRows, tensors, ranking);
+  const delta = (deltaUnranked ? [] : deltaRows).map((row) => {
+    const spectrum = spectrumOf(row);
+    return Object.assign(tensors.get(row.name), {
+      scanned: true,
+      spectrum,
+      gap: usable(spectrum[0]) && usable(spectrum[1]) ? spectrum[0] / spectrum[1] : null,
+      seconds: parseNumber(row.seconds),
+    });
+  });
 
   const tierCounts = new Map(TIERS.map((t) => [t.id, 0]));
   for (const t of ranking) tierCounts.set(t.tier, (tierCounts.get(t.tier) ?? 0) + 1);
@@ -213,7 +219,7 @@ export function buildWorkbench(report) {
     base: report.base ?? '', suspect: report.suspect ?? '',
     baseName: shortName(report.base) || 'base', suspectName: shortName(report.suspect) || 'suspect',
     tensors, inventory, ranking, delta,
-    hasDelta: delta.length > 0, deltaUnranked,
+    hasDelta: delta.length > 0, deltaUnranked, hasRankingStats: ranking.some(hasStats),
     tierCounts, statusCounts, statuses,
     kinds: [...kinds.values()].sort((a, b) => changedOf(b) - changedOf(a) || naturalCompare(a.kind, b.kind)),
     totalParams, identicalParams,
